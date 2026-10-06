@@ -1,0 +1,455 @@
+{
+  "comment": "Cross-language schema-digest vectors for the V6 protocol. Both the TypeScript client (schema-v6/digest-vectors.test.ts) and the C++ tests (tests/io/test_io_schema.cpp) reconstruct these graphs independently and must produce the listed BLAKE3 digests of the canonical descriptor. Do not edit digests by hand: recompute with the TypeScript builder and confirm the C++ test still passes.",
+  "vectors": [
+    {
+      "name": "scalar-u32",
+      "root": "counter",
+      "digest": "30a0601a31662c4c2475fd6f379dd015e242fb1b4d1801c164928ed05015c01a",
+      "nodes": [
+        {
+          "label": "counter",
+          "key": "00000000000000000000000000000001",
+          "revision": 1,
+          "kind": 1,
+          "flags": 0,
+          "name": "Counter",
+          "description": "",
+          "annotations": {},
+          "scalarType": 3,
+          "maxBytes": 0,
+          "fixedCount": 0,
+          "minCount": 0,
+          "maxCount": 0,
+          "structEncoding": 1,
+          "fields": [],
+          "oneOfMembers": []
+        }
+      ]
+    },
+    {
+      "name": "annotated-utf8-string",
+      "root": "label",
+      "digest": "8552872e497106262afbf1b6ce4fc4eeed8dfdb067238c7ab07ce53f82c74347",
+      "nodes": [
+        {
+          "label": "label",
+          "key": "00000000000000000000000000000002",
+          "revision": 3,
+          "kind": 2,
+          "flags": 0,
+          "name": "Label \u03b1",
+          "description": "UTF-8 annotation ordering",
+          "annotations": {
+            "Z-last": "1",
+            "a-first": "2",
+            "unit": "mm"
+          },
+          "scalarType": 13,
+          "maxBytes": 64,
+          "fixedCount": 0,
+          "minCount": 0,
+          "maxCount": 0,
+          "structEncoding": 1,
+          "fields": [],
+          "oneOfMembers": []
+        }
+      ]
+    },
+    {
+      "name": "bounded-dyn-array",
+      "root": "samples",
+      "digest": "c7d65db615f35021f3a808e697e636a0e527ec369f0360eeb03df69489017e12",
+      "nodes": [
+        {
+          "label": "i16",
+          "key": "00000000000000000000000000000010",
+          "revision": 1,
+          "kind": 1,
+          "flags": 0,
+          "name": "",
+          "description": "",
+          "annotations": {},
+          "scalarType": 6,
+          "maxBytes": 0,
+          "fixedCount": 0,
+          "minCount": 0,
+          "maxCount": 0,
+          "structEncoding": 1,
+          "fields": [],
+          "oneOfMembers": []
+        },
+        {
+          "label": "samples",
+          "key": "00000000000000000000000000000011",
+          "revision": 1,
+          "kind": 7,
+          "flags": 0,
+          "name": "Samples",
+          "description": "",
+          "annotations": {},
+          "scalarType": 13,
+          "maxBytes": 0,
+          "fixedCount": 0,
+          "minCount": 1,
+          "maxCount": 64,
+          "structEncoding": 1,
+          "element": "i16",
+          "fields": [],
+          "oneOfMembers": []
+        }
+      ]
+    },
+    {
+      "name": "map-string-to-u32",
+      "root": "lookup",
+      "digest": "95696de9b778b1a4a4afefeb501f8d8c7b6fbbf9f15143a78c349ee31197ef08",
+      "nodes": [
+        {
+          "label": "key-str",
+          "key": "00000000000000000000000000000020",
+          "revision": 1,
+          "kind": 2,
+          "flags": 0,
+          "name": "",
+          "description": "",
+          "annotations": {},
+          "scalarType": 13,
+          "maxBytes": 32,
+          "fixedCount": 0,
+          "minCount": 0,
+          "maxCount": 0,
+          "structEncoding": 1,
+          "fields": [],
+          "oneOfMembers": []
+        },
+        {
+          "label": "val-u32",
+          "key": "00000000000000000000000000000021",
+          "revision": 1,
+          "kind": 1,
+          "flags": 0,
+          "name": "",
+          "description": "",
+          "annotations": {},
+          "scalarType": 3,
+          "maxBytes": 0,
+          "fixedCount": 0,
+          "minCount": 0,
+          "maxCount": 0,
+          "structEncoding": 1,
+          "fields": [],
+          "oneOfMembers": []
+        },
+        {
+          "label": "lookup",
+          "key": "00000000000000000000000000000022",
+          "revision": 1,
+          "kind": 9,
+          "flags": 0,
+          "name": "Lookup",
+          "description": "",
+          "annotations": {},
+          "scalarType": 13,
+          "maxBytes": 0,
+          "fixedCount": 0,
+          "minCount": 0,
+          "maxCount": 128,
+          "structEncoding": 1,
+          "mapKey": "key-str",
+          "mapValue": "val-u32",
+          "fields": [],
+          "oneOfMembers": []
+        }
+      ]
+    },
+    {
+      "name": "struct-tagged-with-restrictions",
+      "root": "config",
+      "digest": "9cf8cb945fa4b034896e3601645f827dd521e1aad4e4334de6659d8dea7a5037",
+      "nodes": [
+        {
+          "label": "u32",
+          "key": "00000000000000000000000000000030",
+          "revision": 1,
+          "kind": 1,
+          "flags": 0,
+          "name": "",
+          "description": "",
+          "annotations": {},
+          "scalarType": 3,
+          "maxBytes": 0,
+          "fixedCount": 0,
+          "minCount": 0,
+          "maxCount": 0,
+          "structEncoding": 1,
+          "fields": [],
+          "oneOfMembers": []
+        },
+        {
+          "label": "name",
+          "key": "00000000000000000000000000000031",
+          "revision": 1,
+          "kind": 2,
+          "flags": 0,
+          "name": "",
+          "description": "",
+          "annotations": {},
+          "scalarType": 13,
+          "maxBytes": 48,
+          "fixedCount": 0,
+          "minCount": 0,
+          "maxCount": 0,
+          "structEncoding": 1,
+          "fields": [],
+          "oneOfMembers": []
+        },
+        {
+          "label": "config",
+          "key": "00000000000000000000000000000032",
+          "revision": 2,
+          "kind": 5,
+          "flags": 0,
+          "name": "Config",
+          "description": "",
+          "annotations": {
+            "machine.profile": "test"
+          },
+          "scalarType": 13,
+          "maxBytes": 0,
+          "fixedCount": 0,
+          "minCount": 0,
+          "maxCount": 0,
+          "structEncoding": 2,
+          "fields": [
+            {
+              "key": 1,
+              "flags": 0,
+              "presence": 1,
+              "schema": "u32",
+              "name": "rate",
+              "description": "",
+              "restrictions": [
+                {
+                  "kind": 1,
+                  "payload": "01000000000110270000"
+                }
+              ],
+              "defaultValue": ""
+            },
+            {
+              "key": 2,
+              "flags": 0,
+              "presence": 2,
+              "schema": "name",
+              "name": "label",
+              "description": "",
+              "restrictions": [],
+              "defaultValue": "6e616d6500"
+            }
+          ],
+          "oneOfMembers": []
+        }
+      ]
+    },
+    {
+      "name": "oneof-and-alias",
+      "root": "root",
+      "digest": "fce3b894dfec724b080d742b12d07277d58a8689aae56b11a8371d44e7e0643c",
+      "nodes": [
+        {
+          "label": "u32",
+          "key": "00000000000000000000000000000040",
+          "revision": 1,
+          "kind": 1,
+          "flags": 0,
+          "name": "",
+          "description": "",
+          "annotations": {},
+          "scalarType": 3,
+          "maxBytes": 0,
+          "fixedCount": 0,
+          "minCount": 0,
+          "maxCount": 0,
+          "structEncoding": 1,
+          "fields": [],
+          "oneOfMembers": []
+        },
+        {
+          "label": "f64",
+          "key": "00000000000000000000000000000041",
+          "revision": 1,
+          "kind": 1,
+          "flags": 0,
+          "name": "",
+          "description": "",
+          "annotations": {},
+          "scalarType": 10,
+          "maxBytes": 0,
+          "fixedCount": 0,
+          "minCount": 0,
+          "maxCount": 0,
+          "structEncoding": 1,
+          "fields": [],
+          "oneOfMembers": []
+        },
+        {
+          "label": "alias-u32",
+          "key": "00000000000000000000000000000042",
+          "revision": 1,
+          "kind": 11,
+          "flags": 0,
+          "name": "AliasU32",
+          "description": "",
+          "annotations": {},
+          "scalarType": 13,
+          "maxBytes": 0,
+          "fixedCount": 0,
+          "minCount": 0,
+          "maxCount": 0,
+          "structEncoding": 1,
+          "target": "u32",
+          "fields": [],
+          "oneOfMembers": []
+        },
+        {
+          "label": "root",
+          "key": "00000000000000000000000000000043",
+          "revision": 1,
+          "kind": 10,
+          "flags": 0,
+          "name": "Choice",
+          "description": "",
+          "annotations": {},
+          "scalarType": 13,
+          "maxBytes": 0,
+          "fixedCount": 0,
+          "minCount": 0,
+          "maxCount": 0,
+          "structEncoding": 1,
+          "fields": [],
+          "oneOfMembers": [
+            {
+              "key": 1,
+              "schema": "alias-u32"
+            },
+            {
+              "key": 5,
+              "schema": "f64"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "struct-packed-optional-and-array",
+      "root": "snapshot",
+      "digest": "69964085564112dc1a8f28c1476e914df3492a5f57b354c6fe1c883424142610",
+      "nodes": [
+        {
+          "label": "u8",
+          "key": "00000000000000000000000000000050",
+          "revision": 1,
+          "kind": 1,
+          "flags": 0,
+          "name": "",
+          "description": "",
+          "annotations": {},
+          "scalarType": 1,
+          "maxBytes": 0,
+          "fixedCount": 0,
+          "minCount": 0,
+          "maxCount": 0,
+          "structEncoding": 1,
+          "fields": [],
+          "oneOfMembers": []
+        },
+        {
+          "label": "vec4",
+          "key": "00000000000000000000000000000051",
+          "revision": 1,
+          "kind": 6,
+          "flags": 0,
+          "name": "",
+          "description": "",
+          "annotations": {},
+          "scalarType": 13,
+          "maxBytes": 0,
+          "fixedCount": 4,
+          "minCount": 0,
+          "maxCount": 0,
+          "structEncoding": 1,
+          "element": "u8",
+          "fields": [],
+          "oneOfMembers": []
+        },
+        {
+          "label": "maybe-vec",
+          "key": "00000000000000000000000000000052",
+          "revision": 1,
+          "kind": 8,
+          "flags": 0,
+          "name": "",
+          "description": "",
+          "annotations": {},
+          "scalarType": 13,
+          "maxBytes": 0,
+          "fixedCount": 0,
+          "minCount": 0,
+          "maxCount": 0,
+          "structEncoding": 1,
+          "element": "vec4",
+          "fields": [],
+          "oneOfMembers": []
+        },
+        {
+          "label": "snapshot",
+          "key": "00000000000000000000000000000053",
+          "revision": 7,
+          "kind": 5,
+          "flags": 0,
+          "name": "Snapshot",
+          "description": "",
+          "annotations": {},
+          "scalarType": 13,
+          "maxBytes": 0,
+          "fixedCount": 0,
+          "minCount": 0,
+          "maxCount": 0,
+          "structEncoding": 1,
+          "fields": [
+            {
+              "key": 1,
+              "flags": 0,
+              "presence": 1,
+              "schema": "maybe-vec",
+              "name": "vec",
+              "description": "",
+              "restrictions": [],
+              "defaultValue": ""
+            },
+            {
+              "key": 2,
+              "flags": 0,
+              "presence": 1,
+              "schema": "u8",
+              "name": "state",
+              "description": "",
+              "restrictions": [
+                {
+                  "kind": 2,
+                  "payload": "04"
+                },
+                {
+                  "kind": 5,
+                  "payload": "0201010102"
+                }
+              ],
+              "defaultValue": ""
+            }
+          ],
+          "oneOfMembers": []
+        }
+      ]
+    }
+  ]
+}
