@@ -10,6 +10,7 @@
 import { html, LitElement, nothing, TemplateResult } from 'lit';
 import { DataHub } from '../data/hub';
 import './fbd-canvas';
+import { CtlError, PlcCtl, ProgStatus, RtStatus } from './ctl';
 import { Pou } from './model';
 import { exportFbdJson, importFbdJson, loadProject, PlcProject, saveProject } from './store';
 
@@ -33,12 +34,24 @@ export class TetherPlcIde extends LitElement {
     selPou: { state: true },
     selNet: { state: true },
     status: { state: true },
+    ctlOk: { state: true },
+    ctlErr: { state: true },
+    prog: { state: true },
+    rt: { state: true },
+    deployFrac: { state: true },
   };
 
   declare pane: Pane;
   declare selPou: string;
   declare selNet: number;
   declare status: string;
+  declare ctlOk?: boolean;
+  declare ctlErr: string;
+  declare prog?: ProgStatus;
+  declare rt?: RtStatus;
+  declare deployFrac?: number;
+
+  private ctl = new PlcCtl();
 
   private project: PlcProject = loadProject();
   private unsubs: (() => void)[] = [];
@@ -50,6 +63,7 @@ export class TetherPlcIde extends LitElement {
     this.selPou = '';
     this.selNet = 0;
     this.status = '';
+    this.ctlErr = '';
   }
 
   createRenderRoot(): this {
@@ -196,7 +210,10 @@ export class TetherPlcIde extends LitElement {
             (p) => html`
               <button
                 class="plc-nav-btn ${this.pane === p.id ? 'active' : ''}"
-                @click=${() => (this.pane = p.id)}
+                @click=${() => {
+                  this.pane = p.id;
+                  if (p.id === 'deploy') void this.refreshCtl();
+                }}
               >
                 ${p.label}
               </button>
@@ -492,27 +509,150 @@ export class TetherPlcIde extends LitElement {
   // ---- deploy --------------------------------------------------------
 
   private deployPane(): TemplateResult {
-    const hub = this.hub;
+    const ctl = this.ctl;
     return html`
       <div class="tile-scroll">
         <h3>Deploy</h3>
-        <p>
-          Project: <b>${this.project.fbd.project}</b> · ${this.project.fbd.pous.length} POUs ·
-          ${this.project.fbd.tasks.length} tasks
-        </p>
+        <div class="plc-ctlbar">
+          ctl proxy
+          <input
+            class="fbd-in wide"
+            .value=${ctl.url}
+            @change=${(e: Event) => this.setCtlUrl((e.target as HTMLInputElement).value)}
+          />
+          <button class="chip-btn" @click=${this.refreshCtl}>refresh</button>
+          ${
+            this.ctlOk === undefined
+              ? nothing
+              : html`<span class="${this.ctlOk ? 'plc-ok' : 'fbd-warn'}"
+                  >${this.ctlOk ? 'connected' : 'unreachable'}</span
+                >`
+          }
+        </div>
+        ${this.ctlErr ? html`<p class="fbd-warn">${this.ctlErr}</p>` : nothing}
+        <div class="plc-ops">
+          <input type="file" id="plc-pkg" accept=".tplc" hidden @change=${this.onPkgFile} />
+          <button
+            class="chip-btn"
+            @click=${() => this.querySelector<HTMLInputElement>('#plc-pkg')?.click()}
+          >
+            deploy .tplc…
+          </button>
+          <button class="chip-btn" @click=${() => this.ctlOp('start', () => ctl.progStart())}>
+            start
+          </button>
+          <button class="chip-btn" @click=${() => this.ctlOp('stop', () => ctl.progStop())}>
+            stop
+          </button>
+          <button class="chip-btn" @click=${() => this.ctlOp('rollback', () => ctl.progRollback())}>
+            rollback
+          </button>
+          ${
+            this.deployFrac !== undefined
+              ? html`<span class="plc-dim">uploading ${(this.deployFrac * 100).toFixed(0)}%</span>`
+              : nothing
+          }
+        </div>
+        ${this.prog ? this.progTable(this.prog) : nothing}
+        ${this.rt ? html`<p class="plc-dim">rt: up ${this.rt.uptimeS}s · ${this.rt.progCount} progs (${this.rt.runningCount} running) · master ${this.rt.masterStatus} plc ${this.rt.plcStatus}</p>` : nothing}
         <p class="plc-dim">
-          Deploy uses the tether-plc control channel via a WebSocket proxy that is not wired yet.
-          Online change (state-preserving swap), quarantine, and rollback ops surface here once the
-          proxy exists.
+          Requires <code>tplc-ctl-proxy</code> running on the plc host. Online-change
+          (state-preserving swap + rollback) is live through PROG_SWAP / PROG_ROLLBACK.
         </p>
-        ${
-          hub
-            ? html`<p class="plc-dim">Machine connected — ctl ops will route through this link.</p>`
-            : html`<p class="plc-dim">No machine connection.</p>`
-        }
       </div>
     `;
   }
+
+  private progTable(p: ProgStatus): TemplateResult {
+    return html`
+      <h4>
+        program ${p.name}
+        <span class="plc-dim"
+          >${['stopped', 'running', 'fault'][p.state] ?? p.state} · ${p.cycles} cycles</span
+        >
+      </h4>
+      <table class="plc-table">
+        <thead>
+          <tr>
+            <th>task</th>
+            <th>state</th>
+            <th>period</th>
+            <th>runs</th>
+            <th>late</th>
+            <th>faults</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${p.tasks.map(
+            (t) =>
+              html`<tr>
+                <td>${t.name}</td>
+                <td>${t.state}</td>
+                <td>${Number(t.periodNs) / 1e6} ms</td>
+                <td>${t.runs}</td>
+                <td>${t.late}</td>
+                <td>${t.faults}</td>
+              </tr>`,
+          )}
+        </tbody>
+      </table>
+    `;
+  }
+
+  private setCtlUrl(url: string): void {
+    this.ctl = new PlcCtl(url);
+    localStorage.setItem('tether.plc.ctlUrl', url);
+    this.refreshCtl();
+  }
+
+  private refreshCtl = async (): Promise<void> => {
+    this.ctlOk = await this.ctl.health();
+    this.ctlErr = '';
+    if (this.ctlOk) {
+      try {
+        [this.prog, this.rt] = await Promise.all([
+          this.ctl.progStatus().catch(() => undefined),
+          this.ctl.rtStatus().catch(() => undefined),
+        ]);
+      } catch (e) {
+        this.ctlErr = e instanceof Error ? e.message : String(e);
+      }
+    }
+    this.requestUpdate();
+  };
+
+  private ctlOp = async (name: string, op: () => Promise<unknown>): Promise<void> => {
+    try {
+      await op();
+      this.ctlErr = '';
+      await this.refreshCtl();
+    } catch (e) {
+      this.ctlErr = `${name}: ${e instanceof CtlError ? e.message : e}`;
+      this.requestUpdate();
+    }
+  };
+
+  private onPkgFile = async (e: Event): Promise<void> => {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (!file) return;
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    this.deployFrac = 0;
+    this.requestUpdate();
+    try {
+      const uuid = await this.ctl.deploy(bytes, 0, (f) => {
+        this.deployFrac = f;
+        this.requestUpdate();
+      });
+      this.ctlErr = '';
+      this.flash(`deployed ${file.name} → ${uuid.slice(0, 8)}`);
+      await this.refreshCtl();
+    } catch (e2) {
+      this.ctlErr = `deploy: ${e2 instanceof Error ? e2.message : e2}`;
+    } finally {
+      this.deployFrac = undefined;
+      this.requestUpdate();
+    }
+  };
 }
 
 customElements.define('tether-plc-ide', TetherPlcIde);

@@ -146,7 +146,6 @@ export class FbdCanvas extends LitElement {
 
   private addBlock(kind: Block['kind'], typeRef: string, role?: Block['role']): void {
     this.mutate((net) => {
-      const used = new Set<number>();
       const maxX = net.blocks.reduce((m, b) => Math.max(m, b.pos.x), 0);
       net.blocks.push({
         id: nextNodeId(this.pou!),
@@ -158,9 +157,8 @@ export class FbdCanvas extends LitElement {
         negated: [],
         comment: '',
         ...(role ? { role } : {}),
-        ...(kind === 'variable' ? { name: `v${used.size + net.blocks.length}` } : {}),
+        ...(kind === 'variable' ? { name: `v${net.blocks.length}` } : {}),
       });
-      void used;
     });
   }
 
@@ -604,8 +602,8 @@ export class FbdCanvas extends LitElement {
         <input
           class="fbd-in wide"
           .value=${Object.entries(b.params)
-          .map(([k, v]) => `${k}=${v}`)
-          .join(' ')}
+            .map(([k, v]) => `${k}=${v}`)
+            .join(' ')}
           placeholder="PT=T#200ms"
           @change=${(e: Event) =>
             set((x) => {
