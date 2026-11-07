@@ -13,7 +13,9 @@ import './fbd-canvas';
 import './st-editor';
 import { CtlError, PlcCtl, ProgStatus, RtStatus } from './ctl';
 import { Pou } from './model';
+import { entryWritable, writeScalar } from './mon';
 import { exportPlcopenXml, importPlcopenXml } from './plcopen';
+import type { CatalogEntry } from '../protocol';
 import { exportFbdJson, importFbdJson, loadProject, PlcProject, saveProject } from './store';
 
 type Pane = 'explorer' | 'st' | 'fbd' | 'tasks' | 'watch' | 'deploy';
@@ -105,13 +107,15 @@ export class TetherPlcIde extends LitElement {
     this.rebind();
   }
 
-  /** Bind every plc.* signal so the hub polls it; values land in hub.values. */
+  /** Bind every plc.* entry so the hub polls it; values land in hub.values. */
   private rebind(): void {
     this.bindingRelease?.();
     this.bindingRelease = undefined;
     const hub = this.hub;
     if (!hub) return;
-    const keys = hub.signals.filter((e) => e.name.startsWith('plc.')).map((e) => e.name);
+    const keys = [...hub.params, ...hub.signals]
+      .filter((e) => e.name.startsWith('plc.'))
+      .map((e) => e.name);
     if (keys.length) this.bindingRelease = hub.acquireBindings(keys);
   }
 
@@ -210,6 +214,24 @@ export class TetherPlcIde extends LitElement {
   private onStEdit(pou: Pou, text: string): void {
     this.project.stSources[pou.name] = text;
     this.save();
+  }
+
+  /** Write a scalar value to a writable catalog param (the force path). */
+  private async onForce(entry: CatalogEntry, input: HTMLInputElement): Promise<void> {
+    const hub = this.hub;
+    if (!hub) return;
+    const v = Number(input.value.trim());
+    if (!Number.isFinite(v)) {
+      this.flash(`${entry.name}: not a number`);
+      return;
+    }
+    try {
+      await writeScalar(hub.client, entry, v);
+      input.value = '';
+      this.flash(`${entry.name} := ${v}`);
+    } catch (e) {
+      this.flash(`write failed: ${e instanceof Error ? e.message : e}`);
+    }
   }
 
   // ---- render --------------------------------------------------------
@@ -434,6 +456,7 @@ export class TetherPlcIde extends LitElement {
           .pou=${pou}
           .netIndex=${this.selNet}
           .pous=${this.project.fbd.pous}
+          .values=${this.hub ? new Map(this.hub.values) : undefined}
           @change=${() => this.save()}
         ></fbd-canvas>
       </div>
@@ -530,6 +553,7 @@ export class TetherPlcIde extends LitElement {
                         <th>name</th>
                         <th>kind</th>
                         <th>value</th>
+                        <th>force</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -539,6 +563,32 @@ export class TetherPlcIde extends LitElement {
                             <td>${e.name}</td>
                             <td>${e.kind}</td>
                             <td>${hub.values.get(e.name) ?? '—'}</td>
+                            <td>
+                              ${
+                                entryWritable(e)
+                                  ? html`<input
+                                        class="fbd-in plc-force-in"
+                                        placeholder="val"
+                                        @keydown=${(ev: KeyboardEvent) => {
+                                        if (ev.key === 'Enter') {
+                                          this.onForce(e, ev.target as HTMLInputElement);
+                                        }
+                                      }}
+                                      />
+                                      <button
+                                        class="chip-btn"
+                                        @click=${(ev: Event) =>
+                                        this.onForce(
+                                          e,
+                                          (ev.target as HTMLElement)
+                                            .previousElementSibling as HTMLInputElement,
+                                        )}
+                                      >
+                                        set
+                                      </button>`
+                                  : nothing
+                              }
+                            </td>
                           </tr>
                         `,
                       )}

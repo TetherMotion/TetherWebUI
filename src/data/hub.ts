@@ -624,7 +624,7 @@ export class DataHub extends EventTarget {
 
   private async pollBoundValues(): Promise<void> {
     if (!this.connected || !this.boundKeys.size) return;
-    const byName = new Map(this.signals.map((s) => [s.name, s]));
+    const byName = new Map([...this.params, ...this.signals].map((s) => [s.name, s]));
     let changed = false;
     for (const key of this.boundKeys) {
       const [entryName, field] = splitKey(key);

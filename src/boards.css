@@ -1184,6 +1184,21 @@ tile-frame {
   pointer-events: none;
 }
 
+.fbd-live {
+  font-size: 9px;
+  font-weight: 600;
+  fill: var(--mint);
+  text-anchor: middle;
+  pointer-events: none;
+  paint-order: stroke;
+  stroke: var(--plot-bg);
+  stroke-width: 3px;
+}
+
+.plc-force-in {
+  width: 5ch;
+}
+
 .fbd-pin {
   fill: var(--plot-bg);
   stroke: var(--text-muted);

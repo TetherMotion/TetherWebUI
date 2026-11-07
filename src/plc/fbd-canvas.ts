@@ -13,6 +13,7 @@
  */
 import { html, LitElement, nothing, svg, TemplateResult } from 'lit';
 import { Assoc, Block, Network, PortSel, Pou, Wire, nextNodeId, portLabel } from './model';
+import { probeKeys, resolveKey, varKeys } from './mon';
 import { blockSig, inIndex, opRequiredIns, outIndex } from './sigs';
 
 const GX = 14; // px per grid unit
@@ -64,12 +65,16 @@ export class FbdCanvas extends LitElement {
     pou: { attribute: false },
     netIndex: { type: Number },
     pous: { attribute: false },
+    values: { attribute: false },
     selIds: { state: true },
     selWire: { state: true },
     pending: { state: true },
     marquee: { state: true },
     vb: { state: true },
   };
+
+  /** polled catalog values for live overlays (key = catalog name). */
+  declare values?: Map<string, unknown>;
 
   declare selIds: Set<number>;
   declare selWire?: number;
@@ -808,12 +813,23 @@ export class FbdCanvas extends LitElement {
       b.kind === 'variable'
         ? b.name || b.at || 'var'
         : `${b.type_ref}${b.instance ? ` (${b.instance})` : ''}`;
+    const live =
+      b.kind === 'variable' && this.values && this.pou
+        ? resolveKey(varKeys(this.pou, b), this.values)
+        : undefined;
     return svg`
       <g class="fbd-block ${sel ? 'sel' : ''}" transform="translate(${x} ${y})"
          @pointerdown=${(e: PointerEvent) => this.onBlockDown(e, b)}>
         <rect class="fbd-rect" width="${w}" height="${h}" rx="3"></rect>
         <text class="fbd-title" x="${w / 2}" y="13">${title}</text>
         ${b.at ? svg`<text class="fbd-at" x="${w / 2}" y="${h - 4}">${b.at}</text>` : nothing}
+        ${
+          live !== undefined
+            ? svg`<text class="fbd-live" x="${w / 2}" y="${h - 14}">${String(
+                this.values!.get(live),
+              )}</text>`
+            : nothing
+        }
         ${ins.map(
           (pn, i) => svg`
             <circle class="fbd-pin in" cx="0" cy="${ROW + i * ROW + ROW / 2}" r="${PIN_R}"
@@ -841,6 +857,10 @@ export class FbdCanvas extends LitElement {
     const si = outIndex(sb, w.src.port, this.pous);
     const from = this.outPinPos(sb, Math.max(0, si));
     const sel = this.selWire === w.id;
+    const live =
+      w.probe && this.values && this.pou
+        ? resolveKey(probeKeys(this.pou, w.id), this.values)
+        : undefined;
     return svg`
       <g class="fbd-wire ${sel ? 'sel' : ''} ${w.probe ? 'probe' : ''}"
          @pointerdown=${(e: PointerEvent) => {
@@ -848,6 +868,13 @@ export class FbdCanvas extends LitElement {
            this.selIds = new Set();
            e.stopPropagation();
          }}>
+        ${
+          live !== undefined
+            ? svg`<text class="fbd-live" x="${from.x + 8}" y="${from.y - 5}">${String(
+                this.values!.get(live),
+              )}</text>`
+            : nothing
+        }
         ${w.dsts.map((d) => {
           const db = net.blocks.find((b) => b.id === d.block);
           if (!db) return nothing;
