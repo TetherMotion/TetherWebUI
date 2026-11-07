@@ -1229,6 +1229,12 @@ tile-frame {
   stroke-dasharray: 4 3;
 }
 
+.fbd-marquee {
+  fill: color-mix(in srgb, var(--blue) 12%, transparent);
+  stroke: var(--blue);
+  stroke-dasharray: 4 3;
+}
+
 .fbd-note {
   fill: var(--accent-glow);
   stroke: var(--glass-border);

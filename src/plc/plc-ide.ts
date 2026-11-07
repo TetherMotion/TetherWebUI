@@ -409,8 +409,25 @@ export class TetherPlcIde extends LitElement {
     return html`
       <div class="plc-fbd-pane">
         <div class="plc-fbd-head">
-          <b>${pou.name}</b> · net ${this.selNet + 1}${net.label ? ` — ${net.label}` : ''}
+          <b>${pou.name}</b> · net ${this.selNet + 1} of
+          ${pou.networks.length}${net.label ? ` — ${net.label}` : ''}
           <span class="spacer"></span>
+          <button
+            class="chip-btn"
+            title="Move network earlier (runs first)"
+            ?disabled=${this.selNet === 0}
+            @click=${() => this.moveNetwork(pou, -1)}
+          >
+            ◀
+          </button>
+          <button
+            class="chip-btn"
+            title="Move network later (runs after)"
+            ?disabled=${this.selNet >= pou.networks.length - 1}
+            @click=${() => this.moveNetwork(pou, 1)}
+          >
+            ▶
+          </button>
           <button class="chip-btn" @click=${() => this.addNetwork(pou)}>+ network</button>
         </div>
         <fbd-canvas
@@ -421,6 +438,17 @@ export class TetherPlcIde extends LitElement {
         ></fbd-canvas>
       </div>
     `;
+  }
+
+  /** Reorder networks — execution follows array order. */
+  private moveNetwork(pou: Pou, dir: -1 | 1): void {
+    const i = this.selNet;
+    const j = i + dir;
+    if (j < 0 || j >= pou.networks.length) return;
+    const [n] = pou.networks.splice(i, 1);
+    pou.networks.splice(j, 0, n!);
+    this.selNet = j;
+    this.save();
   }
 
   private addNetwork(pou: Pou): void {

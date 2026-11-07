@@ -1,14 +1,15 @@
 /**
  * <fbd-canvas> — SVG canvas for one FBD network.
  *
- * Grid-snapped integer positions (fbd.v1 Pos), block drag, port-snap
- * wiring (click an out-pin then an in-pin), shift-click pin negation,
- * selection + delete, undo/redo snapshots, pan (background drag) and
- * wheel zoom. Mutations edit the network in place and emit `change`
- * for the host to persist.
+ * Grid-snapped integer positions (fbd.v1 Pos), block/group drag,
+ * port-snap wiring (click an out-pin then an in-pin), shift-click pin
+ * negation, marquee + shift multi-select, copy/paste/duplicate,
+ * align, delete, undo/redo snapshots, middle/ctrl-drag pan and wheel
+ * zoom. Mutations edit the network in place and emit `change` for the
+ * host to persist.
  *
- * Not yet: box select, align/distribute, copy/paste, comment/label
- * editing UI, wire-end reconnect, network reorder.
+ * Not yet: comment/label editing UI, wire-end reconnect, clipboard
+ * across networks.
  */
 import { html, LitElement, nothing, svg, TemplateResult } from 'lit';
 import { Assoc, Block, Network, PortSel, Pou, Wire, nextNodeId, portLabel } from './model';
@@ -18,13 +19,9 @@ const GX = 14; // px per grid unit
 const ROW = 24; // px per pin row
 const PIN_R = 4;
 
-interface ViewSel {
-  kind: 'block' | 'wire';
-  id: number;
-}
-
 interface Drag {
-  block: number;
+  anchor: number;
+  starts: Map<number, { x: number; y: number }>;
   dx: number;
   dy: number;
   moved: boolean;
@@ -44,6 +41,20 @@ interface Pan {
   vy: number;
 }
 
+interface Marquee {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  additive: boolean;
+}
+
+interface Clipboard {
+  blocks: Block[];
+  wires: Wire[];
+  assocs: Assoc[];
+}
+
 export class FbdCanvas extends LitElement {
   declare pou?: Pou;
   declare netIndex: number;
@@ -53,17 +64,22 @@ export class FbdCanvas extends LitElement {
     pou: { attribute: false },
     netIndex: { type: Number },
     pous: { attribute: false },
-    sel: { state: true },
+    selIds: { state: true },
+    selWire: { state: true },
     pending: { state: true },
+    marquee: { state: true },
     vb: { state: true },
   };
 
-  declare sel?: ViewSel;
+  declare selIds: Set<number>;
+  declare selWire?: number;
   declare pending?: PendingWire;
+  declare marquee?: Marquee;
   declare vb: { x: number; y: number; s: number };
 
   private drag?: Drag;
   private pan?: Pan;
+  private clipboard?: Clipboard;
   private undoStack: string[] = [];
   private redoStack: string[] = [];
 
@@ -71,6 +87,7 @@ export class FbdCanvas extends LitElement {
     super();
     this.netIndex = 0;
     this.pous = [];
+    this.selIds = new Set();
     this.vb = { x: -20, y: -20, s: 1 };
   }
 
@@ -112,7 +129,8 @@ export class FbdCanvas extends LitElement {
     const pou = this.pou;
     if (!net || !pou) return;
     pou.networks[this.netIndex] = JSON.parse(json) as Network;
-    this.sel = undefined;
+    this.selIds = new Set();
+    this.selWire = undefined;
     this.emitChange();
     this.requestUpdate();
   }
@@ -163,20 +181,84 @@ export class FbdCanvas extends LitElement {
   }
 
   private deleteSel(): void {
-    const sel = this.sel;
-    if (!sel) return;
+    const ids = this.selIds;
+    const wire = this.selWire;
+    if (!ids.size && wire === undefined) return;
     this.mutate((net) => {
-      if (sel.kind === 'block') {
-        net.blocks = net.blocks.filter((b) => b.id !== sel.id);
+      if (ids.size) {
+        net.blocks = net.blocks.filter((b) => !ids.has(b.id));
         for (const w of net.wires) {
-          w.dsts = w.dsts.filter((d) => d.block !== sel.id);
+          w.dsts = w.dsts.filter((d) => !ids.has(d.block));
         }
-        net.wires = net.wires.filter((w) => w.src.block !== sel.id && w.dsts.length > 0);
-        net.assocs = net.assocs.filter((a) => a.dst.block !== sel.id);
-      } else {
-        net.wires = net.wires.filter((w) => w.id !== sel.id);
+        net.wires = net.wires.filter((w) => !ids.has(w.src.block) && w.dsts.length > 0);
+        net.assocs = net.assocs.filter((a) => !ids.has(a.dst.block));
       }
-      this.sel = undefined;
+      if (wire !== undefined) net.wires = net.wires.filter((w) => w.id !== wire);
+      this.selIds = new Set();
+      this.selWire = undefined;
+    });
+  }
+
+  // ---- clipboard + align ----------------------------------------------
+
+  private copySel(): void {
+    const net = this.net;
+    const ids = this.selIds;
+    if (!net || !ids.size) return;
+    const blocks = net.blocks.filter((b) => ids.has(b.id)).map((b) => structuredClone(b));
+    const wires = net.wires
+      .filter((w) => ids.has(w.src.block) && w.dsts.every((d) => ids.has(d.block)))
+      .map((w) => structuredClone(w));
+    const assocs = net.assocs.filter((a) => ids.has(a.dst.block)).map((a) => structuredClone(a));
+    this.clipboard = { blocks, wires, assocs };
+  }
+
+  private paste(): void {
+    const cb = this.clipboard;
+    if (!cb?.blocks.length) return;
+    this.mutate((net) => {
+      const idMap = new Map<number, number>();
+      for (const b of cb.blocks) {
+        const nb = structuredClone(b);
+        nb.id = nextNodeId(this.pou!);
+        nb.pos = { x: nb.pos.x + 1, y: nb.pos.y + 1 };
+        idMap.set(b.id, nb.id);
+        net.blocks.push(nb);
+      }
+      for (const w of cb.wires) {
+        const srcB = idMap.get(w.src.block);
+        if (srcB === undefined) continue;
+        const dsts = w.dsts
+          .filter((d) => idMap.has(d.block))
+          .map((d) => ({ block: idMap.get(d.block)!, port: d.port }));
+        if (!dsts.length) continue;
+        net.wires.push({
+          id: nextNodeId(this.pou!),
+          src: { block: srcB, port: w.src.port },
+          dsts,
+          ...(w.probe ? { probe: true } : {}),
+        });
+      }
+      for (const a of cb.assocs) {
+        const d = idMap.get(a.dst.block);
+        if (d !== undefined) {
+          net.assocs.push({ src_name: a.src_name, dst: { block: d, port: a.dst.port } });
+        }
+      }
+      this.selIds = new Set(idMap.values());
+      this.selWire = undefined;
+    });
+  }
+
+  private alignSel(axis: 'x' | 'y'): void {
+    if (this.selIds.size < 2) return;
+    this.mutate((net) => {
+      const bs = net.blocks.filter((b) => this.selIds.has(b.id));
+      if (bs.length < 2) return;
+      const m = Math.min(...bs.map((b) => (axis === 'x' ? b.pos.x : b.pos.y)));
+      for (const b of bs) {
+        b.pos = axis === 'x' ? { x: m, y: b.pos.y } : { x: b.pos.x, y: m };
+      }
     });
   }
 
@@ -297,26 +379,64 @@ export class FbdCanvas extends LitElement {
   }
 
   private onKey = (e: KeyboardEvent): void => {
-    if ((e.key === 'Delete' || e.key === 'Backspace') && this.sel) {
+    const mod = e.ctrlKey || e.metaKey;
+    if (
+      (e.key === 'Delete' || e.key === 'Backspace') &&
+      (this.selIds.size || this.selWire !== undefined)
+    ) {
       this.deleteSel();
       e.preventDefault();
     } else if (e.key === 'Escape') {
       this.pending = undefined;
-      this.sel = undefined;
-    } else if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+      this.selIds = new Set();
+      this.selWire = undefined;
+    } else if (mod && e.key === 'z' && !e.shiftKey) {
       this.undo();
       e.preventDefault();
-    } else if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+    } else if (mod && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
       this.redo();
+      e.preventDefault();
+    } else if (mod && e.key === 'c') {
+      this.copySel();
+      e.preventDefault();
+    } else if (mod && e.key === 'v') {
+      this.paste();
+      e.preventDefault();
+    } else if (mod && e.key === 'd') {
+      this.copySel();
+      this.paste();
+      e.preventDefault();
+    } else if (mod && e.key === 'a') {
+      this.selIds = new Set(this.net?.blocks.map((b) => b.id));
       e.preventDefault();
     }
   };
 
   private onBlockDown(e: PointerEvent, b: Block): void {
-    if (this.pending) return;
-    this.sel = { kind: 'block', id: b.id };
+    if (this.pending || e.button !== 0) return;
+    if (e.shiftKey) {
+      const s = new Set(this.selIds);
+      if (s.has(b.id)) s.delete(b.id);
+      else s.add(b.id);
+      this.selIds = s;
+      e.stopPropagation();
+      return;
+    }
+    if (!this.selIds.has(b.id)) this.selIds = new Set([b.id]);
+    this.selWire = undefined;
     const p = this.svgPt(e);
-    this.drag = { block: b.id, dx: p.x - b.pos.x * GX, dy: p.y - b.pos.y * GX, moved: false };
+    const starts = new Map<number, { x: number; y: number }>();
+    for (const id of this.selIds) {
+      const bb = this.net?.blocks.find((x) => x.id === id);
+      if (bb) starts.set(id, { x: bb.pos.x, y: bb.pos.y });
+    }
+    this.drag = {
+      anchor: b.id,
+      starts,
+      dx: p.x - b.pos.x * GX,
+      dy: p.y - b.pos.y * GX,
+      moved: false,
+    };
     try {
       (e.target as Element).setPointerCapture?.(e.pointerId);
     } catch {
@@ -385,25 +505,56 @@ export class FbdCanvas extends LitElement {
       return;
     }
     const p = this.svgPt(e);
+    if (this.marquee) {
+      this.marquee = { ...this.marquee, x1: p.x, y1: p.y };
+      return;
+    }
     if (this.pending) {
       this.pending = { ...this.pending, x: p.x, y: p.y };
       return;
     }
     const d = this.drag;
     if (!d) return;
-    const nx = Math.round((p.x - d.dx) / GX);
-    const ny = Math.round((p.y - d.dy) / GX);
-    const b = this.net?.blocks.find((x) => x.id === d.block);
-    if (!b || (b.pos.x === nx && b.pos.y === ny)) return;
+    const net = this.net;
+    const a = d.starts.get(d.anchor);
+    if (!net || !a) return;
+    const ddx = Math.round((p.x - d.dx) / GX) - a.x;
+    const ddy = Math.round((p.y - d.dy) / GX) - a.y;
+    if (!ddx && !ddy) return;
     if (!d.moved) this.snapshot();
     d.moved = true;
-    b.pos = { x: nx, y: ny };
+    for (const [id, s] of d.starts) {
+      const bb = net.blocks.find((x) => x.id === id);
+      if (bb) bb.pos = { x: s.x + ddx, y: s.y + ddy };
+    }
     this.requestUpdate();
   }
 
   private onSvgUp(e: PointerEvent): void {
     if (this.pan) {
       this.pan = undefined;
+      return;
+    }
+    const m = this.marquee;
+    if (m) {
+      this.marquee = undefined;
+      const net = this.net;
+      if (net) {
+        const x0 = Math.min(m.x0, m.x1);
+        const x1 = Math.max(m.x0, m.x1);
+        const y0 = Math.min(m.y0, m.y1);
+        const y1 = Math.max(m.y0, m.y1);
+        const hit = net.blocks
+          .filter((b) => {
+            const { w, h } = this.blockSize(b);
+            const bx = b.pos.x * GX;
+            const by = b.pos.y * GX;
+            return bx < x1 && bx + w > x0 && by < y1 && by + h > y0;
+          })
+          .map((b) => b.id);
+        this.selIds = m.additive ? new Set([...this.selIds, ...hit]) : new Set(hit);
+        this.selWire = undefined;
+      }
       return;
     }
     if (this.pending) {
@@ -421,10 +572,19 @@ export class FbdCanvas extends LitElement {
   }
 
   private onSvgDown(e: PointerEvent): void {
-    if (e.target === e.currentTarget || (e.target as Element).tagName === 'rect') {
-      if (e.button === 0 || e.button === 1) {
-        this.pan = { sx: e.clientX, sy: e.clientY, vx: this.vb.x, vy: this.vb.y };
-        this.sel = undefined;
+    const onBg = e.target === e.currentTarget || (e.target as Element).tagName === 'rect';
+    if (!onBg) return;
+    if (e.button === 1 || (e.button === 0 && (e.ctrlKey || e.metaKey))) {
+      this.pan = { sx: e.clientX, sy: e.clientY, vx: this.vb.x, vy: this.vb.y };
+      this.selIds = new Set();
+      this.selWire = undefined;
+    } else if (e.button === 0) {
+      const p = this.svgPt(e);
+      this.marquee = { x0: p.x, y0: p.y, x1: p.x, y1: p.y, additive: e.shiftKey };
+      try {
+        (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+      } catch {
+        /* synthetic events */
       }
     }
   }
@@ -505,6 +665,7 @@ export class FbdCanvas extends LitElement {
           ${net.wires.map((w) => this.wireSvg(w, net))}
           ${net.blocks.map((b) => this.blockSvg(b, net))}
           ${this.pending ? this.pendingSvg(net) : nothing}
+          ${this.marquee ? this.marqueeSvg() : nothing}
         </svg>
         <div class="fbd-status">
           ${
@@ -514,7 +675,8 @@ export class FbdCanvas extends LitElement {
                   ${this.validate()[0]}${this.validate().length > 1 ? ' …' : ''}</span
                 >`
               : html`<span class="plc-dim"
-                  >ok · shift-click a pin to negate · drag bg to pan · wheel zooms</span
+                  >ok · drag bg = box select · ctrl/middle-drag = pan · shift-click pin
+                  negates</span
                 >`
           }
         </div>
@@ -559,14 +721,28 @@ export class FbdCanvas extends LitElement {
   }
 
   private selProps(): TemplateResult | typeof nothing {
-    const sel = this.sel;
     const net = this.net;
-    if (!sel || !net || sel.kind !== 'block') return nothing;
-    const b = net.blocks.find((x) => x.id === sel.id);
+    if (!net) return nothing;
+    if (this.selIds.size > 1) {
+      return html`
+        <div class="fbd-props">
+          <b>${this.selIds.size} blocks</b>
+          <button class="chip-btn" title="Align left edges" @click=${() => this.alignSel('x')}>
+            align ⇤
+          </button>
+          <button class="chip-btn" title="Align top edges" @click=${() => this.alignSel('y')}>
+            align ⤒
+          </button>
+          <button class="chip-btn" @click=${() => this.deleteSel()}>Delete</button>
+        </div>
+      `;
+    }
+    const selId = [...this.selIds][0];
+    const b = net.blocks.find((x) => x.id === selId);
     if (!b) return nothing;
     const set = (f: (blk: Block) => void) =>
       this.mutate((net2) => {
-        const blk = net2.blocks.find((x) => x.id === sel.id);
+        const blk = net2.blocks.find((x) => x.id === selId);
         if (blk) f(blk);
       });
     return html`
@@ -626,7 +802,7 @@ export class FbdCanvas extends LitElement {
     const y = b.pos.y * GX;
     const ins = this.visibleIns(b, net);
     const outs = blockSig(b, this.pous).outs;
-    const sel = this.sel?.kind === 'block' && this.sel.id === b.id;
+    const sel = this.selIds.has(b.id);
     const neg = new Set(b.negated);
     const title =
       b.kind === 'variable'
@@ -664,11 +840,12 @@ export class FbdCanvas extends LitElement {
     if (!sb) return nothing;
     const si = outIndex(sb, w.src.port, this.pous);
     const from = this.outPinPos(sb, Math.max(0, si));
-    const sel = this.sel?.kind === 'wire' && this.sel.id === w.id;
+    const sel = this.selWire === w.id;
     return svg`
       <g class="fbd-wire ${sel ? 'sel' : ''} ${w.probe ? 'probe' : ''}"
          @pointerdown=${(e: PointerEvent) => {
-           this.sel = { kind: 'wire', id: w.id };
+           this.selWire = w.id;
+           this.selIds = new Set();
            e.stopPropagation();
          }}>
         ${w.dsts.map((d) => {
@@ -690,6 +867,14 @@ export class FbdCanvas extends LitElement {
     if (!sb) return nothing;
     const from = this.outPinPos(sb, p.port);
     return svg`<line class="fbd-line pend" x1="${from.x}" y1="${from.y}" x2="${p.x}" y2="${p.y}"></line>`;
+  }
+
+  private marqueeSvg() {
+    const m = this.marquee!;
+    return svg`<rect class="fbd-marquee" x="${Math.min(m.x0, m.x1)}" y="${Math.min(
+      m.y0,
+      m.y1,
+    )}" width="${Math.abs(m.x1 - m.x0)}" height="${Math.abs(m.y1 - m.y0)}"></rect>`;
   }
 }
 
