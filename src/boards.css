@@ -907,6 +907,48 @@ tile-frame {
   font-size: 11px;
 }
 
+.plc-diags {
+  max-height: 140px;
+  border-top: 1px solid var(--glass-border);
+  overflow-y: auto;
+  font-size: 11px;
+}
+
+.plc-diag {
+  display: flex;
+  gap: 8px;
+  padding: 3px 10px;
+  cursor: pointer;
+  align-items: baseline;
+}
+
+.plc-diag:hover {
+  background: var(--glass-bg);
+}
+
+.plc-diag-sev {
+  width: 12px;
+  font-weight: 700;
+}
+
+.plc-diag.error .plc-diag-sev,
+.plc-diag.error .plc-diag-msg {
+  color: var(--danger, #f66);
+}
+
+.plc-diag.warning .plc-diag-sev {
+  color: var(--warn, #fc6);
+}
+
+.plc-diag-code {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.plc-diag-msg {
+  color: var(--text);
+}
+
 .plc-nav {
   display: flex;
   gap: 4px;

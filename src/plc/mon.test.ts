@@ -51,7 +51,9 @@ const varBlock = (over: Partial<Block> = {}): Block => ({
   type_ref: '',
   pos: { x: 0, y: 0 },
   params: {},
+  exec_order: 0,
   negated: [],
+  comment: '',
   ...over,
 });
 

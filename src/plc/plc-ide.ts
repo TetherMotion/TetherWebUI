@@ -12,6 +12,7 @@ import { DataHub } from '../data/hub';
 import './fbd-canvas';
 import './st-editor';
 import { CtlError, PlcCtl, ProgStatus, RtStatus } from './ctl';
+import { compileProject, CompileDiag } from './build';
 import { Pou } from './model';
 import { entryWritable, writeScalar } from './mon';
 import { exportPlcopenXml, importPlcopenXml } from './plcopen';
@@ -43,6 +44,8 @@ export class TetherPlcIde extends LitElement {
     prog: { state: true },
     rt: { state: true },
     deployFrac: { state: true },
+    diags: { state: true },
+    compiling: { state: true },
   };
 
   declare pane: Pane;
@@ -54,6 +57,8 @@ export class TetherPlcIde extends LitElement {
   declare prog?: ProgStatus;
   declare rt?: RtStatus;
   declare deployFrac?: number;
+  declare diags?: CompileDiag[];
+  declare compiling: boolean;
 
   private ctl = new PlcCtl();
 
@@ -247,6 +252,9 @@ export class TetherPlcIde extends LitElement {
           <button class="chip-btn" @click=${this.onImport}>Import…</button>
           <button class="chip-btn" @click=${this.onExport}>Export .fbd.json</button>
           <button class="chip-btn" @click=${this.onExportXml}>Export .xml</button>
+          <button class="chip-btn" ?disabled=${this.compiling} @click=${() => void this.onCheck()}>
+            ${this.compiling ? 'checking…' : 'check'}
+          </button>
           ${this.status ? html`<span class="plc-status">${this.status}</span>` : nothing}
         </div>
         <div class="plc-nav">
@@ -265,8 +273,70 @@ export class TetherPlcIde extends LitElement {
           )}
         </div>
         <div class="plc-main">${this.paneBody()}</div>
+        ${this.diagsStrip()}
       </div>
     `;
+  }
+
+  /** compile diagnostics strip, docked under the pane area. */
+  private diagsStrip(): TemplateResult | typeof nothing {
+    if (!this.diags?.length) return nothing;
+    return html`
+      <div class="plc-diags tile-scroll">
+        ${this.diags.map(
+          (d) => html`
+            <div class="plc-diag ${d.severity}" @click=${() => this.onDiagClick(d)}>
+              <span class="plc-diag-sev"
+                >${d.severity === 'error' ? '✕' : d.severity === 'warning' ? '!' : '·'}</span
+              >
+              <span class="plc-diag-code">${d.code}</span>
+              <span
+                >${d.file ? `${d.file}${d.line ? `:${d.line}:${d.col}` : ''}` : d.fbd ? `fbd net ${d.fbd.sheet + 1} node ${d.fbd.node}` : ''}</span
+              >
+              <span class="plc-diag-msg">${d.message}</span>
+            </div>
+          `,
+        )}
+      </div>
+    `;
+  }
+
+  /** jump to the offending source: st pane on the file's POU, or the fbd network. */
+  private onDiagClick(d: CompileDiag): void {
+    if (d.file) {
+      const name = d.file.replace(/\.st$/, '');
+      const pou = this.project.fbd.pous.find((p) => p.name === name);
+      if (pou) {
+        this.selPou = pou.id;
+        this.pane = 'st';
+      }
+    } else if (d.fbd) {
+      // Prov::Fbd{sheet} is the network index inside its pou; find the
+      // pou whose that network holds the flagged node id.
+      const pou = this.project.fbd.pous.find((p) =>
+        p.networks[d.fbd!.sheet]?.blocks.some((b) => b.id === d.fbd!.node),
+      );
+      if (pou) {
+        this.selPou = pou.id;
+        this.selNet = d.fbd.sheet;
+        this.pane = 'fbd';
+      }
+    }
+  }
+
+  /** run `tplcc check` through the ctl proxy; results land in the diags strip. */
+  private async onCheck(): Promise<void> {
+    if (this.compiling) return;
+    this.compiling = true;
+    try {
+      const r = await compileProject(this.ctl.url, this.project);
+      this.diags = r.diags;
+      this.flash(r.ok ? 'check ok' : `${r.errors} error(s)`);
+    } catch (e) {
+      this.flash(`check failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      this.compiling = false;
+    }
   }
 
   private paneBody(): TemplateResult {
@@ -570,19 +640,19 @@ export class TetherPlcIde extends LitElement {
                                         class="fbd-in plc-force-in"
                                         placeholder="val"
                                         @keydown=${(ev: KeyboardEvent) => {
-                                        if (ev.key === 'Enter') {
-                                          this.onForce(e, ev.target as HTMLInputElement);
-                                        }
-                                      }}
+                                          if (ev.key === 'Enter') {
+                                            this.onForce(e, ev.target as HTMLInputElement);
+                                          }
+                                        }}
                                       />
                                       <button
                                         class="chip-btn"
                                         @click=${(ev: Event) =>
-                                        this.onForce(
-                                          e,
-                                          (ev.target as HTMLElement)
-                                            .previousElementSibling as HTMLInputElement,
-                                        )}
+                                          this.onForce(
+                                            e,
+                                            (ev.target as HTMLElement)
+                                              .previousElementSibling as HTMLInputElement,
+                                          )}
                                       >
                                         set
                                       </button>`
@@ -630,6 +700,13 @@ export class TetherPlcIde extends LitElement {
         ${this.ctlErr ? html`<p class="fbd-warn">${this.ctlErr}</p>` : nothing}
         <div class="plc-ops">
           <input type="file" id="plc-pkg" accept=".tplc" hidden @change=${this.onPkgFile} />
+          <button
+            class="chip-btn"
+            ?disabled=${this.compiling}
+            @click=${() => void this.onBuildDeploy()}
+          >
+            ${this.compiling ? 'building…' : 'build & deploy'}
+          </button>
           <button
             class="chip-btn"
             @click=${() => this.querySelector<HTMLInputElement>('#plc-pkg')?.click()}
@@ -695,6 +772,34 @@ export class TetherPlcIde extends LitElement {
         </tbody>
       </table>
     `;
+  }
+
+  /** compile on the plc host and deploy the returned package directly. */
+  private async onBuildDeploy(): Promise<void> {
+    if (this.compiling) return;
+    this.compiling = true;
+    this.ctlErr = '';
+    try {
+      const r = await compileProject(this.ctl.url, this.project, true);
+      this.diags = r.diags;
+      if (!r.ok || !r.package) {
+        this.flash(r.ok ? 'build ok (no package)' : `build failed: ${r.errors} error(s)`);
+        return;
+      }
+      this.flash('deploying…');
+      this.deployFrac = 0;
+      const progName = await this.ctl.deploy(r.package, 0, (f) => {
+        this.deployFrac = f;
+      });
+      this.deployFrac = undefined;
+      this.flash(`deployed ${progName}`);
+      await this.refreshCtl();
+    } catch (e) {
+      this.ctlErr = e instanceof Error ? e.message : String(e);
+    } finally {
+      this.compiling = false;
+      this.deployFrac = undefined;
+    }
   }
 
   private setCtlUrl(url: string): void {
