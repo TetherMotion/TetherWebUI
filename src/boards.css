@@ -1043,19 +1043,42 @@ tile-frame {
 }
 
 .plc-st-editor {
+  display: block;
   flex: 1;
   min-height: 0;
   width: 100%;
-  box-sizing: border-box;
-  resize: none;
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 12px;
-  line-height: 1.5;
-  padding: 10px;
   border: 1px solid var(--input-border);
   border-radius: 8px;
   background: var(--input-bg);
-  color: var(--text);
+  overflow: hidden;
+}
+
+.plc-st-editor .cm-editor {
+  height: 100%;
+  font-size: 12px;
+}
+
+.plc-st-editor .cm-editor.cm-focused {
+  outline: none;
+}
+
+.plc-st-editor .cm-gutters {
+  background: var(--glass-2);
+  color: var(--text-muted);
+  border: none;
+}
+
+.plc-st-editor .cm-content {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  caret-color: var(--text);
+}
+
+.plc-st-editor .cm-scroller {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+.plc-st-editor .cm-activeLine {
+  background: var(--row-hover);
 }
 
 .plc-fbd {

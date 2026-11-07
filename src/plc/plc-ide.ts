@@ -10,6 +10,7 @@
 import { html, LitElement, nothing, TemplateResult } from 'lit';
 import { DataHub } from '../data/hub';
 import './fbd-canvas';
+import './st-editor';
 import { CtlError, PlcCtl, ProgStatus, RtStatus } from './ctl';
 import { Pou } from './model';
 import { exportFbdJson, importFbdJson, loadProject, PlcProject, saveProject } from './store';
@@ -365,13 +366,11 @@ export class TetherPlcIde extends LitElement {
             pou
               ? html`
                   <h3>${pou.name} <span class="plc-dim">structured text</span></h3>
-                  <textarea
+                  <st-editor
                     class="plc-st-editor"
-                    spellcheck="false"
                     .value=${this.project.stSources[pou.name] ?? ''}
-                    @input=${(e: Event) =>
-                      this.onStEdit(pou, (e.target as HTMLTextAreaElement).value)}
-                  ></textarea>
+                    @change=${(e: CustomEvent<string>) => this.onStEdit(pou, e.detail)}
+                  ></st-editor>
                 `
               : html`<p class="plc-dim">No POU selected.</p>`
           }
