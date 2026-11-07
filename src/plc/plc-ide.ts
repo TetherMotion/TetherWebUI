@@ -13,6 +13,7 @@ import './fbd-canvas';
 import './st-editor';
 import { CtlError, PlcCtl, ProgStatus, RtStatus } from './ctl';
 import { Pou } from './model';
+import { exportPlcopenXml, importPlcopenXml } from './plcopen';
 import { exportFbdJson, importFbdJson, loadProject, PlcProject, saveProject } from './store';
 
 type Pane = 'explorer' | 'st' | 'fbd' | 'tasks' | 'watch' | 'deploy';
@@ -132,15 +133,23 @@ export class TetherPlcIde extends LitElement {
   private onImport(): void {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.json,application/json';
+    input.accept = '.json,.xml,application/json,application/xml,text/xml';
     input.onchange = async () => {
       const file = input.files?.[0];
       if (!file) return;
       try {
-        this.project = importFbdJson(await file.text());
+        const text = await file.text();
+        let notes: string[] = [];
+        if (/\.xml$/i.test(file.name) || /^\s*<\?xml|^\s*<project/.test(text)) {
+          const res = importPlcopenXml(text);
+          this.project = { fbd: res.project, stSources: {} };
+          notes = res.notes;
+        } else {
+          this.project = importFbdJson(text);
+        }
         this.selPou = this.project.fbd.pous[0]?.id ?? '';
         this.save();
-        this.flash(`imported ${file.name}`);
+        this.flash(`imported ${file.name}${notes.length ? ` (${notes.length} notes)` : ''}`);
       } catch (e) {
         this.flash(`import failed: ${e instanceof Error ? e.message : e}`);
       }
@@ -153,6 +162,17 @@ export class TetherPlcIde extends LitElement {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `${this.project.fbd.project || 'project'}.fbd.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  private onExportXml(): void {
+    const blob = new Blob([exportPlcopenXml(this.project.fbd)], {
+      type: 'application/xml',
+    });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${this.project.fbd.project || 'project'}.xml`;
     a.click();
     URL.revokeObjectURL(a.href);
   }
@@ -202,8 +222,9 @@ export class TetherPlcIde extends LitElement {
           <span class="plc-brand">TetherPLC</span>
           <span class="plc-proj">${fbd.project}</span>
           <span class="spacer"></span>
-          <button class="chip-btn" @click=${this.onImport}>Import .fbd.json</button>
-          <button class="chip-btn" @click=${this.onExport}>Export</button>
+          <button class="chip-btn" @click=${this.onImport}>Import…</button>
+          <button class="chip-btn" @click=${this.onExport}>Export .fbd.json</button>
+          <button class="chip-btn" @click=${this.onExportXml}>Export .xml</button>
           ${this.status ? html`<span class="plc-status">${this.status}</span>` : nothing}
         </div>
         <div class="plc-nav">
