@@ -117,6 +117,13 @@ function builtinBoards(): BoardDoc[] {
         makeTile('recipes', { x: 0, y: 12, w: 7, h: 4 }, { title: 'Recipes' }),
       ],
     },
+    {
+      format: BOARD_FORMAT,
+      id: 'builtin.plc',
+      title: 'TetherPLC',
+      source: 'builtin',
+      tiles: [makeTile('plc-ide', { x: 0, y: 0, w: 12, h: 16 }, { title: 'PLC IDE' })],
+    },
   ];
 }
 

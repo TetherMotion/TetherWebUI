@@ -490,6 +490,17 @@ export const TILE_SPECS: TileSpec[] = [
     minSize: { w: 4, h: 5 },
   },
 
+  // ---- PLC ----------------------------------------------------------------------
+  {
+    type: 'plc-ide',
+    label: 'PLC IDE',
+    group: 'Tools',
+    description: 'TetherPLC project explorer, ST/FBD sources, watch, deploy.',
+    tag: 'tile-plc-ide',
+    defaultSize: { w: 12, h: 14 },
+    minSize: { w: 8, h: 8 },
+  },
+
   // ---- Layout ---------------------------------------------------------------------
   {
     type: 'note',

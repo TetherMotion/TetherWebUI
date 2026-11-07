@@ -24,6 +24,27 @@ describe('tether-shell', () => {
     shell.remove();
   });
 
+  it('exposes a TetherPLC tab hosting the PLC IDE tile', async () => {
+    localStorage.clear();
+    const shell = document.createElement('tether-shell') as TetherShell;
+    shell.hub = makeHub();
+    document.body.appendChild(shell);
+    await shell.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+    const tab = [...shell.querySelectorAll<HTMLButtonElement>('.board-tab')].find((t) =>
+      t.textContent?.includes('TetherPLC'),
+    );
+    expect(tab).toBeTruthy();
+    tab!.click();
+    await shell.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+    const ide = shell.querySelector('tether-plc-ide');
+    expect(ide).toBeTruthy();
+    expect(ide!.querySelector('.plc-ide')).toBeTruthy();
+    expect(ide!.querySelectorAll('.plc-nav-btn').length).toBeGreaterThanOrEqual(5);
+    shell.remove();
+  });
+
   it('adds a tile to the active board in edit mode', async () => {
     localStorage.clear();
     const shell = document.createElement('tether-shell') as TetherShell;

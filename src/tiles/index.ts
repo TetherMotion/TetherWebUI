@@ -4,3 +4,4 @@ import './machine';
 import './analysis';
 import './actions';
 import './tools';
+import './plc';
