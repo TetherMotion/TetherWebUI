@@ -1090,3 +1090,163 @@ tile-frame {
   border-radius: 999px;
   padding: 1px 7px;
 }
+
+/* ---- FBD canvas --------------------------------------------------------------- */
+
+.plc-fbd-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 6px;
+}
+
+.plc-fbd-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.fbd-canvas {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 4px;
+}
+
+.fbd-palette {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.fbd-canvas svg {
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  background:
+    radial-gradient(circle, var(--plot-grid-major) 1px, transparent 1px) 0 0 / 14px 14px,
+    var(--plot-bg);
+  outline: none;
+  touch-action: none;
+  user-select: none;
+}
+
+.fbd-rect {
+  fill: var(--glass-1);
+  stroke: var(--glass-border);
+  stroke-width: 1;
+}
+
+.fbd-block.sel .fbd-rect {
+  stroke: var(--mint);
+  stroke-width: 1.5;
+}
+
+.fbd-title {
+  font-size: 10px;
+  font-weight: 600;
+  fill: var(--text);
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+.fbd-at {
+  font-size: 8px;
+  fill: var(--text-muted);
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+.fbd-pin {
+  fill: var(--plot-bg);
+  stroke: var(--text-muted);
+  stroke-width: 1;
+  cursor: crosshair;
+}
+
+.fbd-pin.in:hover,
+.fbd-pin.out:hover {
+  fill: var(--mint);
+}
+
+.fbd-neg {
+  fill: none;
+  stroke: var(--status-offline);
+  stroke-width: 1;
+  pointer-events: none;
+}
+
+.fbd-pin-name {
+  font-size: 8px;
+  fill: var(--text-muted);
+  pointer-events: none;
+}
+
+.fbd-line {
+  stroke: var(--text-muted);
+  stroke-width: 1.5;
+}
+
+.fbd-wire.probe .fbd-line {
+  stroke: var(--mint);
+  stroke-dasharray: 4 2;
+}
+
+.fbd-wire.sel .fbd-line {
+  stroke: var(--blue);
+  stroke-width: 2.5;
+}
+
+.fbd-line.pend {
+  stroke: var(--mint);
+  stroke-dasharray: 4 3;
+}
+
+.fbd-note {
+  fill: var(--accent-glow);
+  stroke: var(--glass-border);
+  rx: 4;
+}
+
+.fbd-note-text,
+.fbd-label {
+  font-size: 10px;
+  fill: var(--text-muted);
+}
+
+.fbd-status {
+  font-size: 11px;
+}
+
+.fbd-warn {
+  color: var(--status-offline);
+}
+
+.fbd-props {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-muted);
+  border-top: 1px solid var(--glass-border);
+  padding-top: 6px;
+}
+
+.fbd-in {
+  width: 90px;
+  font-size: 11px;
+  padding: 2px 6px;
+  border: 1px solid var(--input-border);
+  border-radius: 5px;
+  background: var(--input-bg);
+  color: var(--text);
+}
+
+.fbd-in.wide {
+  width: 160px;
+}

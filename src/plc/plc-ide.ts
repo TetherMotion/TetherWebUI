@@ -9,15 +9,9 @@
  */
 import { html, LitElement, nothing, TemplateResult } from 'lit';
 import { DataHub } from '../data/hub';
-import { FbdProject, Pou, portLabel } from './model';
-import {
-  emptyPlcProject,
-  exportFbdJson,
-  importFbdJson,
-  loadProject,
-  PlcProject,
-  saveProject,
-} from './store';
+import './fbd-canvas';
+import { Pou } from './model';
+import { exportFbdJson, importFbdJson, loadProject, PlcProject, saveProject } from './store';
 
 type Pane = 'explorer' | 'st' | 'fbd' | 'tasks' | 'watch' | 'deploy';
 
@@ -265,9 +259,9 @@ export class TetherPlcIde extends LitElement {
                         <div
                           class="plc-tree-net ${this.selNet === i ? 'sel' : ''}"
                           @click=${() => {
-                          this.selNet = i;
-                          this.pane = 'fbd';
-                        }}
+                            this.selNet = i;
+                            this.pane = 'fbd';
+                          }}
                         >
                           net ${i + 1}${n.label ? ` · ${n.label}` : ''}
                           <span class="plc-dim">(${n.blocks.length}b ${n.wires.length}w)</span>
@@ -282,11 +276,11 @@ export class TetherPlcIde extends LitElement {
             fbd.tasks.length
               ? html`<div class="plc-tree-head"><span>Tasks</span></div>
                   ${fbd.tasks.map(
-                  (t) =>
-                    html`<div class="plc-tree-net">
-                      ${t.name} <span class="plc-dim">${t.period_ns / 1e6}ms</span>
-                    </div>`,
-                )}`
+                    (t) =>
+                      html`<div class="plc-tree-net">
+                        ${t.name} <span class="plc-dim">${t.period_ns / 1e6}ms</span>
+                      </div>`,
+                  )}`
               : nothing
           }
         </div>
@@ -359,7 +353,7 @@ export class TetherPlcIde extends LitElement {
                     spellcheck="false"
                     .value=${this.project.stSources[pou.name] ?? ''}
                     @input=${(e: Event) =>
-                    this.onStEdit(pou, (e.target as HTMLTextAreaElement).value)}
+                      this.onStEdit(pou, (e.target as HTMLTextAreaElement).value)}
                   ></textarea>
                 `
               : html`<p class="plc-dim">No POU selected.</p>`
@@ -376,41 +370,37 @@ export class TetherPlcIde extends LitElement {
     const net = pou?.networks[this.selNet];
     if (!pou || !net) return html`<p class="plc-dim">Select a network in the explorer.</p>`;
     return html`
-      <div class="tile-scroll plc-fbd">
-        <h3>${pou.name} · net ${this.selNet + 1}${net.label ? ` — ${net.label}` : ''}</h3>
-        ${net.blocks.map(
-          (b) => html`
-            <div class="plc-block">
-              <span class="plc-kind"
-                >${b.kind === 'fb' ? 'FB' : b.kind === 'operator' ? 'OP' : 'VAR'}</span
-              >
-              <b>${b.type_ref}</b>
-              ${b.instance ? html`<span class="plc-dim">${b.instance}</span>` : nothing}
-              ${b.name || ''} ${b.at ? html`<code>${b.at}</code>` : nothing}
-              <span class="plc-dim">@${b.pos.x},${b.pos.y}</span>
-              ${
-                Object.keys(b.params).length
-                  ? html`<span class="plc-dim"
-                      >${Object.entries(b.params)
-                        .map(([k, v]) => `${k}:=${v}`)
-                        .join(' ')}</span
-                    >`
-                  : nothing
-              }
-            </div>
-          `,
-        )}
-        ${net.wires.map(
-          (w) => html`
-            <div class="plc-wire">
-              wire ${w.id}: b${w.src.block}${portLabel(w.src.port)} →
-              ${w.dsts.map((d) => `b${d.block}${portLabel(d.port)}`).join(', ')}
-              ${w.probe ? html`<span class="plc-probe">probe</span>` : nothing}
-            </div>
-          `,
-        )}
+      <div class="plc-fbd-pane">
+        <div class="plc-fbd-head">
+          <b>${pou.name}</b> · net ${this.selNet + 1}${net.label ? ` — ${net.label}` : ''}
+          <span class="spacer"></span>
+          <button class="chip-btn" @click=${() => this.addNetwork(pou)}>+ network</button>
+        </div>
+        <fbd-canvas
+          .pou=${pou}
+          .netIndex=${this.selNet}
+          .pous=${this.project.fbd.pous}
+          @change=${() => this.save()}
+        ></fbd-canvas>
       </div>
     `;
+  }
+
+  private addNetwork(pou: Pou): void {
+    pou.networks.push({
+      id: `net${pou.networks.length + 1}`,
+      kind: 'fbd',
+      label: '',
+      comments: [],
+      assocs: [],
+      labels: [],
+      jumps: [],
+      returns: [],
+      blocks: [],
+      wires: [],
+    });
+    this.selNet = pou.networks.length - 1;
+    this.save();
   }
 
   // ---- tasks ---------------------------------------------------------
@@ -434,15 +424,15 @@ export class TetherPlcIde extends LitElement {
                   </thead>
                   <tbody>
                     ${tasks.map(
-                    (t) => html`
-                      <tr>
-                        <td>${t.name}</td>
-                        <td>${t.period_ns / 1e6} ms</td>
-                        <td>${t.priority}</td>
-                        <td>${t.programs.join(', ')}</td>
-                      </tr>
-                    `,
-                  )}
+                      (t) => html`
+                        <tr>
+                          <td>${t.name}</td>
+                          <td>${t.period_ns / 1e6} ms</td>
+                          <td>${t.priority}</td>
+                          <td>${t.programs.join(', ')}</td>
+                        </tr>
+                      `,
+                    )}
                   </tbody>
                 </table>
               `
@@ -479,14 +469,14 @@ export class TetherPlcIde extends LitElement {
                     </thead>
                     <tbody>
                       ${entries.map(
-                      (e) => html`
-                        <tr>
-                          <td>${e.name}</td>
-                          <td>${e.kind}</td>
-                          <td>${hub.values.get(e.name) ?? '—'}</td>
-                        </tr>
-                      `,
-                    )}
+                        (e) => html`
+                          <tr>
+                            <td>${e.name}</td>
+                            <td>${e.kind}</td>
+                            <td>${hub.values.get(e.name) ?? '—'}</td>
+                          </tr>
+                        `,
+                      )}
                     </tbody>
                   </table>
                 `
