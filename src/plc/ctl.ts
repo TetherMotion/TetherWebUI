@@ -29,6 +29,10 @@ export const CTL = {
   TASK_STATS: 0x0401,
   IMAGE_STATS: 0x0701,
   RT_STATUS: 0x0901,
+  RETAIN_STATUS: 0x0601,
+  RETAIN_FLUSH: 0x0602,
+  RETAIN_CLEAR: 0x0603,
+  RETAIN_DUMP: 0x0604,
 } as const;
 
 const F_ERROR = 1 << 15;
@@ -71,6 +75,17 @@ export interface RtStatus {
   runningCount: number;
   masterStatus: number;
   plcStatus: number;
+}
+
+export interface RetainStatus {
+  attached: boolean;
+  dirty: boolean;
+  /** bytes in the program's retain region */
+  len: bigint;
+  generation: bigint;
+  flushes: bigint;
+  restores: bigint;
+  losses: bigint;
 }
 
 let reqId = 1n;
@@ -194,6 +209,34 @@ export class PlcCtl {
 
   progRollback(): Promise<CtlReply> {
     return this.call(CTL.PROG_ROLLBACK);
+  }
+
+  retainStatus(): Promise<RetainStatus> {
+    return this.call(CTL.RETAIN_STATUS).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      return {
+        attached: r.payload[0] === 1,
+        dirty: r.payload[1] === 1,
+        len: d.getBigUint64(4, true),
+        generation: d.getBigUint64(12, true),
+        flushes: d.getBigUint64(20, true),
+        restores: d.getBigUint64(28, true),
+        losses: d.getBigUint64(36, true),
+      };
+    });
+  }
+
+  retainFlush(): Promise<CtlReply> {
+    return this.call(CTL.RETAIN_FLUSH);
+  }
+
+  retainClear(): Promise<CtlReply> {
+    return this.call(CTL.RETAIN_CLEAR);
+  }
+
+  /** raw bytes of the running program's retain region. */
+  retainDump(): Promise<Uint8Array> {
+    return this.call(CTL.RETAIN_DUMP).then((r) => r.payload);
   }
 
   /** Deploy a .tplc package: BEGIN{size,sha256,mode} → CHUNKs → COMMIT. */

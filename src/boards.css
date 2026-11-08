@@ -1084,6 +1084,19 @@ tile-frame {
   border-bottom: 1px solid var(--row-border);
 }
 
+.plc-table .fbd-in {
+  width: 8ch;
+}
+
+.plc-task-prog {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .plc-st-editor {
   display: block;
   flex: 1;

@@ -11,10 +11,10 @@ import { html, LitElement, nothing, TemplateResult } from 'lit';
 import { DataHub } from '../data/hub';
 import './fbd-canvas';
 import './st-editor';
-import { CtlError, PlcCtl, ProgStatus, RtStatus } from './ctl';
+import { CtlError, PlcCtl, ProgStatus, RetainStatus, RtStatus } from './ctl';
 import { byteToOffset, compileProject, CompileDiag, diagsForFile } from './build';
 import type { StEditor } from './st-editor';
-import { Pou } from './model';
+import { Pou, Task } from './model';
 import { entryWritable, writeScalar } from './mon';
 import { exportPlcopenXml, importPlcopenXml } from './plcopen';
 import type { CatalogEntry } from '../protocol';
@@ -44,6 +44,7 @@ export class TetherPlcIde extends LitElement {
     ctlErr: { state: true },
     prog: { state: true },
     rt: { state: true },
+    retain: { state: true },
     deployFrac: { state: true },
     diags: { state: true },
     compiling: { state: true },
@@ -57,6 +58,7 @@ export class TetherPlcIde extends LitElement {
   declare ctlErr: string;
   declare prog?: ProgStatus;
   declare rt?: RtStatus;
+  declare retain?: RetainStatus;
   declare deployFrac?: number;
   declare diags?: CompileDiag[];
   declare compiling: boolean;
@@ -584,9 +586,13 @@ export class TetherPlcIde extends LitElement {
 
   private tasksPane(): TemplateResult {
     const tasks = this.project.fbd.tasks;
+    const progs = this.project.fbd.pous.filter((p) => p.kind === 'program');
     return html`
       <div class="tile-scroll">
-        <h3>Tasks</h3>
+        <h3>
+          Tasks
+          <button class="chip-btn" @click=${this.addTask}>+ task</button>
+        </h3>
         ${
           tasks.length
             ? html`
@@ -594,29 +600,110 @@ export class TetherPlcIde extends LitElement {
                   <thead>
                     <tr>
                       <th>name</th>
-                      <th>period</th>
+                      <th>period (ms)</th>
                       <th>priority</th>
                       <th>programs</th>
+                      <th></th>
                     </tr>
                   </thead>
                   <tbody>
                     ${tasks.map(
-                      (t) => html`
+                      (t, ti) => html`
                         <tr>
-                          <td>${t.name}</td>
-                          <td>${t.period_ns / 1e6} ms</td>
-                          <td>${t.priority}</td>
-                          <td>${t.programs.join(', ')}</td>
+                          <td>
+                            <input
+                              class="fbd-in"
+                              .value=${t.name}
+                              @change=${(e: Event) =>
+                                this.editTask(ti, { name: (e.target as HTMLInputElement).value })}
+                            />
+                          </td>
+                          <td>
+                            <input
+                              class="fbd-in"
+                              type="number"
+                              min="1"
+                              .value=${String(t.period_ns / 1e6)}
+                              @change=${(e: Event) =>
+                                this.editTask(ti, {
+                                  period_ns:
+                                    Math.max(1, Number((e.target as HTMLInputElement).value)) * 1e6,
+                                })}
+                            />
+                          </td>
+                          <td>
+                            <input
+                              class="fbd-in"
+                              type="number"
+                              min="0"
+                              .value=${String(t.priority)}
+                              @change=${(e: Event) =>
+                                this.editTask(ti, {
+                                  priority: Number((e.target as HTMLInputElement).value),
+                                })}
+                            />
+                          </td>
+                          <td>
+                            ${progs.map(
+                              (p) => html`
+                                <label class="plc-task-prog">
+                                  <input
+                                    type="checkbox"
+                                    .checked=${t.programs.includes(p.name)}
+                                    @change=${(e: Event) =>
+                                      this.toggleTaskProgram(
+                                        ti,
+                                        p.name,
+                                        (e.target as HTMLInputElement).checked,
+                                      )}
+                                  />
+                                  ${p.name}
+                                </label>
+                              `,
+                            )}
+                          </td>
+                          <td>
+                            <button class="chip-btn" @click=${() => this.delTask(ti)}>✕</button>
+                          </td>
                         </tr>
                       `,
                     )}
                   </tbody>
                 </table>
               `
-            : html`<p class="plc-dim">No tasks defined. Task editing lands with deploy.</p>`
+            : html`<p class="plc-dim">No tasks defined. Tasks map program POUs to scan periods.</p>`
         }
       </div>
     `;
+  }
+
+  private addTask(): void {
+    let n = this.project.fbd.tasks.length + 1;
+    while (this.project.fbd.tasks.some((t) => t.name === `task${n}`)) n++;
+    this.project.fbd.tasks.push({
+      name: `task${n}`,
+      period_ns: 10e6,
+      priority: 1,
+      programs: this.project.fbd.pous.filter((p) => p.kind === 'program').map((p) => p.name),
+    });
+    this.save();
+  }
+
+  private delTask(i: number): void {
+    this.project.fbd.tasks.splice(i, 1);
+    this.save();
+  }
+
+  private editTask(i: number, patch: Partial<Task>): void {
+    Object.assign(this.project.fbd.tasks[i]!, patch);
+    this.save();
+  }
+
+  private toggleTaskProgram(i: number, prog: string, on: boolean): void {
+    const t = this.project.fbd.tasks[i];
+    if (!t) return;
+    t.programs = on ? [...new Set([...t.programs, prog])] : t.programs.filter((p) => p !== prog);
+    this.save();
   }
 
   // ---- watch ---------------------------------------------------------
@@ -748,6 +835,7 @@ export class TetherPlcIde extends LitElement {
           }
         </div>
         ${this.prog ? this.progTable(this.prog) : nothing}
+        ${this.retain ? this.retainCard(this.retain) : nothing}
         ${this.rt ? html`<p class="plc-dim">rt: up ${this.rt.uptimeS}s · ${this.rt.progCount} progs (${this.rt.runningCount} running) · master ${this.rt.masterStatus} plc ${this.rt.plcStatus}</p>` : nothing}
         <p class="plc-dim">
           Requires <code>tplc-ctl-proxy</code> running on the plc host. Online-change
@@ -793,6 +881,53 @@ export class TetherPlcIde extends LitElement {
     `;
   }
 
+  private retainCard(r: RetainStatus): TemplateResult {
+    return html`
+      <h4>
+        retain store
+        <span class="plc-dim">
+          ${r.attached ? (r.dirty ? 'dirty' : 'clean') : 'detached'} · ${r.len}B · gen
+          ${r.generation}
+        </span>
+      </h4>
+      <div class="plc-ops">
+        <button
+          class="chip-btn"
+          @click=${() => this.ctlOp('retain flush', () => this.ctl.retainFlush())}
+        >
+          flush
+        </button>
+        <button
+          class="chip-btn"
+          @click=${() => this.ctlOp('retain clear', () => this.ctl.retainClear())}
+        >
+          clear
+        </button>
+        <button class="chip-btn" @click=${() => void this.onRetainDump()}>dump…</button>
+        <span class="plc-dim">
+          ${r.flushes} flushes · ${r.restores} restores · ${r.losses} losses
+        </span>
+      </div>
+    `;
+  }
+
+  /** download the raw retain region as a .bin file. */
+  private async onRetainDump(): Promise<void> {
+    try {
+      const bytes = await this.ctl.retainDump();
+      const url = URL.createObjectURL(
+        new Blob([bytes as BlobPart], { type: 'application/octet-stream' }),
+      );
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${this.prog?.name ?? 'retain'}-dump.bin`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      this.ctlErr = e instanceof Error ? e.message : String(e);
+    }
+  }
+
   /** compile on the plc host and deploy the returned package directly. */
   private async onBuildDeploy(): Promise<void> {
     if (this.compiling) return;
@@ -832,9 +967,10 @@ export class TetherPlcIde extends LitElement {
     this.ctlErr = '';
     if (this.ctlOk) {
       try {
-        [this.prog, this.rt] = await Promise.all([
+        [this.prog, this.rt, this.retain] = await Promise.all([
           this.ctl.progStatus().catch(() => undefined),
           this.ctl.rtStatus().catch(() => undefined),
+          this.ctl.retainStatus().catch(() => undefined),
         ]);
       } catch (e) {
         this.ctlErr = e instanceof Error ? e.message : String(e);
