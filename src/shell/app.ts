@@ -125,11 +125,35 @@ export class TetherShell extends TileElement {
       }),
     ];
     if (!hub.connected && hub.client.state === 'disconnected') void hub.connect();
+    window.addEventListener('keydown', this.keyHandler);
   }
+
+  private keyHandler = (e: KeyboardEvent): void => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      this.paletteOpen = !this.paletteOpen;
+      this.paletteQuery = '';
+      this.requestUpdate();
+      return;
+    }
+    if (e.key === 'Escape') {
+      if (this.paletteOpen) {
+        this.paletteOpen = false;
+        this.requestUpdate();
+      } else if (this.overlay) {
+        this.overlay = undefined;
+        this.requestUpdate();
+      } else if (this.drawer) {
+        this.drawer = undefined;
+        this.requestUpdate();
+      }
+    }
+  };
 
   private unsubHub: (() => void)[] = [];
 
   disconnectedCallback(): void {
+    window.removeEventListener('keydown', this.keyHandler);
     this.unsubHub.forEach((u) => u());
     super.disconnectedCallback();
   }
