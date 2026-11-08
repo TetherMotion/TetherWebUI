@@ -40,6 +40,10 @@ export const CTL = {
   DBG_BREAK: 0x0508,
   DBG_BREAK_LIST: 0x0509,
   DBG_BREAK_CLEAR: 0x050a,
+  TRACE_CONF: 0x050b,
+  TRACE_STATUS: 0x050c,
+  TRACE_READ: 0x050d,
+  TRACE_CLEAR: 0x050e,
   IMAGE_STATS: 0x0701,
   RT_STATUS: 0x0901,
   RETAIN_STATUS: 0x0601,
@@ -121,6 +125,27 @@ export interface DbgBreak {
 
 /** cmp codes shared with the runtime's DBG_BREAK payload */
 export const DBG_CMP = ['==', '!=', '<', '<=', '>', '>='] as const;
+
+/** one flight-recorder channel (TRACE_CONF) */
+export interface DbgTraceCh {
+  offset: bigint;
+  len: number;
+}
+
+/** ring counters (TRACE_STATUS) */
+export interface DbgTraceStatus {
+  channels: number;
+  frameLen: number;
+  written: bigint;
+  avail: bigint;
+}
+
+/** one recorded frame (TRACE_READ) */
+export interface DbgTraceFrame {
+  seq: bigint;
+  ts: bigint;
+  data: Uint8Array;
+}
 
 export interface ProgStatus {
   uuid: string;
@@ -425,6 +450,62 @@ export class PlcCtl {
 
   dbgBreakClear(handle = 0xffffffff): Promise<CtlReply> {
     return this.call(CTL.DBG_BREAK_CLEAR, u32(handle));
+  }
+
+  /** arm the flight recorder: ≤8 channels, per-ch len ≤8, Σlen ≤64. */
+  dbgTraceConf(chs: { offset: bigint | number; len: number }[]):
+      Promise<number> {
+    const p = new Uint8Array(8 + chs.length * 16);
+    const d = new DataView(p.buffer);
+    d.setUint32(0, chs.length, true);
+    chs.forEach((c, i) => {
+      d.setBigUint64(8 + i * 16, BigInt(c.offset), true);
+      d.setUint32(8 + i * 16 + 8, c.len, true);
+    });
+    return this.call(CTL.TRACE_CONF, p).then((r) =>
+      new DataView(r.payload.buffer, r.payload.byteOffset)
+        .getUint32(0, true));
+  }
+
+  dbgTraceStatus(): Promise<DbgTraceStatus> {
+    return this.call(CTL.TRACE_STATUS).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      return {
+        channels: d.getUint32(0, true),
+        frameLen: d.getUint32(4, true),
+        written: d.getBigUint64(8, true),
+        avail: d.getBigUint64(16, true),
+      };
+    });
+  }
+
+  /** frames with seq ≥ fromSeq still in the ring; ≤512 per call. */
+  dbgTraceRead(fromSeq: bigint | number, max = 256):
+      Promise<{ first: bigint; frameLen: number; frames: DbgTraceFrame[] }> {
+    const p = new Uint8Array(12);
+    const d = new DataView(p.buffer);
+    d.setBigUint64(0, BigInt(fromSeq), true);
+    d.setUint32(8, max, true);
+    return this.call(CTL.TRACE_READ, p).then((r) => {
+      const dv = new DataView(r.payload.buffer, r.payload.byteOffset);
+      const n = dv.getUint32(8, true);
+      const frameLen = dv.getUint32(12, true);
+      const frames: DbgTraceFrame[] = [];
+      let o = 16;
+      for (let i = 0; i < n; i++) {
+        frames.push({
+          seq: dv.getBigUint64(o, true),
+          ts: dv.getBigUint64(o + 8, true),
+          data: r.payload.slice(o + 16, o + 16 + frameLen),
+        });
+        o += 16 + frameLen;
+      }
+      return { first: dv.getBigUint64(0, true), frameLen, frames };
+    });
+  }
+
+  dbgTraceClear(): Promise<CtlReply> {
+    return this.call(CTL.TRACE_CLEAR);
   }
 
   dbgState(): Promise<DbgState> {

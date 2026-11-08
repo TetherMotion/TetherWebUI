@@ -11,7 +11,7 @@ import { html, LitElement, nothing, TemplateResult } from 'lit';
 import { DataHub } from '../data/hub';
 import './fbd-canvas';
 import './st-editor';
-import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgSym, EV, PlcCtl, ProgStatus, RetainStatus, RtStatus } from './ctl';
+import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgSym, DbgTraceStatus, EV, PlcCtl, ProgStatus, RetainStatus, RtStatus } from './ctl';
 import { byteToOffset, compileProject, CompileDiag, diagsForFile } from './build';
 import type { StEditor } from './st-editor';
 import { IfaceKind, IfaceVar, Pou, Task } from './model';
@@ -63,6 +63,8 @@ export class TetherPlcIde extends LitElement {
     dbgHex: { state: true },
     forces: { state: true },
     breaks: { state: true },
+    trace: { state: true },
+    traceLines: { state: true },
   };
 
   declare pane: Pane;
@@ -82,6 +84,8 @@ export class TetherPlcIde extends LitElement {
   declare dbgHex?: string;
   declare forces?: DbgForce[];
   declare breaks?: DbgBreak[];
+  declare trace?: DbgTraceStatus;
+  declare traceLines?: string[];
 
   private ctl = new PlcCtl();
   private dbgSymName = '';
@@ -89,6 +93,7 @@ export class TetherPlcIde extends LitElement {
   private brkTask = '0';
   private brkCmp = '4';
   private brkVal = '';
+  private traceChs: { name: string; off: bigint; len: number }[] = [];
   private evSrc?: EventSource;
   private evTimer?: number;
 
@@ -1069,6 +1074,12 @@ export class TetherPlcIde extends LitElement {
                 class="chip-btn plc-force-btn"
                 @click=${() => void this.onDbgForce()}
                 >force</button
+              >
+              <button
+                class="chip-btn"
+                title="stage as a flight-recorder channel"
+                @click=${() => this.onTraceChAdd()}
+                >+ rec</button
               >`
           : nothing}
       </div>
@@ -1142,6 +1153,49 @@ export class TetherPlcIde extends LitElement {
               >clear all</button
             >
           </div>`
+        : nothing}
+      ${this.traceChs.length > 0
+        ? html`<div class="plc-forces">
+            <span class="plc-dim">rec ch:</span>
+            ${this.traceChs.map(
+              (c, i) => html`<span class="plc-force-tag">
+                ${c.name} ${c.off}:${c.len}
+                <button
+                  class="chip-btn"
+                  @click=${() => {
+                    this.traceChs.splice(i, 1);
+                    this.requestUpdate();
+                  }}
+                  >×</button
+                >
+              </span>`,
+            )}
+            <button class="chip-btn" @click=${() => void this.onTraceArm()}
+              >record</button
+            >
+          </div>`
+        : nothing}
+      ${this.trace && this.trace.channels > 0
+        ? html`<div class="plc-forces">
+            <span class="plc-force-tag">
+              rec ${this.trace.written} frames ·
+              ${this.trace.avail} in ring ·
+              ${this.trace.frameLen}B/frame
+            </span>
+            <button class="chip-btn" @click=${() => void this.onTraceRead()}
+              >read</button
+            >
+            <button
+              class="chip-btn"
+              @click=${() => this.ctlOp('trace clear', () => this.ctl.dbgTraceClear())}
+              >stop</button
+            >
+          </div>`
+        : nothing}
+      ${this.traceLines
+        ? html`<code class="plc-dbg-hex">${this.traceLines.map(
+            (l) => html`${l}<br />`,
+          )}</code>`
         : nothing}
     `;
   }
@@ -1222,6 +1276,43 @@ export class TetherPlcIde extends LitElement {
     }
     await this.ctlOp('dbg break', () =>
       this.ctl.dbgBreak(taskIdx, s.offset, s.size, Number(this.brkCmp), value));
+  }
+
+  private onTraceChAdd(): void {
+    const s = this.dbgSym;
+    if (!s) return;
+    if (s.size > 8) {
+      this.ctlErr = 'rec channel must be ≤ 8 B';
+      this.requestUpdate();
+      return;
+    }
+    if (this.traceChs.length >= 8) {
+      this.ctlErr = 'max 8 rec channels';
+      this.requestUpdate();
+      return;
+    }
+    this.traceChs.push({ name: this.dbgSymName.trim() || `off${s.offset}`,
+                         off: s.offset, len: s.size });
+    this.requestUpdate();
+  }
+
+  private async onTraceArm(): Promise<void> {
+    await this.ctlOp('trace arm', () =>
+      this.ctl.dbgTraceConf(
+        this.traceChs.map((c) => ({ offset: c.off, len: c.len }))));
+  }
+
+  private async onTraceRead(): Promise<void> {
+    await this.ctlOp('trace read', async () => {
+      const r = await this.ctl.dbgTraceRead(0n, 16);
+      this.traceLines = r.frames.map(
+        (f) =>
+          `#${f.seq} ${[...f.data]
+            .map((b) => b.toString(16).padStart(2, '0'))
+            .join(' ')}`);
+      if (r.frames.length === 0) this.traceLines = ['(ring empty)'];
+      this.requestUpdate();
+    });
   }
 
   private retainCard(r: RetainStatus): TemplateResult {
@@ -1343,7 +1434,8 @@ export class TetherPlcIde extends LitElement {
     if (this.ctlOk) {
       this.openEvents();
       try {
-        [this.prog, this.rt, this.retain, this.dbg, this.forces, this.breaks] =
+        [this.prog, this.rt, this.retain, this.dbg, this.forces,
+          this.breaks, this.trace] =
           await Promise.all([
             this.ctl.progStatus().catch(() => undefined),
             this.ctl.rtStatus().catch(() => undefined),
@@ -1351,6 +1443,7 @@ export class TetherPlcIde extends LitElement {
             this.ctl.dbgState().catch(() => undefined),
             this.ctl.dbgForceList().catch(() => undefined),
             this.ctl.dbgBreakList().catch(() => undefined),
+            this.ctl.dbgTraceStatus().catch(() => undefined),
           ]);
       } catch (e) {
         this.ctlErr = e instanceof Error ? e.message : String(e);
