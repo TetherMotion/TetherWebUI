@@ -1,14 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AppProfile, AppProfileWidget } from '../domain/app-profile';
 import { clampRect, collides, compact, findFreeSpot, resolveCollisions } from './layout';
-import {
-  BOARD_FORMAT,
-  BoardDoc,
-  makeTile,
-  parseBoardDoc,
-  serializeBoard,
-  TileDef,
-} from './model';
+import { BOARD_FORMAT, BoardDoc, makeTile, parseBoardDoc, serializeBoard, TileDef } from './model';
 import { TILE_SPEC_BY_TYPE } from './registry';
 import {
   boardsFromProfile,
