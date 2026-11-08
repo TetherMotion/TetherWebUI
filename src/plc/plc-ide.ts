@@ -11,7 +11,7 @@ import { html, LitElement, nothing, TemplateResult } from 'lit';
 import { DataHub } from '../data/hub';
 import './fbd-canvas';
 import './st-editor';
-import { CtlError, DbgForce, DbgState, DbgSym, EV, PlcCtl, ProgStatus, RetainStatus, RtStatus } from './ctl';
+import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgSym, EV, PlcCtl, ProgStatus, RetainStatus, RtStatus } from './ctl';
 import { byteToOffset, compileProject, CompileDiag, diagsForFile } from './build';
 import type { StEditor } from './st-editor';
 import { IfaceKind, IfaceVar, Pou, Task } from './model';
@@ -62,6 +62,7 @@ export class TetherPlcIde extends LitElement {
     dbgSym: { state: true },
     dbgHex: { state: true },
     forces: { state: true },
+    breaks: { state: true },
   };
 
   declare pane: Pane;
@@ -80,10 +81,14 @@ export class TetherPlcIde extends LitElement {
   declare dbgSym?: DbgSym;
   declare dbgHex?: string;
   declare forces?: DbgForce[];
+  declare breaks?: DbgBreak[];
 
   private ctl = new PlcCtl();
   private dbgSymName = '';
   private dbgWriteHex = '';
+  private brkTask = '0';
+  private brkCmp = '4';
+  private brkVal = '';
   private evSrc?: EventSource;
   private evTimer?: number;
 
@@ -1089,6 +1094,55 @@ export class TetherPlcIde extends LitElement {
             >
           </div>`
         : nothing}
+      ${s && [1, 2, 4, 8].includes(s.size)
+        ? html`<div class="plc-ops">
+            <span class="plc-dim">break task</span>
+            <input
+              class="fbd-in plc-brk-task"
+              .value=${this.brkTask}
+              @input=${(e: Event) =>
+                (this.brkTask = (e.target as HTMLInputElement).value)}
+            />
+            <span class="plc-dim">when ${this.dbgSymName || 'sym'}</span>
+            <select
+              class="fbd-in"
+              .value=${this.brkCmp}
+              @change=${(e: Event) =>
+                (this.brkCmp = (e.target as HTMLSelectElement).value)}
+            >
+              ${DBG_CMP.map((c, i) => html`<option value=${i}>${c}</option>`)}
+            </select>
+            <input
+              class="fbd-in"
+              placeholder="value"
+              .value=${this.brkVal}
+              @input=${(e: Event) =>
+                (this.brkVal = (e.target as HTMLInputElement).value)}
+            />
+            <button class="chip-btn" @click=${() => void this.onDbgBreak()}>arm</button>
+          </div>`
+        : nothing}
+      ${this.breaks && this.breaks.length > 0
+        ? html`<div class="plc-forces">
+            ${this.breaks.map(
+              (b) => html`<span class="plc-force-tag">
+                h${b.handle} task ${b.taskIdx} blob[${b.offset}..${b.len}]
+                ${DBG_CMP[b.cmp] ?? b.cmp} ${b.value} · hits ${b.hits}
+                <button
+                  class="chip-btn"
+                  @click=${() =>
+                    this.ctlOp('break clear', () => this.ctl.dbgBreakClear(b.handle))}
+                  >×</button
+                >
+              </span>`,
+            )}
+            <button
+              class="chip-btn"
+              @click=${() => this.ctlOp('break clear', () => this.ctl.dbgBreakClear())}
+              >clear all</button
+            >
+          </div>`
+        : nothing}
     `;
   }
 
@@ -1147,6 +1201,27 @@ export class TetherPlcIde extends LitElement {
       await this.ctl.dbgForce(s.offset, bytes);
       await this.onDbgRead();
     });
+  }
+
+  private async onDbgBreak(): Promise<void> {
+    const s = this.dbgSym;
+    if (!s) return;
+    const taskIdx = parseInt(this.brkTask, 10);
+    let value: bigint;
+    try {
+      value = BigInt(this.brkVal.trim());
+    } catch {
+      this.ctlErr = 'break: integer value required';
+      this.requestUpdate();
+      return;
+    }
+    if (isNaN(taskIdx)) {
+      this.ctlErr = 'break: task index required';
+      this.requestUpdate();
+      return;
+    }
+    await this.ctlOp('dbg break', () =>
+      this.ctl.dbgBreak(taskIdx, s.offset, s.size, Number(this.brkCmp), value));
   }
 
   private retainCard(r: RetainStatus): TemplateResult {
@@ -1240,7 +1315,15 @@ export class TetherPlcIde extends LitElement {
         const rc = new DataView(e.payload.buffer, e.payload.byteOffset).getInt32(0, true);
         this.flash(`plc fault rc=${rc}`);
       }
-      if (e.type === EV.PROG_TRANSITION || e.type === EV.FAULT) {
+      if (e.type === EV.DBG_BREAK && e.payload.length >= 8) {
+        const d = new DataView(e.payload.buffer, e.payload.byteOffset);
+        this.flash(`break h${d.getUint32(0, true)} hit · task ${d.getUint32(4, true)}`);
+      }
+      if (
+        e.type === EV.PROG_TRANSITION ||
+        e.type === EV.FAULT ||
+        e.type === EV.DBG_BREAK
+      ) {
         if (this.evTimer === undefined)
           this.evTimer = window.setTimeout(() => {
             this.evTimer = undefined;
@@ -1260,13 +1343,14 @@ export class TetherPlcIde extends LitElement {
     if (this.ctlOk) {
       this.openEvents();
       try {
-        [this.prog, this.rt, this.retain, this.dbg, this.forces] =
+        [this.prog, this.rt, this.retain, this.dbg, this.forces, this.breaks] =
           await Promise.all([
             this.ctl.progStatus().catch(() => undefined),
             this.ctl.rtStatus().catch(() => undefined),
             this.ctl.retainStatus().catch(() => undefined),
             this.ctl.dbgState().catch(() => undefined),
             this.ctl.dbgForceList().catch(() => undefined),
+            this.ctl.dbgBreakList().catch(() => undefined),
           ]);
       } catch (e) {
         this.ctlErr = e instanceof Error ? e.message : String(e);

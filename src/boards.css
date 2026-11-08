@@ -1407,3 +1407,8 @@ tile-frame {
   padding: 0 4px;
   font-size: 10px;
 }
+
+.plc-brk-task {
+  width: 3em;
+  min-width: 3em;
+}

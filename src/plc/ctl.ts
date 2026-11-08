@@ -37,6 +37,9 @@ export const CTL = {
   DBG_FORCE: 0x0505,
   DBG_FORCE_LIST: 0x0506,
   DBG_FORCE_CLEAR: 0x0507,
+  DBG_BREAK: 0x0508,
+  DBG_BREAK_LIST: 0x0509,
+  DBG_BREAK_CLEAR: 0x050a,
   IMAGE_STATS: 0x0701,
   RT_STATUS: 0x0901,
   RETAIN_STATUS: 0x0601,
@@ -51,6 +54,7 @@ const F_ERROR = 1 << 15;
 export const EV = {
   PROG_TRANSITION: 0x0e01,
   FAULT: 0x0e02,
+  DBG_BREAK: 0x0e03,
 } as const;
 
 export interface CtlEvent {
@@ -103,6 +107,20 @@ export interface DbgForce {
   offset: bigint;
   bytes: Uint8Array;
 }
+
+/** one armed conditional break (DBG_BREAK_LIST entry) */
+export interface DbgBreak {
+  handle: number;
+  taskIdx: number;
+  offset: bigint;
+  len: number;
+  cmp: number;
+  value: bigint;
+  hits: bigint;
+}
+
+/** cmp codes shared with the runtime's DBG_BREAK payload */
+export const DBG_CMP = ['==', '!=', '<', '<=', '>', '>='] as const;
 
 export interface ProgStatus {
   uuid: string;
@@ -367,6 +385,46 @@ export class PlcCtl {
   /** clear one handle, or all when omitted (0xFFFFFFFF). */
   dbgForceClear(handle = 0xffffffff): Promise<CtlReply> {
     return this.call(CTL.DBG_FORCE_CLEAR, u32(handle));
+  }
+
+  /** arm a conditional suspend: len∈{1,2,4,8}, cmp 0..5 → handle. */
+  dbgBreak(taskIdx: number, offset: bigint | number, len: number,
+           cmp: number, value: bigint | number): Promise<number> {
+    const p = new Uint8Array(28);
+    const d = new DataView(p.buffer);
+    d.setUint32(0, taskIdx, true);
+    d.setBigUint64(4, BigInt(offset), true);
+    d.setUint32(12, len, true);
+    d.setUint8(16, cmp);
+    d.setBigUint64(20, BigInt(value), true);
+    return this.call(CTL.DBG_BREAK, p).then((r) =>
+      new DataView(r.payload.buffer, r.payload.byteOffset).getUint32(0, true));
+  }
+
+  dbgBreakList(): Promise<DbgBreak[]> {
+    return this.call(CTL.DBG_BREAK_LIST).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      const n = d.getUint32(0, true);
+      const out: DbgBreak[] = [];
+      let o = 4;
+      for (let i = 0; i < n; i++) {
+        out.push({
+          handle: d.getUint32(o, true),
+          taskIdx: d.getUint32(o + 4, true),
+          offset: d.getBigUint64(o + 8, true),
+          len: d.getUint32(o + 16, true),
+          cmp: r.payload[o + 20]!,
+          value: d.getBigUint64(o + 24, true),
+          hits: d.getBigUint64(o + 32, true),
+        });
+        o += 40;
+      }
+      return out;
+    });
+  }
+
+  dbgBreakClear(handle = 0xffffffff): Promise<CtlReply> {
+    return this.call(CTL.DBG_BREAK_CLEAR, u32(handle));
   }
 
   dbgState(): Promise<DbgState> {
