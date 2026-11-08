@@ -50,6 +50,8 @@ export const CTL = {
   DBG_WATCH_REMOVE: 0x0512,
   DBG_WATCH_STREAM: 0x0513,
   DBG_WATCH_LIST: 0x0514,
+  DBG_BREAK_EXPR: 0x0515,
+  DBG_CAPTURE_EXPR: 0x0516,
   IMAGE_STATS: 0x0701,
   RT_STATUS: 0x0901,
   RETAIN_STATUS: 0x0601,
@@ -462,6 +464,23 @@ export class PlcCtl {
     d.setBigUint64(20, BigInt(value), true);
     return this.call(CTL.DBG_CAPTURE, p).then((r) =>
       new DataView(r.payload.buffer, r.payload.byteOffset).getUint32(0, true));
+  }
+
+  /** expression trigger: paths resolve via SMAP at arm time;
+      capture=true freezes the recorder on true, else suspends. */
+  dbgBreakExpr(taskIdx: number, expr: string,
+               capture = false): Promise<number> {
+    const enc = new TextEncoder().encode(expr);
+    const p = new Uint8Array(6 + enc.length);
+    const d = new DataView(p.buffer);
+    d.setUint32(0, taskIdx, true);
+    d.setUint16(4, enc.length, true);
+    p.set(enc, 6);
+    return this.call(
+      capture ? CTL.DBG_CAPTURE_EXPR : CTL.DBG_BREAK_EXPR, p)
+      .then((r) =>
+        new DataView(r.payload.buffer, r.payload.byteOffset)
+          .getUint32(0, true));
   }
 
   dbgBreakList(): Promise<DbgBreak[]> {

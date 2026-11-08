@@ -95,6 +95,7 @@ export class TetherPlcIde extends LitElement {
   private brkTask = '0';
   private brkCmp = '4';
   private brkVal = '';
+  private brkExpr = '';
   private brkKind = '0';
   private traceChs: { name: string; off: bigint; len: number }[] = [];
   private traceNoFreeze = false;
@@ -1163,6 +1164,19 @@ export class TetherPlcIde extends LitElement {
                 (this.brkVal = (e.target as HTMLInputElement).value)}
             />
             <button class="chip-btn" @click=${() => void this.onDbgBreak()}>arm</button>
+            <input
+              class="fbd-in"
+              placeholder="or expr: counter % 50 == 0 && flag"
+              .value=${this.brkExpr}
+              @input=${(e: Event) =>
+                (this.brkExpr = (e.target as HTMLInputElement).value)}
+            />
+            <button
+              class="chip-btn"
+              title="arm expression trigger (paths resolve at arm time)"
+              @click=${() => void this.onDbgBreakExpr()}
+              >arm expr</button
+            >
           </div>`
         : nothing}
       ${this.breaks && this.breaks.length > 0
@@ -1170,8 +1184,11 @@ export class TetherPlcIde extends LitElement {
             ${this.breaks.map(
               (b) => html`<span class="plc-force-tag">
                 h${b.handle} ${b.kind ? 'cap' : 'brk'} task ${b.taskIdx}
-                blob[${b.offset}..${b.len}]
-                ${DBG_CMP[b.cmp] ?? b.cmp} ${b.value} · hits ${b.hits}
+                ${b.cmp === 0xff
+                  ? 'expr'
+                  : html`blob[${b.offset}..${b.len}]
+                    ${DBG_CMP[b.cmp] ?? b.cmp} ${b.value}`}
+                · hits ${b.hits}
                 <button
                   class="chip-btn"
                   @click=${() =>
@@ -1388,6 +1405,20 @@ export class TetherPlcIde extends LitElement {
     await this.ctlOp(kind ? 'dbg capture' : 'dbg break', () =>
       (kind ? this.ctl.dbgCapture : this.ctl.dbgBreak).call(
         this.ctl, taskIdx, s.offset, s.size, Number(this.brkCmp), value));
+  }
+
+  private async onDbgBreakExpr(): Promise<void> {
+    const taskIdx = parseInt(this.brkTask, 10);
+    const expr = this.brkExpr.trim();
+    if (isNaN(taskIdx)) {
+      this.ctlErr = 'break: task index required';
+      this.requestUpdate();
+      return;
+    }
+    if (!expr) return;
+    const kind = Number(this.brkKind);
+    await this.ctlOp(kind ? 'dbg capture expr' : 'dbg break expr',
+      () => this.ctl.dbgBreakExpr(taskIdx, expr, kind === 1));
   }
 
   private onTraceChAdd(): void {
