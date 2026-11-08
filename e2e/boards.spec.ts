@@ -60,8 +60,11 @@ async function ensureEnabled(page: Page, name: string, axis = 'sim-axis-x'): Pro
 test('shell renders built-in boards and lazy-loads their tiles', async ({ page }) => {
   await connectAs(page, 'observer');
 
-  // Four built-in boards plus the new-board button.
-  await expect(page.locator('.board-tab')).toHaveCount(5);
+  // Five built-in boards plus the new-board button.
+  await expect(page.locator('.board-tab')).toHaveCount(6);
+  for (const title of ['Machine', 'Motion', 'Analyze', 'Service', 'TetherPLC']) {
+    await expect(page.locator('.board-tab', { hasText: title })).toHaveCount(1);
+  }
   await expect(page.locator('board-view tile-frame').first()).toBeVisible();
 
   // Machine board tiles are mounted custom elements, not placeholders.
@@ -77,6 +80,14 @@ test('shell renders built-in boards and lazy-loads their tiles', async ({ page }
   await expect(page.locator('tile-command')).toHaveCount(1);
   await expect(page.locator('tile-homing')).toHaveCount(1);
   await expect(page.locator('tile-operations')).toHaveCount(1);
+
+  // The PLC IDE is the heaviest tile — its ~455 kB chunk must only load
+  // when the TetherPLC board is opened.
+  await expect(page.locator('tether-plc-ide')).toHaveCount(0);
+  await openBoard(page, 'TetherPLC');
+  await expect(page.locator('tile-plc-ide tether-plc-ide')).toHaveCount(1, {
+    timeout: 30_000,
+  });
 });
 
 test('edit mode adds a tile from the gallery', async ({ page }) => {
