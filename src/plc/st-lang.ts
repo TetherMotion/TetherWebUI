@@ -109,6 +109,9 @@ const TYPES = new Set([
   'WSTRING',
 ]);
 
+export const KEYWORD_LIST = [...KEYWORDS];
+export const TYPE_LIST = [...TYPES];
+
 interface StState {
   inComment: boolean;
 }

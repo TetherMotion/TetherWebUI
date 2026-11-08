@@ -604,6 +604,10 @@ export class TetherPlcIde extends LitElement {
                   <st-editor
                     class="plc-st-editor"
                     .value=${this.project.stSources[pou.name] ?? ''}
+                    .symbols=${{
+                      pous: this.project.fbd.pous.map((p) => p.name),
+                      vars: pou.interface.map((v) => v.name),
+                    }}
                     @change=${(e: CustomEvent<string>) => this.onStEdit(pou, e.detail)}
                   ></st-editor>
                 `

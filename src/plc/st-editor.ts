@@ -12,7 +12,7 @@ import {
   keymap,
   drawSelection,
 } from '@codemirror/view';
-import { EditorState } from '@codemirror/state';
+import { Compartment, EditorState } from '@codemirror/state';
 import {
   bracketMatching,
   defaultHighlightStyle,
@@ -23,18 +23,23 @@ import {
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import { lintGutter, setDiagnostics, type Diagnostic } from '@codemirror/lint';
 import { st } from './st-lang';
+import { stCompletion, StSymbols } from './st-complete';
 
 export class StEditor extends LitElement {
   declare value: string;
   /** ms to debounce `change` emissions while typing */
   declare debounceMs: number;
+  /** project symbols for autocompletion (POU + interface var names) */
+  declare symbols: StSymbols;
 
   static properties = {
     value: { attribute: false },
     debounceMs: { type: Number },
+    symbols: { attribute: false },
   };
 
   private view?: EditorView;
+  private symbolsComp = new Compartment();
   private debounceTimer?: number;
   private applying = false;
 
@@ -42,6 +47,14 @@ export class StEditor extends LitElement {
     super();
     this.value = '';
     this.debounceMs = 400;
+    this.symbols = { pous: [], vars: [] };
+  }
+
+  updated(changed: Map<string, unknown>): void {
+    if (changed.has('symbols') && this.view)
+      this.view.dispatch({
+        effects: this.symbolsComp.reconfigure(stCompletion(this.symbols)),
+      });
   }
 
   createRenderRoot(): this {
@@ -64,6 +77,7 @@ export class StEditor extends LitElement {
           bracketMatching(),
           keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
           st(),
+          this.symbolsComp.of(stCompletion(this.symbols)),
           syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
           EditorView.updateListener.of((u) => {
             if (!u.docChanged || this.applying) return;

@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach } from 'vitest';
 import './plc-ide';
 import { emptyProject } from './model';
 import type { PlcProject } from './store';
+import type { TetherPlcIde } from './plc-ide';
 
 const KEY = 'tether.plc.project.v1';
 
@@ -17,7 +18,7 @@ function seed(): PlcProject {
 }
 
 async function mount() {
-  const el = document.createElement('tether-plc-ide');
+  const el = document.createElement('tether-plc-ide') as TetherPlcIde;
   document.body.appendChild(el);
   await el.updateComplete;
   return el;

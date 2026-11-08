@@ -120,6 +120,8 @@ const BUILTIN_FB: Record<string, PinSig> = {
   RS: { ins: ['S', 'R1'], outs: ['Q1'] },
 };
 
+export const BUILTIN_FB_NAMES = Object.keys(BUILTIN_FB);
+
 export function builtinFbSig(name: string): PinSig | undefined {
   return BUILTIN_FB[name.toUpperCase()];
 }
