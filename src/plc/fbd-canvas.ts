@@ -66,6 +66,7 @@ export class FbdCanvas extends LitElement {
     netIndex: { type: Number },
     pous: { attribute: false },
     values: { attribute: false },
+    diags: { attribute: false },
     selIds: { state: true },
     selWire: { state: true },
     pending: { state: true },
@@ -75,6 +76,8 @@ export class FbdCanvas extends LitElement {
 
   /** polled catalog values for live overlays (key = catalog name). */
   declare values?: Map<string, unknown>;
+  /** compile diags; blocks flagged via fbd{sheet,node} get an error outline. */
+  declare diags?: { fbd?: { sheet: number; node: number; pin: number } }[];
 
   declare selIds: Set<number>;
   declare selWire?: number;
@@ -817,8 +820,11 @@ export class FbdCanvas extends LitElement {
       b.kind === 'variable' && this.values && this.pou
         ? resolveKey(varKeys(this.pou, b), this.values)
         : undefined;
+    const flagged = this.diags?.some(
+      (d) => d.fbd && d.fbd.node === b.id && d.fbd.sheet === this.netIndex,
+    );
     return svg`
-      <g class="fbd-block ${sel ? 'sel' : ''}" transform="translate(${x} ${y})"
+      <g class="fbd-block ${sel ? 'sel' : ''} ${flagged ? 'diag' : ''}" transform="translate(${x} ${y})"
          @pointerdown=${(e: PointerEvent) => this.onBlockDown(e, b)}>
         <rect class="fbd-rect" width="${w}" height="${h}" rx="3"></rect>
         <text class="fbd-title" x="${w / 2}" y="13">${title}</text>

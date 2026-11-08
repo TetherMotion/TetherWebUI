@@ -14,13 +14,23 @@ import './st-editor';
 import { CtlError, PlcCtl, ProgStatus, RetainStatus, RtStatus } from './ctl';
 import { byteToOffset, compileProject, CompileDiag, diagsForFile } from './build';
 import type { StEditor } from './st-editor';
-import { Pou, Task } from './model';
+import { IfaceKind, IfaceVar, Pou, Task } from './model';
 import { entryWritable, writeScalar } from './mon';
 import { exportPlcopenXml, importPlcopenXml } from './plcopen';
 import type { CatalogEntry } from '../protocol';
 import { exportFbdJson, importFbdJson, loadProject, PlcProject, saveProject } from './store';
 
 type Pane = 'explorer' | 'st' | 'fbd' | 'tasks' | 'watch' | 'deploy';
+
+const IFACE_KINDS: IfaceKind[] = [
+  'var_input',
+  'var_output',
+  'var_in_out',
+  'var',
+  'var_temp',
+  'var_external',
+  'var_global',
+];
 
 const PANES: { id: Pane; label: string }[] = [
   { id: 'explorer', label: 'Explorer' },
@@ -445,32 +455,118 @@ export class TetherPlcIde extends LitElement {
     const pou = this.project.fbd.pous.find((p) => p.id === this.selPou);
     if (!pou) return html`<p class="plc-dim">Select a POU, or create one.</p>`;
     return html`
-      <h3>${pou.name} <span class="plc-dim">${pou.kind}</span></h3>
+      <h3>
+        ${pou.name} <span class="plc-dim">${pou.kind}</span>
+        <button class="chip-btn" @click=${() => this.onDelPou(pou)}>delete pou</button>
+      </h3>
+      <h4>
+        interface
+        <button class="chip-btn" @click=${() => this.addIfaceVar(pou)}>+ var</button>
+      </h4>
       <table class="plc-table">
         <thead>
           <tr>
-            <th>interface</th>
+            <th>name</th>
             <th>kind</th>
             <th>type</th>
             <th>init</th>
             <th>at</th>
+            <th>retain</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
           ${pou.interface.map(
-            (v) => html`
+            (v, vi) => html`
               <tr>
-                <td>${v.name}</td>
-                <td>${v.kind}</td>
-                <td>${v.type}</td>
-                <td>${v.init || ''}</td>
-                <td>${v.at || ''}</td>
+                <td>
+                  <input
+                    class="fbd-in"
+                    .value=${v.name}
+                    @change=${(e: Event) =>
+                      this.editIfaceVar(pou, vi, { name: (e.target as HTMLInputElement).value })}
+                  />
+                </td>
+                <td>
+                  <select
+                    .value=${v.kind}
+                    @change=${(e: Event) =>
+                      this.editIfaceVar(pou, vi, {
+                        kind: (e.target as HTMLSelectElement).value as IfaceKind,
+                      })}
+                  >
+                    ${IFACE_KINDS.map((k) => html`<option value=${k}>${k}</option>`)}
+                  </select>
+                </td>
+                <td>
+                  <input
+                    class="fbd-in"
+                    .value=${v.type}
+                    @change=${(e: Event) =>
+                      this.editIfaceVar(pou, vi, { type: (e.target as HTMLInputElement).value })}
+                  />
+                </td>
+                <td>
+                  <input
+                    class="fbd-in"
+                    .value=${v.init ?? ''}
+                    @change=${(e: Event) =>
+                      this.editIfaceVar(pou, vi, { init: (e.target as HTMLInputElement).value })}
+                  />
+                </td>
+                <td>
+                  <input
+                    class="fbd-in"
+                    .value=${v.at ?? ''}
+                    @change=${(e: Event) =>
+                      this.editIfaceVar(pou, vi, { at: (e.target as HTMLInputElement).value })}
+                  />
+                </td>
+                <td>
+                  <input
+                    type="checkbox"
+                    .checked=${v.retain === true}
+                    @change=${(e: Event) =>
+                      this.editIfaceVar(pou, vi, {
+                        retain: (e.target as HTMLInputElement).checked || undefined,
+                      })}
+                  />
+                </td>
+                <td>
+                  <button class="chip-btn" @click=${() => this.delIfaceVar(pou, vi)}>✕</button>
+                </td>
               </tr>
             `,
           )}
         </tbody>
       </table>
     `;
+  }
+
+  private onDelPou(pou: Pou): void {
+    const fbd = this.project.fbd;
+    fbd.pous = fbd.pous.filter((p) => p.id !== pou.id);
+    delete this.project.stSources[pou.name];
+    for (const t of fbd.tasks) t.programs = t.programs.filter((n) => n !== pou.name);
+    this.selPou = fbd.pous[0]?.id ?? '';
+    this.save();
+  }
+
+  private addIfaceVar(pou: Pou): void {
+    let n = pou.interface.length + 1;
+    while (pou.interface.some((v) => v.name === `var${n}`)) n++;
+    pou.interface.push({ name: `var${n}`, kind: 'var', type: 'INT' });
+    this.save();
+  }
+
+  private delIfaceVar(pou: Pou, i: number): void {
+    pou.interface.splice(i, 1);
+    this.save();
+  }
+
+  private editIfaceVar(pou: Pou, i: number, patch: Partial<IfaceVar>): void {
+    Object.assign(pou.interface[i]!, patch);
+    this.save();
   }
 
   // ---- ST ------------------------------------------------------------
@@ -548,6 +644,7 @@ export class TetherPlcIde extends LitElement {
           .netIndex=${this.selNet}
           .pous=${this.project.fbd.pous}
           .values=${this.hub ? new Map(this.hub.values) : undefined}
+          .diags=${this.diags}
           @change=${() => this.save()}
         ></fbd-canvas>
       </div>

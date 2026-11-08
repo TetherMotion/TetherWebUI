@@ -1239,6 +1239,11 @@ tile-frame {
   pointer-events: none;
 }
 
+.fbd-block.diag .fbd-rect {
+  stroke: var(--danger, #f66);
+  stroke-width: 2px;
+}
+
 .fbd-live {
   font-size: 9px;
   font-weight: 600;
