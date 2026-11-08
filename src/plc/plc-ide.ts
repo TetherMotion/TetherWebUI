@@ -11,7 +11,7 @@ import { html, LitElement, nothing, TemplateResult } from 'lit';
 import { DataHub } from '../data/hub';
 import './fbd-canvas';
 import './st-editor';
-import { CtlError, EV, PlcCtl, ProgStatus, RetainStatus, RtStatus } from './ctl';
+import { CtlError, DbgState, DbgSym, EV, PlcCtl, ProgStatus, RetainStatus, RtStatus } from './ctl';
 import { byteToOffset, compileProject, CompileDiag, diagsForFile } from './build';
 import type { StEditor } from './st-editor';
 import { IfaceKind, IfaceVar, Pou, Task } from './model';
@@ -58,6 +58,9 @@ export class TetherPlcIde extends LitElement {
     deployFrac: { state: true },
     diags: { state: true },
     compiling: { state: true },
+    dbg: { state: true },
+    dbgSym: { state: true },
+    dbgHex: { state: true },
   };
 
   declare pane: Pane;
@@ -72,8 +75,13 @@ export class TetherPlcIde extends LitElement {
   declare deployFrac?: number;
   declare diags?: CompileDiag[];
   declare compiling: boolean;
+  declare dbg?: DbgState;
+  declare dbgSym?: DbgSym;
+  declare dbgHex?: string;
 
   private ctl = new PlcCtl();
+  private dbgSymName = '';
+  private dbgWriteHex = '';
   private evSrc?: EventSource;
   private evTimer?: number;
 
@@ -941,6 +949,7 @@ export class TetherPlcIde extends LitElement {
           }
         </div>
         ${this.prog ? this.progTable(this.prog) : nothing}
+        ${this.dbg ? this.debugCard(this.dbg) : nothing}
         ${this.retain ? this.retainCard(this.retain) : nothing}
         ${this.rt ? html`<p class="plc-dim">rt: up ${this.rt.uptimeS}s · ${this.rt.progCount} progs (${this.rt.runningCount} running) · master ${this.rt.masterStatus} plc ${this.rt.plcStatus}</p>` : nothing}
         <p class="plc-dim">
@@ -968,23 +977,133 @@ export class TetherPlcIde extends LitElement {
             <th>runs</th>
             <th>late</th>
             <th>faults</th>
+            <th>debug</th>
           </tr>
         </thead>
         <tbody>
           ${p.tasks.map(
-            (t) =>
+            (t, i) =>
               html`<tr>
                 <td>${t.name}</td>
-                <td>${t.state}</td>
+                <td>${['idle', 'sched', 'susp'][t.state] ?? t.state}</td>
                 <td>${Number(t.periodNs) / 1e6} ms</td>
                 <td>${t.runs}</td>
                 <td>${t.late}</td>
                 <td>${t.faults}</td>
+                <td class="plc-task-dbg">
+                  ${t.state === 2
+                    ? html`<button
+                          class="chip-btn"
+                          @click=${() =>
+                            this.ctlOp('resume', () => this.ctl.taskResume(i))}
+                          >resume</button
+                        ><button
+                          class="chip-btn"
+                          @click=${() =>
+                            this.ctlOp('step', () => this.ctl.taskStep(i, 1))}
+                          >step</button
+                        ><button
+                          class="chip-btn"
+                          @click=${() =>
+                            this.ctlOp('step×10', () => this.ctl.taskStep(i, 10))}
+                          >+10</button
+                        >`
+                    : html`<button
+                        class="chip-btn"
+                        ?disabled=${p.state !== 1}
+                        @click=${() =>
+                          this.ctlOp('suspend', () => this.ctl.taskSuspend(i))}
+                        >suspend</button
+                      >`}
+                </td>
               </tr>`,
           )}
         </tbody>
       </table>
     `;
+  }
+
+  private debugCard(d: DbgState): TemplateResult {
+    const s = this.dbgSym;
+    const stale = s && s.uuid !== d.uuid;
+    return html`
+      <h4>
+        debug
+        <span class="plc-dim">
+          blob ${d.blobSize}B · retain
+          ${d.retainLen > 0n ? ` off ${d.retainOff} len ${d.retainLen}` : ' none'} ·
+          ${d.symCount} symbols
+        </span>
+      </h4>
+      <div class="plc-ops">
+        <input
+          class="fbd-in"
+          placeholder="symbol name (e.g. ctu1.CV)"
+          .value=${this.dbgSymName}
+          @input=${(e: Event) => (this.dbgSymName = (e.target as HTMLInputElement).value)}
+          @keydown=${(e: KeyboardEvent) => e.key === 'Enter' && void this.onDbgResolve()}
+        />
+        <button class="chip-btn" @click=${() => void this.onDbgResolve()}>resolve</button>
+        ${s
+          ? html`<span class="${stale ? 'fbd-warn' : 'plc-dim'}">
+                sym ${s.symIdx} kind ${s.kind} region ${s.region} access ${s.access} ·
+                off ${s.offset} size ${s.size}B${stale ? ' · STALE epoch' : ''}
+              </span>
+              <button class="chip-btn" @click=${() => void this.onDbgRead()}>read</button>
+              <input
+                class="fbd-in"
+                placeholder="write hex (e.g. 07000000)"
+                .value=${this.dbgWriteHex}
+                @input=${(e: Event) =>
+                  (this.dbgWriteHex = (e.target as HTMLInputElement).value)}
+              />
+              <button class="chip-btn" @click=${() => void this.onDbgWrite()}>write</button>`
+          : nothing}
+      </div>
+      ${this.dbgHex ? html`<code class="plc-dbg-hex">${this.dbgHex}</code>` : nothing}
+    `;
+  }
+
+  private async onDbgResolve(): Promise<void> {
+    try {
+      this.dbgSym = await this.ctl.dbgResolve(this.dbgSymName.trim());
+      this.dbgHex = undefined;
+      this.ctlErr = '';
+    } catch (e) {
+      this.dbgSym = undefined;
+      this.ctlErr = `resolve: ${e instanceof CtlError ? e.message : e}`;
+    }
+    this.requestUpdate();
+  }
+
+  private async onDbgRead(): Promise<void> {
+    const s = this.dbgSym;
+    if (!s) return;
+    try {
+      const b = await this.ctl.dbgRead(s.offset, Math.min(s.size, 256));
+      this.dbgHex = [...b].map((x) => x.toString(16).padStart(2, '0')).join(' ');
+      this.ctlErr = '';
+    } catch (e) {
+      this.ctlErr = `read: ${e instanceof CtlError ? e.message : e}`;
+    }
+    this.requestUpdate();
+  }
+
+  private async onDbgWrite(): Promise<void> {
+    const s = this.dbgSym;
+    if (!s) return;
+    const hex = this.dbgWriteHex.replace(/\s+/g, '');
+    if (!/^[0-9a-fA-F]*$/.test(hex) || hex.length % 2) {
+      this.ctlErr = 'write: hex string expected';
+      this.requestUpdate();
+      return;
+    }
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    await this.ctlOp('dbg write', async () => {
+      await this.ctl.dbgWrite(s.offset, bytes);
+      await this.onDbgRead();
+    });
   }
 
   private retainCard(r: RetainStatus): TemplateResult {
@@ -1098,10 +1217,11 @@ export class TetherPlcIde extends LitElement {
     if (this.ctlOk) {
       this.openEvents();
       try {
-        [this.prog, this.rt, this.retain] = await Promise.all([
+        [this.prog, this.rt, this.retain, this.dbg] = await Promise.all([
           this.ctl.progStatus().catch(() => undefined),
           this.ctl.rtStatus().catch(() => undefined),
           this.ctl.retainStatus().catch(() => undefined),
+          this.ctl.dbgState().catch(() => undefined),
         ]);
       } catch (e) {
         this.ctlErr = e instanceof Error ? e.message : String(e);

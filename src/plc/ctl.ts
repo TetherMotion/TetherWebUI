@@ -27,6 +27,13 @@ export const CTL = {
   PROG_SWAP: 0x030a,
   PROG_ROLLBACK: 0x030b,
   TASK_STATS: 0x0401,
+  TASK_SUSPEND: 0x0402,
+  TASK_RESUME: 0x0403,
+  TASK_STEP: 0x0404,
+  DBG_RESOLVE: 0x0501,
+  DBG_READ: 0x0502,
+  DBG_WRITE: 0x0503,
+  DBG_STATE: 0x0504,
   IMAGE_STATS: 0x0701,
   RT_STATUS: 0x0901,
   RETAIN_STATUS: 0x0601,
@@ -65,6 +72,28 @@ export interface CtlReply {
   payload: Uint8Array;
 }
 
+/** resolved symbol (DBG_RESOLVE reply) — placement + epoch tag */
+export interface DbgSym {
+  uuid: string;
+  symIdx: number;
+  kind: number;
+  flags: number;
+  region: number;
+  access: number;
+  typeRef: number;
+  offset: bigint;
+  size: number;
+}
+
+/** program blob geometry (DBG_STATE reply) */
+export interface DbgState {
+  uuid: string;
+  blobSize: bigint;
+  retainOff: bigint;
+  retainLen: bigint;
+  symCount: number;
+}
+
 export interface ProgStatus {
   uuid: string;
   name: string;
@@ -100,6 +129,12 @@ export interface RetainStatus {
 }
 
 let reqId = 1n;
+
+function u32(v: number): Uint8Array {
+  const b = new Uint8Array(4);
+  new DataView(b.buffer).setUint32(0, v, true);
+  return b;
+}
 
 function u64(v: bigint | number): Uint8Array {
   const b = new Uint8Array(8);
@@ -228,6 +263,76 @@ export class PlcCtl {
 
   progStop(): Promise<CtlReply> {
     return this.call(CTL.PROG_STOP);
+  }
+
+  taskSuspend(idx: number): Promise<CtlReply> {
+    return this.call(CTL.TASK_SUSPEND, u32(idx));
+  }
+
+  taskResume(idx: number): Promise<CtlReply> {
+    return this.call(CTL.TASK_RESUME, u32(idx));
+  }
+
+  taskStep(idx: number, n = 1): Promise<CtlReply> {
+    const p = new Uint8Array(8);
+    const d = new DataView(p.buffer);
+    d.setUint32(0, idx, true);
+    d.setUint32(4, n, true);
+    return this.call(CTL.TASK_STEP, p);
+  }
+
+  /** qualified name → placement. Errors -410 (not found) / -416 (no map). */
+  dbgResolve(name: string): Promise<DbgSym> {
+    const nb = new TextEncoder().encode(name);
+    const p = new Uint8Array(2 + nb.length);
+    new DataView(p.buffer).setUint16(0, nb.length, true);
+    p.set(nb, 2);
+    return this.call(CTL.DBG_RESOLVE, p).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      return {
+        uuid: [...r.payload.subarray(0, 16)].map((b) => b.toString(16).padStart(2, '0')).join(''),
+        symIdx: d.getUint32(16, true),
+        kind: r.payload[20]!,
+        flags: r.payload[21]!,
+        region: r.payload[22]!,
+        access: r.payload[23]!,
+        typeRef: d.getUint32(24, true),
+        offset: d.getBigUint64(28, true),
+        size: d.getUint32(36, true),
+      };
+    });
+  }
+
+  /** cycle-consistent read of the program blob. */
+  dbgRead(offset: bigint | number, len: number): Promise<Uint8Array> {
+    const p = new Uint8Array(12);
+    const d = new DataView(p.buffer);
+    d.setBigUint64(0, BigInt(offset), true);
+    d.setUint32(8, len, true);
+    return this.call(CTL.DBG_READ, p).then((r) => r.payload);
+  }
+
+  /** one-shot write at the next task boundary (no force semantics). */
+  dbgWrite(offset: bigint | number, bytes: Uint8Array): Promise<CtlReply> {
+    const p = new Uint8Array(12 + bytes.length);
+    const d = new DataView(p.buffer);
+    d.setBigUint64(0, BigInt(offset), true);
+    d.setUint32(8, bytes.length, true);
+    p.set(bytes, 12);
+    return this.call(CTL.DBG_WRITE, p);
+  }
+
+  dbgState(): Promise<DbgState> {
+    return this.call(CTL.DBG_STATE).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      return {
+        uuid: [...r.payload.subarray(0, 16)].map((b) => b.toString(16).padStart(2, '0')).join(''),
+        blobSize: d.getBigUint64(16, true),
+        retainOff: d.getBigUint64(24, true),
+        retainLen: d.getBigUint64(32, true),
+        symCount: d.getUint32(40, true),
+      };
+    });
   }
 
   progSwap(uuidHex: string): Promise<CtlReply> {

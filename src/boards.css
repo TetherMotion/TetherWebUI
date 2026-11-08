@@ -1369,3 +1369,17 @@ tile-frame {
 .plc-ok {
   color: var(--mint);
 }
+
+.plc-task-dbg .chip-btn {
+  padding: 1px 6px;
+  font-size: 10px;
+  margin-right: 4px;
+}
+
+.plc-dbg-hex {
+  display: block;
+  font-size: 11px;
+  color: var(--text-muted);
+  word-break: break-all;
+  margin: 4px 0;
+}
