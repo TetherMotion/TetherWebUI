@@ -11,7 +11,7 @@ import { html, LitElement, nothing, TemplateResult } from 'lit';
 import { DataHub } from '../data/hub';
 import './fbd-canvas';
 import './st-editor';
-import { CtlError, DbgState, DbgSym, EV, PlcCtl, ProgStatus, RetainStatus, RtStatus } from './ctl';
+import { CtlError, DbgForce, DbgState, DbgSym, EV, PlcCtl, ProgStatus, RetainStatus, RtStatus } from './ctl';
 import { byteToOffset, compileProject, CompileDiag, diagsForFile } from './build';
 import type { StEditor } from './st-editor';
 import { IfaceKind, IfaceVar, Pou, Task } from './model';
@@ -61,6 +61,7 @@ export class TetherPlcIde extends LitElement {
     dbg: { state: true },
     dbgSym: { state: true },
     dbgHex: { state: true },
+    forces: { state: true },
   };
 
   declare pane: Pane;
@@ -78,6 +79,7 @@ export class TetherPlcIde extends LitElement {
   declare dbg?: DbgState;
   declare dbgSym?: DbgSym;
   declare dbgHex?: string;
+  declare forces?: DbgForce[];
 
   private ctl = new PlcCtl();
   private dbgSymName = '';
@@ -1052,15 +1054,41 @@ export class TetherPlcIde extends LitElement {
               <button class="chip-btn" @click=${() => void this.onDbgRead()}>read</button>
               <input
                 class="fbd-in"
-                placeholder="write hex (e.g. 07000000)"
+                placeholder="hex (e.g. 07000000)"
                 .value=${this.dbgWriteHex}
                 @input=${(e: Event) =>
                   (this.dbgWriteHex = (e.target as HTMLInputElement).value)}
               />
-              <button class="chip-btn" @click=${() => void this.onDbgWrite()}>write</button>`
+              <button class="chip-btn" @click=${() => void this.onDbgWrite()}>write</button>
+              <button
+                class="chip-btn plc-force-btn"
+                @click=${() => void this.onDbgForce()}
+                >force</button
+              >`
           : nothing}
       </div>
       ${this.dbgHex ? html`<code class="plc-dbg-hex">${this.dbgHex}</code>` : nothing}
+      ${this.forces && this.forces.length > 0
+        ? html`<div class="plc-forces">
+            ${this.forces.map(
+              (f) => html`<span class="plc-force-tag">
+                off ${f.offset} =
+                ${[...f.bytes].map((b) => b.toString(16).padStart(2, '0')).join('')}
+                <button
+                  class="chip-btn"
+                  @click=${() =>
+                    this.ctlOp('force clear', () => this.ctl.dbgForceClear(f.handle))}
+                  >×</button
+                >
+              </span>`,
+            )}
+            <button
+              class="chip-btn"
+              @click=${() => this.ctlOp('force clear', () => this.ctl.dbgForceClear())}
+              >clear all</button
+            >
+          </div>`
+        : nothing}
     `;
   }
 
@@ -1089,19 +1117,34 @@ export class TetherPlcIde extends LitElement {
     this.requestUpdate();
   }
 
-  private async onDbgWrite(): Promise<void> {
-    const s = this.dbgSym;
-    if (!s) return;
+  private dbgHexBytes(): Uint8Array | undefined {
     const hex = this.dbgWriteHex.replace(/\s+/g, '');
-    if (!/^[0-9a-fA-F]*$/.test(hex) || hex.length % 2) {
-      this.ctlErr = 'write: hex string expected';
+    if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length % 2) {
+      this.ctlErr = 'hex string expected';
       this.requestUpdate();
-      return;
+      return undefined;
     }
     const bytes = new Uint8Array(hex.length / 2);
     for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    return bytes;
+  }
+
+  private async onDbgWrite(): Promise<void> {
+    const s = this.dbgSym;
+    const bytes = s && this.dbgHexBytes();
+    if (!s || !bytes) return;
     await this.ctlOp('dbg write', async () => {
       await this.ctl.dbgWrite(s.offset, bytes);
+      await this.onDbgRead();
+    });
+  }
+
+  private async onDbgForce(): Promise<void> {
+    const s = this.dbgSym;
+    const bytes = s && this.dbgHexBytes();
+    if (!s || !bytes) return;
+    await this.ctlOp('dbg force', async () => {
+      await this.ctl.dbgForce(s.offset, bytes);
       await this.onDbgRead();
     });
   }
@@ -1217,12 +1260,14 @@ export class TetherPlcIde extends LitElement {
     if (this.ctlOk) {
       this.openEvents();
       try {
-        [this.prog, this.rt, this.retain, this.dbg] = await Promise.all([
-          this.ctl.progStatus().catch(() => undefined),
-          this.ctl.rtStatus().catch(() => undefined),
-          this.ctl.retainStatus().catch(() => undefined),
-          this.ctl.dbgState().catch(() => undefined),
-        ]);
+        [this.prog, this.rt, this.retain, this.dbg, this.forces] =
+          await Promise.all([
+            this.ctl.progStatus().catch(() => undefined),
+            this.ctl.rtStatus().catch(() => undefined),
+            this.ctl.retainStatus().catch(() => undefined),
+            this.ctl.dbgState().catch(() => undefined),
+            this.ctl.dbgForceList().catch(() => undefined),
+          ]);
       } catch (e) {
         this.ctlErr = e instanceof Error ? e.message : String(e);
       }

@@ -34,6 +34,9 @@ export const CTL = {
   DBG_READ: 0x0502,
   DBG_WRITE: 0x0503,
   DBG_STATE: 0x0504,
+  DBG_FORCE: 0x0505,
+  DBG_FORCE_LIST: 0x0506,
+  DBG_FORCE_CLEAR: 0x0507,
   IMAGE_STATS: 0x0701,
   RT_STATUS: 0x0901,
   RETAIN_STATUS: 0x0601,
@@ -92,6 +95,13 @@ export interface DbgState {
   retainOff: bigint;
   retainLen: bigint;
   symCount: number;
+}
+
+/** one active force override (DBG_FORCE_LIST entry) */
+export interface DbgForce {
+  handle: number;
+  offset: bigint;
+  bytes: Uint8Array;
 }
 
 export interface ProgStatus {
@@ -320,6 +330,43 @@ export class PlcCtl {
     d.setUint32(8, bytes.length, true);
     p.set(bytes, 12);
     return this.call(CTL.DBG_WRITE, p);
+  }
+
+  /** persistent override at every boundary until cleared → handle. */
+  dbgForce(offset: bigint | number, bytes: Uint8Array): Promise<number> {
+    const p = new Uint8Array(12 + bytes.length);
+    const d = new DataView(p.buffer);
+    d.setBigUint64(0, BigInt(offset), true);
+    d.setUint32(8, bytes.length, true);
+    p.set(bytes, 12);
+    return this.call(CTL.DBG_FORCE, p).then((r) =>
+      new DataView(r.payload.buffer, r.payload.byteOffset).getUint32(0, true));
+  }
+
+  dbgForceList(): Promise<DbgForce[]> {
+    return this.call(CTL.DBG_FORCE_LIST).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      const n = d.getUint32(0, true);
+      const out: DbgForce[] = [];
+      let o = 4;
+      for (let i = 0; i < n; i++) {
+        const handle = d.getUint32(o, true);
+        const offset = d.getBigUint64(o + 4, true);
+        const len = d.getUint32(o + 12, true);
+        out.push({
+          handle,
+          offset,
+          bytes: r.payload.slice(o + 16, o + 16 + len),
+        });
+        o += 16 + len;
+      }
+      return out;
+    });
+  }
+
+  /** clear one handle, or all when omitted (0xFFFFFFFF). */
+  dbgForceClear(handle = 0xffffffff): Promise<CtlReply> {
+    return this.call(CTL.DBG_FORCE_CLEAR, u32(handle));
   }
 
   dbgState(): Promise<DbgState> {

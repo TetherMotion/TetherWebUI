@@ -1383,3 +1383,27 @@ tile-frame {
   word-break: break-all;
   margin: 4px 0;
 }
+
+.plc-forces {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 4px 0;
+}
+
+.plc-force-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 2px 6px;
+  border: 1px solid var(--glass-border);
+  border-radius: 3px;
+  background: rgba(255, 80, 80, 0.12);
+}
+
+.plc-force-tag .chip-btn {
+  padding: 0 4px;
+  font-size: 10px;
+}
