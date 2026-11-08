@@ -93,7 +93,9 @@ export class TetherPlcIde extends LitElement {
   private brkTask = '0';
   private brkCmp = '4';
   private brkVal = '';
+  private brkKind = '0';
   private traceChs: { name: string; off: bigint; len: number }[] = [];
+  private traceNoFreeze = false;
   private evSrc?: EventSource;
   private evTimer?: number;
 
@@ -1107,7 +1109,15 @@ export class TetherPlcIde extends LitElement {
         : nothing}
       ${s && [1, 2, 4, 8].includes(s.size)
         ? html`<div class="plc-ops">
-            <span class="plc-dim">break task</span>
+            <select
+              class="fbd-in"
+              .value=${this.brkKind}
+              @change=${(e: Event) =>
+                (this.brkKind = (e.target as HTMLSelectElement).value)}
+            >
+              <option value="0">break task</option>
+              <option value="1">capture on</option>
+            </select>
             <input
               class="fbd-in plc-brk-task"
               .value=${this.brkTask}
@@ -1137,7 +1147,8 @@ export class TetherPlcIde extends LitElement {
         ? html`<div class="plc-forces">
             ${this.breaks.map(
               (b) => html`<span class="plc-force-tag">
-                h${b.handle} task ${b.taskIdx} blob[${b.offset}..${b.len}]
+                h${b.handle} ${b.kind ? 'cap' : 'brk'} task ${b.taskIdx}
+                blob[${b.offset}..${b.len}]
                 ${DBG_CMP[b.cmp] ?? b.cmp} ${b.value} · hits ${b.hits}
                 <button
                   class="chip-btn"
@@ -1173,6 +1184,16 @@ export class TetherPlcIde extends LitElement {
             <button class="chip-btn" @click=${() => void this.onTraceArm()}
               >record</button
             >
+            <label class="plc-dim">
+              <input
+                type="checkbox"
+                .checked=${this.traceNoFreeze}
+                @change=${(e: Event) =>
+                  (this.traceNoFreeze =
+                    (e.target as HTMLInputElement).checked)}
+              />
+              nofreeze
+            </label>
           </div>`
         : nothing}
       ${this.trace && this.trace.channels > 0
@@ -1181,6 +1202,7 @@ export class TetherPlcIde extends LitElement {
               rec ${this.trace.written} frames ·
               ${this.trace.avail} in ring ·
               ${this.trace.frameLen}B/frame
+              ${this.trace.frozen ? ' · FROZEN' : nothing}
             </span>
             <button class="chip-btn" @click=${() => void this.onTraceRead()}
               >read</button
@@ -1274,8 +1296,10 @@ export class TetherPlcIde extends LitElement {
       this.requestUpdate();
       return;
     }
-    await this.ctlOp('dbg break', () =>
-      this.ctl.dbgBreak(taskIdx, s.offset, s.size, Number(this.brkCmp), value));
+    const kind = Number(this.brkKind);
+    await this.ctlOp(kind ? 'dbg capture' : 'dbg break', () =>
+      (kind ? this.ctl.dbgCapture : this.ctl.dbgBreak).call(
+        this.ctl, taskIdx, s.offset, s.size, Number(this.brkCmp), value));
   }
 
   private onTraceChAdd(): void {
@@ -1299,7 +1323,8 @@ export class TetherPlcIde extends LitElement {
   private async onTraceArm(): Promise<void> {
     await this.ctlOp('trace arm', () =>
       this.ctl.dbgTraceConf(
-        this.traceChs.map((c) => ({ offset: c.off, len: c.len }))));
+        this.traceChs.map((c) => ({ offset: c.off, len: c.len })),
+        this.traceNoFreeze));
   }
 
   private async onTraceRead(): Promise<void> {

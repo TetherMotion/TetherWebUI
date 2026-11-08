@@ -44,6 +44,7 @@ export const CTL = {
   TRACE_STATUS: 0x050c,
   TRACE_READ: 0x050d,
   TRACE_CLEAR: 0x050e,
+  DBG_CAPTURE: 0x050f,
   IMAGE_STATS: 0x0701,
   RT_STATUS: 0x0901,
   RETAIN_STATUS: 0x0601,
@@ -112,13 +113,15 @@ export interface DbgForce {
   bytes: Uint8Array;
 }
 
-/** one armed conditional break (DBG_BREAK_LIST entry) */
+/** one armed conditional trigger (DBG_BREAK_LIST entry) */
 export interface DbgBreak {
   handle: number;
   taskIdx: number;
   offset: bigint;
   len: number;
   cmp: number;
+  /** 0 suspend task, 1 freeze recorder */
+  kind: number;
   value: bigint;
   hits: bigint;
 }
@@ -132,12 +135,13 @@ export interface DbgTraceCh {
   len: number;
 }
 
-/** ring counters (TRACE_STATUS) */
+/** ring counters (TRACE_STATUS); frozen = post-trigger hold */
 export interface DbgTraceStatus {
   channels: number;
   frameLen: number;
   written: bigint;
   avail: bigint;
+  frozen: boolean;
 }
 
 /** one recorded frame (TRACE_READ) */
@@ -426,6 +430,20 @@ export class PlcCtl {
       new DataView(r.payload.buffer, r.payload.byteOffset).getUint32(0, true));
   }
 
+  /** capture trigger: same payload; freezes the recorder on hit. */
+  dbgCapture(taskIdx: number, offset: bigint | number, len: number,
+             cmp: number, value: bigint | number): Promise<number> {
+    const p = new Uint8Array(28);
+    const d = new DataView(p.buffer);
+    d.setUint32(0, taskIdx, true);
+    d.setBigUint64(4, BigInt(offset), true);
+    d.setUint32(12, len, true);
+    d.setUint8(16, cmp);
+    d.setBigUint64(20, BigInt(value), true);
+    return this.call(CTL.DBG_CAPTURE, p).then((r) =>
+      new DataView(r.payload.buffer, r.payload.byteOffset).getUint32(0, true));
+  }
+
   dbgBreakList(): Promise<DbgBreak[]> {
     return this.call(CTL.DBG_BREAK_LIST).then((r) => {
       const d = new DataView(r.payload.buffer, r.payload.byteOffset);
@@ -439,6 +457,7 @@ export class PlcCtl {
           offset: d.getBigUint64(o + 8, true),
           len: d.getUint32(o + 16, true),
           cmp: r.payload[o + 20]!,
+          kind: r.payload[o + 21]!,
           value: d.getBigUint64(o + 24, true),
           hits: d.getBigUint64(o + 32, true),
         });
@@ -452,12 +471,14 @@ export class PlcCtl {
     return this.call(CTL.DBG_BREAK_CLEAR, u32(handle));
   }
 
-  /** arm the flight recorder: ≤8 channels, per-ch len ≤8, Σlen ≤64. */
-  dbgTraceConf(chs: { offset: bigint | number; len: number }[]):
-      Promise<number> {
+  /** arm the flight recorder: ≤8 channels, per-ch len ≤8, Σlen ≤64.
+      nofreeze keeps recording through faults (default freezes on fault). */
+  dbgTraceConf(chs: { offset: bigint | number; len: number }[],
+               nofreeze = false): Promise<number> {
     const p = new Uint8Array(8 + chs.length * 16);
     const d = new DataView(p.buffer);
     d.setUint32(0, chs.length, true);
+    d.setUint32(4, nofreeze ? 1 : 0, true);
     chs.forEach((c, i) => {
       d.setBigUint64(8 + i * 16, BigInt(c.offset), true);
       d.setUint32(8 + i * 16 + 8, c.len, true);
@@ -475,6 +496,8 @@ export class PlcCtl {
         frameLen: d.getUint32(4, true),
         written: d.getBigUint64(8, true),
         avail: d.getBigUint64(16, true),
+        frozen: r.payload.length >= 28 &&
+          (d.getUint32(24, true) & 1) !== 0,
       };
     });
   }
