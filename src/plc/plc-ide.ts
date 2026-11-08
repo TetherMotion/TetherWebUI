@@ -11,7 +11,7 @@ import { html, LitElement, nothing, TemplateResult } from 'lit';
 import { DataHub } from '../data/hub';
 import './fbd-canvas';
 import './st-editor';
-import { CtlError, PlcCtl, ProgStatus, RetainStatus, RtStatus } from './ctl';
+import { CtlError, EV, PlcCtl, ProgStatus, RetainStatus, RtStatus } from './ctl';
 import { byteToOffset, compileProject, CompileDiag, diagsForFile } from './build';
 import type { StEditor } from './st-editor';
 import { IfaceKind, IfaceVar, Pou, Task } from './model';
@@ -74,6 +74,8 @@ export class TetherPlcIde extends LitElement {
   declare compiling: boolean;
 
   private ctl = new PlcCtl();
+  private evSrc?: EventSource;
+  private evTimer?: number;
 
   private project: PlcProject = loadProject();
   private unsubs: (() => void)[] = [];
@@ -102,6 +104,9 @@ export class TetherPlcIde extends LitElement {
     this.unsubs = [];
     this.bindingRelease?.();
     this.bindingRelease = undefined;
+    this.evSrc?.close();
+    this.evSrc = undefined;
+    if (this.evTimer !== undefined) clearTimeout(this.evTimer);
     super.disconnectedCallback();
   }
 
@@ -1054,15 +1059,40 @@ export class TetherPlcIde extends LitElement {
   }
 
   private setCtlUrl(url: string): void {
+    this.evSrc?.close();
+    this.evSrc = undefined;
     this.ctl = new PlcCtl(url);
     localStorage.setItem('tether.plc.ctlUrl', url);
     this.refreshCtl();
   }
 
+  /** SSE subscription to runtime events; coalesces refresh storms. */
+  private openEvents(): void {
+    if (this.evSrc) return;
+    this.evSrc = this.ctl.events((e) => {
+      if (e.type === EV.FAULT && e.payload.length >= 4) {
+        const rc = new DataView(e.payload.buffer, e.payload.byteOffset).getInt32(0, true);
+        this.flash(`plc fault rc=${rc}`);
+      }
+      if (e.type === EV.PROG_TRANSITION || e.type === EV.FAULT) {
+        if (this.evTimer === undefined)
+          this.evTimer = window.setTimeout(() => {
+            this.evTimer = undefined;
+            void this.refreshCtl();
+          }, 150);
+      }
+    });
+  }
+
   private refreshCtl = async (): Promise<void> => {
     this.ctlOk = await this.ctl.health();
     this.ctlErr = '';
+    if (!this.ctlOk) {
+      this.evSrc?.close();
+      this.evSrc = undefined;
+    }
     if (this.ctlOk) {
+      this.openEvents();
       try {
         [this.prog, this.rt, this.retain] = await Promise.all([
           this.ctl.progStatus().catch(() => undefined),

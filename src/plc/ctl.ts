@@ -37,6 +37,17 @@ export const CTL = {
 
 const F_ERROR = 1 << 15;
 
+/** unsolicited event types (msg_type range 0x0E00, pushed via /events SSE) */
+export const EV = {
+  PROG_TRANSITION: 0x0e01,
+  FAULT: 0x0e02,
+} as const;
+
+export interface CtlEvent {
+  type: number;
+  payload: Uint8Array;
+}
+
 export class CtlError extends Error {
   constructor(
     public code: number,
@@ -140,6 +151,24 @@ export class PlcCtl {
       );
     }
     return rep;
+  }
+
+  /** subscribe to runtime events; caller owns closing the EventSource. */
+  events(onEvent: (e: CtlEvent) => void): EventSource {
+    const es = new EventSource(`${this.url}/events`);
+    es.onmessage = (m: MessageEvent<string>) => {
+      try {
+        const j = JSON.parse(m.data) as { type: number; payload: string };
+        if (!(j.type & 0x0e00)) return;
+        const bin = atob(j.payload ?? '');
+        const payload = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) payload[i] = bin.charCodeAt(i);
+        onEvent({ type: j.type, payload });
+      } catch {
+        /* malformed line */
+      }
+    };
+    return es;
   }
 
   async health(): Promise<boolean> {
