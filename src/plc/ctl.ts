@@ -54,6 +54,12 @@ export const CTL = {
   DBG_CAPTURE_EXPR: 0x0516,
   DBG_STATE_DIFF: 0x0517,
   IMAGE_STATS: 0x0701,
+  SHADOW_LOAD: 0x0801,
+  SHADOW_STATUS: 0x0802,
+  SHADOW_COMPARE: 0x0803,
+  SHADOW_PROMOTE: 0x0804,
+  SHADOW_DROP: 0x0805,
+  SHADOW_RESET: 0x0806,
   RT_STATUS: 0x0901,
   RETAIN_STATUS: 0x0601,
   RETAIN_FLUSH: 0x0602,
@@ -202,6 +208,11 @@ export interface ProgStatus {
   name: string;
   state: number;
   cycles: bigint;
+  /** proto-v3 shadow tail (absent on older runtimes) */
+  shadowState?: number;
+  shadowCycles?: bigint;
+  shadowMissed?: bigint;
+  shadowDiffCount?: bigint;
   tasks: {
     name: string;
     state: number;
@@ -210,6 +221,28 @@ export interface ProgStatus {
     late: bigint;
     faults: bigint;
   }[];
+}
+
+/** SHADOW_STATUS reply — loaded flag + TplcCtlShadowStatus fields */
+export interface ShadowStatus {
+  loaded: boolean;
+  uuid?: string;
+  name?: string;
+  state?: number;
+  cycles?: bigint;
+  missed?: bigint;
+  diffCount?: bigint;
+  lastDiffCycle?: bigint;
+  runs?: bigint;
+}
+
+/** SHADOW_COMPARE ring entry — one bounded differing byte-run */
+export interface ShadowDiff {
+  cycle: bigint;
+  imgOff: bigint;
+  len: number;
+  active: Uint8Array;
+  shadow: Uint8Array;
 }
 
 export interface RtStatus {
@@ -325,9 +358,19 @@ export class PlcCtl {
     return this.call(CTL.PROG_STATUS).then((r) => {
       const d = new DataView(r.payload.buffer, r.payload.byteOffset);
       const taskCount = d.getUint32(84, true);
+      /* the task array trails the versioned base struct: v1 = 104 B
+         base/112 B stride, v2 = 296/136, v3 = 336/136 (shadow tail).
+         Detect by exact reply length. */
+      const lay =
+        [
+          { base: 336, stride: 136 },
+          { base: 296, stride: 136 },
+          { base: 104, stride: 112 },
+        ].find((c) => r.payload.length === c.base + taskCount * c.stride) ??
+        { base: 104, stride: 112 };
       const tasks: ProgStatus['tasks'] = [];
       for (let i = 0; i < taskCount; i++) {
-        const o = 104 + i * 112;
+        const o = lay.base + i * lay.stride;
         tasks.push({
           name: cstr(r.payload.subarray(o, o + 64)),
           state: r.payload[o + 65]!,
@@ -337,11 +380,16 @@ export class PlcCtl {
           faults: d.getBigUint64(o + 96, true),
         });
       }
+      const v3 = lay.base === 336;
       return {
         uuid: [...r.payload.subarray(0, 16)].map((b) => b.toString(16).padStart(2, '0')).join(''),
         name: cstr(r.payload.subarray(16, 80)),
         state: r.payload[80]!,
         cycles: d.getBigUint64(88, true),
+        shadowState: v3 ? r.payload[296]! : undefined,
+        shadowCycles: v3 ? d.getBigUint64(304, true) : undefined,
+        shadowMissed: v3 ? d.getBigUint64(312, true) : undefined,
+        shadowDiffCount: v3 ? d.getBigUint64(320, true) : undefined,
         tasks,
       };
     });
@@ -406,12 +454,14 @@ export class PlcCtl {
     });
   }
 
-  /** cycle-consistent read of the program blob. */
-  dbgRead(offset: bigint | number, len: number): Promise<Uint8Array> {
-    const p = new Uint8Array(12);
+  /** cycle-consistent read of the program blob.
+      sel 0 = active (default), 1 = shadow blob (read-only). */
+  dbgRead(offset: bigint | number, len: number, sel = 0): Promise<Uint8Array> {
+    const p = new Uint8Array(sel ? 13 : 12);
     const d = new DataView(p.buffer);
     d.setBigUint64(0, BigInt(offset), true);
     d.setUint32(8, len, true);
+    if (sel) p[12] = sel;
     return this.call(CTL.DBG_READ, p).then((r) => r.payload);
   }
 
@@ -733,6 +783,82 @@ export class PlcCtl {
 
   progRollback(): Promise<CtlReply> {
     return this.call(CTL.PROG_ROLLBACK);
+  }
+
+  /* ---- shadow run (doc 19) --------------------------------------- */
+
+  /** load a deployed package as the shadow candidate → uuid + loaded */
+  shadowLoad(uuidHex: string): Promise<{ uuid: string }> {
+    const uuid = new Uint8Array(16);
+    for (let i = 0; i < 16; i++) uuid[i] = parseInt(uuidHex.slice(i * 2, i * 2 + 2), 16);
+    return this.call(CTL.SHADOW_LOAD, uuid).then((r) => ({
+      uuid: [...r.payload.subarray(1, 17)].map((b) => b.toString(16).padStart(2, '0')).join(''),
+    }));
+  }
+
+  shadowStatus(): Promise<ShadowStatus> {
+    return this.call(CTL.SHADOW_STATUS).then((r) => {
+      if (r.payload.length <= 1) return { loaded: false };
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      return {
+        loaded: true,
+        uuid: [...r.payload.subarray(0, 16)].map((b) => b.toString(16).padStart(2, '0')).join(''),
+        name: cstr(r.payload.subarray(16, 80)),
+        state: r.payload[80]!,
+        cycles: d.getBigUint64(88, true),
+        missed: d.getBigUint64(96, true),
+        diffCount: d.getBigUint64(104, true),
+        lastDiffCycle: d.getBigUint64(112, true),
+        runs: d.getBigUint64(120, true),
+      };
+    });
+  }
+
+  /** newest %Q diffs (bounded byte runs, ≤ max entries) */
+  shadowCompare(max = 64): Promise<ShadowDiff[]> {
+    return this.call(CTL.SHADOW_COMPARE, u32(max)).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      const n = r.payload.length >= 4 ? d.getUint32(0, true) : 0;
+      const out: ShadowDiff[] = [];
+      for (let i = 0; i < n && 4 + (i + 1) * 84 <= r.payload.length; i++) {
+        const o = 4 + i * 84;
+        const len = d.getUint32(o + 16, true);
+        out.push({
+          cycle: d.getBigUint64(o, true),
+          imgOff: d.getBigUint64(o + 8, true),
+          len,
+          active: r.payload.slice(o + 20, o + 20 + Math.min(len, 32)),
+          shadow: r.payload.slice(o + 52, o + 52 + Math.min(len, 32)),
+        });
+      }
+      return out;
+    });
+  }
+
+  /** adopt the shadow as the active program → uuid + new epoch */
+  shadowPromote(): Promise<{ uuid: string; epoch: bigint }> {
+    return this.call(CTL.SHADOW_PROMOTE).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      return {
+        uuid: [...r.payload.subarray(0, 16)].map((b) => b.toString(16).padStart(2, '0')).join(''),
+        epoch: d.getBigUint64(16, true),
+      };
+    });
+  }
+
+  shadowDrop(): Promise<CtlReply> {
+    return this.call(CTL.SHADOW_DROP);
+  }
+
+  /** re-run the active→shadow migration → out_status + first_error */
+  shadowReset(): Promise<{ outStatus: number; firstErr: number }> {
+    return this.call(CTL.SHADOW_RESET).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      return {
+        outStatus: d.getUint32(0, true),
+        firstErr: d.getUint32(4, true),
+      };
+    });
   }
 
   retainStatus(): Promise<RetainStatus> {

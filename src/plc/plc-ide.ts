@@ -11,7 +11,7 @@ import { html, LitElement, nothing, TemplateResult } from 'lit';
 import { DataHub } from '../data/hub';
 import './fbd-canvas';
 import './st-editor';
-import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgStateDiff, DbgSym, DbgTraceStatus, DbgWatchEntry, EV, PlcCtl, ProgStatus, RetainStatus, RtStatus } from './ctl';
+import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgStateDiff, DbgSym, DbgTraceStatus, DbgWatchEntry, EV, PlcCtl, ProgStatus, RetainStatus, RtStatus, ShadowDiff, ShadowStatus } from './ctl';
 import { byteToOffset, compileProject, CompileDiag, diagsForFile } from './build';
 import type { StEditor } from './st-editor';
 import { IfaceKind, IfaceVar, Pou, Task } from './model';
@@ -58,6 +58,8 @@ export class TetherPlcIde extends LitElement {
     prog: { state: true },
     rt: { state: true },
     retain: { state: true },
+    shadow: { state: true },
+    shadowDiffs: { state: true },
     deployFrac: { state: true },
     diags: { state: true },
     compiling: { state: true },
@@ -79,6 +81,8 @@ export class TetherPlcIde extends LitElement {
   declare prog?: ProgStatus;
   declare rt?: RtStatus;
   declare retain?: RetainStatus;
+  declare shadow?: ShadowStatus;
+  declare shadowDiffs?: ShadowDiff[];
   declare deployFrac?: number;
   declare diags?: CompileDiag[];
   declare compiling: boolean;
@@ -93,6 +97,7 @@ export class TetherPlcIde extends LitElement {
 
   private ctl = new PlcCtl();
   private dbgSymName = '';
+  private dbgSymShadow = false;
   private dbgWriteHex = '';
   private dbgMaskHex = '';
   private brkTask = '0';
@@ -972,6 +977,7 @@ export class TetherPlcIde extends LitElement {
           }
         </div>
         ${this.prog ? this.progTable(this.prog) : nothing}
+        ${this.shadowCard()}
         ${this.dbg ? this.debugCard(this.dbg) : nothing}
         ${this.retain ? this.retainCard(this.retain) : nothing}
         ${this.rt ? html`<p class="plc-dim">rt: up ${this.rt.uptimeS}s · ${this.rt.progCount} progs (${this.rt.runningCount} running) · master ${this.rt.masterStatus} plc ${this.rt.plcStatus}</p>` : nothing}
@@ -1046,9 +1052,141 @@ export class TetherPlcIde extends LitElement {
     `;
   }
 
+  private shadowCard(): TemplateResult | typeof nothing {
+    if (!this.ctlOk || !this.prog) return nothing;
+    const sh = this.shadow;
+    const diffs = this.shadowDiffs ?? [];
+    const hex = (b: Uint8Array) =>
+      [...b].map((x) => x.toString(16).padStart(2, '0')).join(' ');
+    return html`
+      <h4>
+        shadow run
+        ${sh?.loaded
+          ? html`<span class="plc-dim"
+              >${sh.name} ${sh.uuid?.slice(0, 8)} ·
+              ${['stopped', 'running', 'fault'][sh.state ?? 0] ?? sh.state} ·
+              ${sh.cycles} cycles · ${sh.missed} missed · ${sh.diffCount} diffs
+              ${sh.diffCount
+                ? html`· last @ cycle ${sh.lastDiffCycle}`
+                : nothing}</span
+            >`
+          : html`<span class="plc-dim">none loaded</span>`}
+      </h4>
+      <div class="plc-ops">
+        <input
+          type="file"
+          id="plc-shpkg"
+          accept=".tplc"
+          hidden
+          @change=${this.onShadowPkgFile}
+        />
+        <button
+          class="chip-btn"
+          ?disabled=${this.prog.state !== 1}
+          title="deploy a .tplc package and run it as the shadow candidate"
+          @click=${() => this.querySelector<HTMLInputElement>('#plc-shpkg')?.click()}
+        >
+          ${sh?.loaded ? 'reload…' : 'deploy as shadow…'}
+        </button>
+        ${sh?.loaded
+          ? html`<button
+                class="chip-btn"
+                title="atomically adopt the shadow program and its live state"
+                @click=${() => this.onShadowPromote()}
+                >promote</button
+              ><button
+                class="chip-btn"
+                title="re-run active→shadow state migration"
+                @click=${() => this.ctlOp('shadow reset', () => this.ctl.shadowReset())}
+                >reset</button
+              ><button
+                class="chip-btn"
+                @click=${() => this.ctlOp('shadow drop', () => this.ctl.shadowDrop())}
+                >drop</button
+              >`
+          : nothing}
+      </div>
+      ${sh?.loaded
+        ? html`<p class="plc-dim">
+            outputs private · diffs are post-%Q byte runs · watch a candidate
+            var as <code>SHADOW.&lt;sym&gt;</code>
+          </p>`
+        : nothing}
+      ${diffs.length
+        ? html`<table class="plc-table">
+            <thead>
+              <tr>
+                <th>cycle</th>
+                <th>img+off</th>
+                <th>active</th>
+                <th>shadow</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${diffs.map(
+                (d) => html`<tr>
+                  <td>${d.cycle}</td>
+                  <td>0x${d.imgOff.toString(16)}</td>
+                  <td><code>${hex(d.active)}</code></td>
+                  <td><code>${hex(d.shadow)}</code></td>
+                </tr>`,
+              )}
+            </tbody>
+          </table>`
+        : nothing}
+    `;
+  }
+
+  /** upload + deploy a .tplc, then load it as the shadow candidate. */
+  private onShadowPkgFile = async (e: Event): Promise<void> => {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    this.deployFrac = 0;
+    this.requestUpdate();
+    try {
+      const uuid = await this.ctl.deploy(bytes, 0, (f) => {
+        this.deployFrac = f;
+        this.requestUpdate();
+      });
+      await this.ctl.shadowLoad(uuid);
+      this.ctlErr = '';
+      this.flash(`shadow ${file.name} → ${uuid.slice(0, 8)}`);
+      await this.refreshCtl();
+    } catch (e2) {
+      this.ctlErr = `shadow load: ${e2 instanceof Error ? e2.message : e2}`;
+    } finally {
+      this.deployFrac = undefined;
+      this.requestUpdate();
+    }
+  };
+
+  /** confirm-with-summary, then adopt the shadow as the active program. */
+  private onShadowPromote(): void {
+    const sh = this.shadow;
+    if (!sh?.loaded) return;
+    const n = this.shadowDiffs?.length ?? 0;
+    const sum =
+      `promote shadow ${sh.name ?? ''} (${sh.uuid?.slice(0, 8)}) ` +
+      `as the active program?\n\n` +
+      `cycles ${sh.cycles} · missed ${sh.missed} · ` +
+      `${sh.diffCount} diff${sh.diffCount === 1n ? '' : 's'} ` +
+      `(${n} shown)\n\n` +
+      `the shadow's live state is adopted atomically; rollback stays armed.`;
+    if (!window.confirm(sum)) return;
+    void this.ctlOp('shadow promote', async () => {
+      const r = await this.ctl.shadowPromote();
+      this.flash(`promoted ${r.uuid.slice(0, 8)} → epoch ${r.epoch}`);
+    });
+  }
+
   private debugCard(d: DbgState): TemplateResult {
     const s = this.dbgSym;
-    const stale = s && s.uuid !== d.uuid;
+    /* SHADOW.<sym> resolutions carry the shadow program uuid — compare
+       against the shadow identity, not the active one */
+    const stale = s && s.uuid !== (this.dbgSymShadow ? this.shadow?.uuid : d.uuid);
     return html`
       <h4>
         debug
@@ -1061,7 +1199,7 @@ export class TetherPlcIde extends LitElement {
       <div class="plc-ops">
         <input
           class="fbd-in"
-          placeholder="symbol name (e.g. ctu1.CV)"
+          placeholder="symbol name (e.g. ctu1.CV, SHADOW.cnt)"
           .value=${this.dbgSymName}
           @input=${(e: Event) => (this.dbgSymName = (e.target as HTMLInputElement).value)}
           @keydown=${(e: KeyboardEvent) => e.key === 'Enter' && void this.onDbgResolve()}
@@ -1069,31 +1207,34 @@ export class TetherPlcIde extends LitElement {
         <button class="chip-btn" @click=${() => void this.onDbgResolve()}>resolve</button>
         ${s
           ? html`<span class="${stale ? 'fbd-warn' : 'plc-dim'}">
-                sym ${s.symIdx} kind ${s.kind} region ${s.region} access ${s.access} ·
+                ${this.dbgSymShadow ? 'shadow ' : ''}sym ${s.symIdx} kind
+                ${s.kind} region ${s.region} access ${s.access} ·
                 off ${s.offset} size ${s.size}B${stale ? ' · STALE epoch' : ''}
               </span>
               <button class="chip-btn" @click=${() => void this.onDbgRead()}>read</button>
-              <input
-                class="fbd-in"
-                placeholder="hex (e.g. 07000000)"
-                .value=${this.dbgWriteHex}
-                @input=${(e: Event) =>
-                  (this.dbgWriteHex = (e.target as HTMLInputElement).value)}
-              />
-              <button class="chip-btn" @click=${() => void this.onDbgWrite()}>write</button>
-              <input
-                class="fbd-in plc-brk-task"
-                title="optional bit mask (hex, same byte count)"
-                placeholder="mask"
-                .value=${this.dbgMaskHex}
-                @input=${(e: Event) =>
-                  (this.dbgMaskHex = (e.target as HTMLInputElement).value)}
-              />
-              <button
-                class="chip-btn plc-force-btn"
-                @click=${() => void this.onDbgForce()}
-                >force</button
-              >
+              ${!this.dbgSymShadow
+                ? html`<input
+                    class="fbd-in"
+                    placeholder="hex (e.g. 07000000)"
+                    .value=${this.dbgWriteHex}
+                    @input=${(e: Event) =>
+                      (this.dbgWriteHex = (e.target as HTMLInputElement).value)}
+                  />
+                  <button class="chip-btn" @click=${() => void this.onDbgWrite()}>write</button>
+                  <input
+                    class="fbd-in plc-brk-task"
+                    title="optional bit mask (hex, same byte count)"
+                    placeholder="mask"
+                    .value=${this.dbgMaskHex}
+                    @input=${(e: Event) =>
+                      (this.dbgMaskHex = (e.target as HTMLInputElement).value)}
+                  />
+                  <button
+                    class="chip-btn plc-force-btn"
+                    @click=${() => void this.onDbgForce()}
+                    >force</button
+                  >`
+                : html`<span class="plc-dim">shadow blob is read-only</span>`}
               <button
                 class="chip-btn"
                 title="stage as a flight-recorder channel"
@@ -1362,12 +1503,15 @@ export class TetherPlcIde extends LitElement {
   }
 
   private async onDbgResolve(): Promise<void> {
+    const name = this.dbgSymName.trim();
     try {
-      this.dbgSym = await this.ctl.dbgResolve(this.dbgSymName.trim());
+      this.dbgSym = await this.ctl.dbgResolve(name);
+      this.dbgSymShadow = name.startsWith('SHADOW.');
       this.dbgHex = undefined;
       this.ctlErr = '';
     } catch (e) {
       this.dbgSym = undefined;
+      this.dbgSymShadow = false;
       this.ctlErr = `resolve: ${e instanceof CtlError ? e.message : e}`;
     }
     this.requestUpdate();
@@ -1377,7 +1521,8 @@ export class TetherPlcIde extends LitElement {
     const s = this.dbgSym;
     if (!s) return;
     try {
-      const b = await this.ctl.dbgRead(s.offset, Math.min(s.size, 256));
+      const b = await this.ctl.dbgRead(s.offset, Math.min(s.size, 256),
+                                     this.dbgSymShadow ? 1 : 0);
       this.dbgHex = [...b].map((x) => x.toString(16).padStart(2, '0')).join(' ');
       this.ctlErr = '';
     } catch (e) {
@@ -1680,7 +1825,7 @@ export class TetherPlcIde extends LitElement {
       this.openEvents();
       try {
         [this.prog, this.rt, this.retain, this.dbg, this.forces,
-          this.breaks, this.trace, this.watches] =
+          this.breaks, this.trace, this.watches, this.shadow] =
           await Promise.all([
             this.ctl.progStatus().catch(() => undefined),
             this.ctl.rtStatus().catch(() => undefined),
@@ -1690,7 +1835,11 @@ export class TetherPlcIde extends LitElement {
             this.ctl.dbgBreakList().catch(() => undefined),
             this.ctl.dbgTraceStatus().catch(() => undefined),
             this.ctl.dbgWatchList().catch(() => undefined),
+            this.ctl.shadowStatus().catch(() => undefined),
           ]);
+        this.shadowDiffs = this.shadow?.loaded
+          ? await this.ctl.shadowCompare().catch(() => undefined)
+          : undefined;
       } catch (e) {
         this.ctlErr = e instanceof Error ? e.message : String(e);
       }
