@@ -11,7 +11,7 @@ import { html, LitElement, nothing, TemplateResult } from 'lit';
 import { DataHub } from '../data/hub';
 import './fbd-canvas';
 import './st-editor';
-import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgSym, DbgTraceStatus, EV, PlcCtl, ProgStatus, RetainStatus, RtStatus } from './ctl';
+import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgSym, DbgTraceStatus, DbgWatchEntry, EV, PlcCtl, ProgStatus, RetainStatus, RtStatus } from './ctl';
 import { byteToOffset, compileProject, CompileDiag, diagsForFile } from './build';
 import type { StEditor } from './st-editor';
 import { IfaceKind, IfaceVar, Pou, Task } from './model';
@@ -86,16 +86,20 @@ export class TetherPlcIde extends LitElement {
   declare breaks?: DbgBreak[];
   declare trace?: DbgTraceStatus;
   declare traceLines?: string[];
+  declare watches?: DbgWatchEntry[];
 
   private ctl = new PlcCtl();
   private dbgSymName = '';
   private dbgWriteHex = '';
+  private dbgMaskHex = '';
   private brkTask = '0';
   private brkCmp = '4';
   private brkVal = '';
   private brkKind = '0';
   private traceChs: { name: string; off: bigint; len: number }[] = [];
   private traceNoFreeze = false;
+  private watchChs: { name: string; off: bigint; len: number }[] = [];
+  private watchVals = new Map<number, string[]>();
   private evSrc?: EventSource;
   private evTimer?: number;
 
@@ -1072,6 +1076,14 @@ export class TetherPlcIde extends LitElement {
                   (this.dbgWriteHex = (e.target as HTMLInputElement).value)}
               />
               <button class="chip-btn" @click=${() => void this.onDbgWrite()}>write</button>
+              <input
+                class="fbd-in plc-brk-task"
+                title="optional bit mask (hex, same byte count)"
+                placeholder="mask"
+                .value=${this.dbgMaskHex}
+                @input=${(e: Event) =>
+                  (this.dbgMaskHex = (e.target as HTMLInputElement).value)}
+              />
               <button
                 class="chip-btn plc-force-btn"
                 @click=${() => void this.onDbgForce()}
@@ -1082,6 +1094,12 @@ export class TetherPlcIde extends LitElement {
                 title="stage as a flight-recorder channel"
                 @click=${() => this.onTraceChAdd()}
                 >+ rec</button
+              >
+              <button
+                class="chip-btn"
+                title="stage as a watch item"
+                @click=${() => this.onWatchChAdd()}
+                >+ watch</button
               >`
           : nothing}
       </div>
@@ -1092,6 +1110,10 @@ export class TetherPlcIde extends LitElement {
               (f) => html`<span class="plc-force-tag">
                 off ${f.offset} =
                 ${[...f.bytes].map((b) => b.toString(16).padStart(2, '0')).join('')}
+                ${f.mask && f.mask.some((m) => m !== 0xff)
+                  ? html` & ${[...f.mask].map((m) =>
+                      m.toString(16).padStart(2, '0')).join('')}`
+                  : nothing}
                 <button
                   class="chip-btn"
                   @click=${() =>
@@ -1214,6 +1236,62 @@ export class TetherPlcIde extends LitElement {
             >
           </div>`
         : nothing}
+      ${this.watchChs.length > 0
+        ? html`<div class="plc-forces">
+            <span class="plc-dim">watch items:</span>
+            ${this.watchChs.map(
+              (c, i) => html`<span class="plc-force-tag">
+                ${c.name} ${c.off}:${c.len}
+                <button
+                  class="chip-btn"
+                  @click=${() => {
+                    this.watchChs.splice(i, 1);
+                    this.requestUpdate();
+                  }}
+                  >×</button
+                >
+              </span>`,
+            )}
+            <button class="chip-btn" @click=${() => void this.onWatchAdd()}
+              >add watch</button
+            >
+          </div>`
+        : nothing}
+      ${this.watches && this.watches.length > 0
+        ? html`<div class="plc-forces">
+            ${this.watches.map(
+              (wt) => html`<span class="plc-force-tag">
+                watch h${wt.handle} ${wt.items}×${wt.totalLen}B
+                ${wt.rateHz ? ` · ${wt.rateHz}Hz` : ''}
+                ${this.watchVals.get(wt.handle)?.map(
+                  (v) => html` =${v}`,
+                )}
+                <button
+                  class="chip-btn"
+                  title="one-shot read"
+                  @click=${() => void this.onWatchGet(wt.handle)}
+                  >get</button
+                >
+                <button
+                  class="chip-btn"
+                  title=${wt.rateHz ? 'stop streaming' : 'stream at 10 Hz'}
+                  @click=${() =>
+                    this.ctlOp('watch stream', () =>
+                      this.ctl.dbgWatchStream(
+                        wt.handle, wt.rateHz ? 0 : 10))}
+                  >${wt.rateHz ? 'stop' : 'stream'}</button
+                >
+                <button
+                  class="chip-btn"
+                  @click=${() =>
+                    this.ctlOp('watch rm', () =>
+                      this.ctl.dbgWatchRemove(wt.handle))}
+                  >×</button
+                >
+              </span>`,
+            )}
+          </div>`
+        : nothing}
       ${this.traceLines
         ? html`<code class="plc-dbg-hex">${this.traceLines.map(
             (l) => html`${l}<br />`,
@@ -1273,8 +1351,18 @@ export class TetherPlcIde extends LitElement {
     const s = this.dbgSym;
     const bytes = s && this.dbgHexBytes();
     if (!s || !bytes) return;
+    const mh = this.dbgMaskHex.trim();
+    let mask: Uint8Array | undefined;
+    if (mh) {
+      if (mh.length !== bytes.length * 2 || !/^[0-9a-fA-F]+$/.test(mh)) {
+        this.ctlErr = 'force mask: hex, same byte count as value';
+        this.requestUpdate();
+        return;
+      }
+      mask = Uint8Array.from(mh.match(/../g)!.map((x) => parseInt(x, 16)));
+    }
     await this.ctlOp('dbg force', async () => {
-      await this.ctl.dbgForce(s.offset, bytes);
+      await this.ctl.dbgForce(s.offset, bytes, mask);
       await this.onDbgRead();
     });
   }
@@ -1318,6 +1406,42 @@ export class TetherPlcIde extends LitElement {
     this.traceChs.push({ name: this.dbgSymName.trim() || `off${s.offset}`,
                          off: s.offset, len: s.size });
     this.requestUpdate();
+  }
+
+  private onWatchChAdd(): void {
+    const s = this.dbgSym;
+    if (!s) return;
+    if (s.size > 64) {
+      this.ctlErr = 'watch item must be ≤ 64 B';
+      this.requestUpdate();
+      return;
+    }
+    if (this.watchChs.length >= 16) {
+      this.ctlErr = 'max 16 watch items';
+      this.requestUpdate();
+      return;
+    }
+    this.watchChs.push({ name: this.dbgSymName.trim() || `off${s.offset}`,
+                         off: s.offset, len: s.size });
+    this.requestUpdate();
+  }
+
+  private async onWatchAdd(): Promise<void> {
+    const items = this.watchChs;
+    await this.ctlOp('watch add', async () => {
+      await this.ctl.dbgWatchAdd(
+        items.map((c) => ({ offset: c.off, len: c.len })));
+      this.watchChs = [];
+    });
+  }
+
+  private async onWatchGet(handle: number): Promise<void> {
+    await this.ctlOp('watch get', async () => {
+      const items = await this.ctl.dbgWatchGet(handle);
+      this.watchVals.set(handle, items.map(
+        (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('')));
+      this.requestUpdate();
+    });
   }
 
   private async onTraceArm(): Promise<void> {
@@ -1435,6 +1559,24 @@ export class TetherPlcIde extends LitElement {
         const d = new DataView(e.payload.buffer, e.payload.byteOffset);
         this.flash(`break h${d.getUint32(0, true)} hit · task ${d.getUint32(4, true)}`);
       }
+      if (e.type === EV.DBG_WATCH && e.payload.length >= 16) {
+        /* {u32 handle, u64 seq, u32 n, {u32 len, u8 data[]}*} */
+        const d = new DataView(e.payload.buffer, e.payload.byteOffset);
+        const h = d.getUint32(0, true);
+        const n = d.getUint32(12, true);
+        const vals: string[] = [];
+        let o = 16;
+        for (let i = 0; i < n && o + 4 <= e.payload.length; i++) {
+          const l = d.getUint32(o, true);
+          vals.push(
+            [...e.payload.slice(o + 4, o + 4 + l)]
+              .map((b) => b.toString(16).padStart(2, '0'))
+              .join(''));
+          o += 4 + l;
+        }
+        this.watchVals.set(h, vals);
+        this.requestUpdate();
+      }
       if (
         e.type === EV.PROG_TRANSITION ||
         e.type === EV.FAULT ||
@@ -1460,7 +1602,7 @@ export class TetherPlcIde extends LitElement {
       this.openEvents();
       try {
         [this.prog, this.rt, this.retain, this.dbg, this.forces,
-          this.breaks, this.trace] =
+          this.breaks, this.trace, this.watches] =
           await Promise.all([
             this.ctl.progStatus().catch(() => undefined),
             this.ctl.rtStatus().catch(() => undefined),
@@ -1469,6 +1611,7 @@ export class TetherPlcIde extends LitElement {
             this.ctl.dbgForceList().catch(() => undefined),
             this.ctl.dbgBreakList().catch(() => undefined),
             this.ctl.dbgTraceStatus().catch(() => undefined),
+            this.ctl.dbgWatchList().catch(() => undefined),
           ]);
       } catch (e) {
         this.ctlErr = e instanceof Error ? e.message : String(e);

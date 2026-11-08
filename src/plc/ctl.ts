@@ -45,6 +45,11 @@ export const CTL = {
   TRACE_READ: 0x050d,
   TRACE_CLEAR: 0x050e,
   DBG_CAPTURE: 0x050f,
+  DBG_WATCH_ADD: 0x0510,
+  DBG_WATCH_GET: 0x0511,
+  DBG_WATCH_REMOVE: 0x0512,
+  DBG_WATCH_STREAM: 0x0513,
+  DBG_WATCH_LIST: 0x0514,
   IMAGE_STATS: 0x0701,
   RT_STATUS: 0x0901,
   RETAIN_STATUS: 0x0601,
@@ -60,6 +65,7 @@ export const EV = {
   PROG_TRANSITION: 0x0e01,
   FAULT: 0x0e02,
   DBG_BREAK: 0x0e03,
+  DBG_WATCH: 0x0e04,
 } as const;
 
 export interface CtlEvent {
@@ -111,6 +117,7 @@ export interface DbgForce {
   handle: number;
   offset: bigint;
   bytes: Uint8Array;
+  mask: Uint8Array;
 }
 
 /** one armed conditional trigger (DBG_BREAK_LIST entry) */
@@ -133,6 +140,14 @@ export const DBG_CMP = ['==', '!=', '<', '<=', '>', '>='] as const;
 export interface DbgTraceCh {
   offset: bigint;
   len: number;
+}
+
+/** one registered watch set (DBG_WATCH_LIST entry) */
+export interface DbgWatchEntry {
+  handle: number;
+  items: number;
+  rateHz: number;
+  totalLen: number;
 }
 
 /** ring counters (TRACE_STATUS); frozen = post-trigger hold */
@@ -379,13 +394,17 @@ export class PlcCtl {
     return this.call(CTL.DBG_WRITE, p);
   }
 
-  /** persistent override at every boundary until cleared → handle. */
-  dbgForce(offset: bigint | number, bytes: Uint8Array): Promise<number> {
-    const p = new Uint8Array(12 + bytes.length);
+  /** persistent override at every boundary until cleared → handle.
+      mask (same length) limits the override to the marked bits;
+      omitted = full overwrite. */
+  dbgForce(offset: bigint | number, bytes: Uint8Array,
+           mask?: Uint8Array): Promise<number> {
+    const p = new Uint8Array(12 + bytes.length + (mask?.length ?? 0));
     const d = new DataView(p.buffer);
     d.setBigUint64(0, BigInt(offset), true);
     d.setUint32(8, bytes.length, true);
     p.set(bytes, 12);
+    if (mask) p.set(mask, 12 + bytes.length);
     return this.call(CTL.DBG_FORCE, p).then((r) =>
       new DataView(r.payload.buffer, r.payload.byteOffset).getUint32(0, true));
   }
@@ -404,8 +423,9 @@ export class PlcCtl {
           handle,
           offset,
           bytes: r.payload.slice(o + 16, o + 16 + len),
+          mask: r.payload.slice(o + 16 + len, o + 16 + 2 * len),
         });
-        o += 16 + len;
+        o += 16 + 2 * len;
       }
       return out;
     });
@@ -529,6 +549,71 @@ export class PlcCtl {
 
   dbgTraceClear(): Promise<CtlReply> {
     return this.call(CTL.TRACE_CLEAR);
+  }
+
+  /** register a named read set over blob ranges → handle.
+      items ≤ 16, per-item len ≤ 64, Σlen ≤ 512. */
+  dbgWatchAdd(items: { offset: bigint | number; len: number }[]):
+      Promise<number> {
+    const p = new Uint8Array(8 + items.length * 16);
+    const d = new DataView(p.buffer);
+    d.setUint32(0, items.length, true);
+    items.forEach((c, i) => {
+      d.setBigUint64(8 + i * 16, BigInt(c.offset), true);
+      d.setUint32(8 + i * 16 + 8, c.len, true);
+    });
+    return this.call(CTL.DBG_WATCH_ADD, p).then((r) =>
+      new DataView(r.payload.buffer, r.payload.byteOffset)
+        .getUint32(0, true));
+  }
+
+  /** one-shot boundary-consistent read of a watch set. */
+  dbgWatchGet(handle: number): Promise<Uint8Array[]> {
+    return this.call(CTL.DBG_WATCH_GET, u32(handle)).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      const n = d.getUint32(0, true);
+      const out: Uint8Array[] = [];
+      let o = 4;
+      for (let i = 0; i < n; i++) {
+        const l = d.getUint32(o, true);
+        out.push(r.payload.slice(o + 4, o + 4 + l));
+        o += 4 + l;
+      }
+      return out;
+    });
+  }
+
+  /** arm/disarm a ≤50 Hz EV_DBG_WATCH push for a watch set. */
+  dbgWatchStream(handle: number, rateHz: number): Promise<CtlReply> {
+    const p = new Uint8Array(8);
+    const d = new DataView(p.buffer);
+    d.setUint32(0, handle, true);
+    d.setUint32(4, rateHz, true);
+    return this.call(CTL.DBG_WATCH_STREAM, p);
+  }
+
+  /** drop one watch, or all when omitted (0xFFFFFFFF). */
+  dbgWatchRemove(handle = 0xffffffff): Promise<CtlReply> {
+    return this.call(CTL.DBG_WATCH_REMOVE, u32(handle));
+  }
+
+  dbgWatchList(): Promise<DbgWatchEntry[]> {
+    return this.call(CTL.DBG_WATCH_LIST).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      const n = d.getUint32(0, true);
+      const out: DbgWatchEntry[] = [];
+      let o = 4;
+      for (let i = 0; i < n; i++) {
+        out.push({
+          handle: d.getUint32(o, true),
+          items: d.getUint32(o + 4, true),
+          rateHz: d.getUint32(o + 8, true),
+          totalLen: d.getUint32(o + 12, true),
+        });
+        o += 16;
+      }
+      return out;
+    });
   }
 
   dbgState(): Promise<DbgState> {
