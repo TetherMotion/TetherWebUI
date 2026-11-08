@@ -35,6 +35,7 @@ export interface CompileResult {
 }
 
 const enc = new TextEncoder();
+const dec = new TextDecoder();
 
 /** serialize sources to the proxy's binary src frame. */
 export function encodeSrcFrame(files: { name: string; content: string }[]): ArrayBuffer {
@@ -52,6 +53,40 @@ export function encodeSrcFrame(files: { name: string; content: string }[]): Arra
     o += 6 + n.length + c.length;
   }
   return out.buffer;
+}
+
+/** CM6-facing diagnostic shape (mirrors @codemirror/lint's Diagnostic). */
+export interface EditorDiag {
+  from: number;
+  to: number;
+  severity: 'error' | 'warning' | 'info';
+  message: string;
+  source?: string;
+}
+
+/** utf8 byte offset → js string index (CM6 doc positions). */
+export function byteToOffset(text: string, byteOff: number): number {
+  const bytes = enc.encode(text);
+  const cut = byteOff > bytes.length ? bytes.length : byteOff;
+  return dec.decode(bytes.subarray(0, cut)).length;
+}
+
+/** compile diags → editor positions for one file's source text. */
+export function diagsForFile(diags: CompileDiag[], fileName: string, source: string): EditorDiag[] {
+  const out: EditorDiag[] = [];
+  for (const d of diags) {
+    if (d.file !== fileName || d.offset === undefined) continue;
+    const from = byteToOffset(source, d.offset);
+    const to = byteToOffset(source, d.offset + (d.len || 1));
+    out.push({
+      from,
+      to: Math.max(to, Math.min(from + 1, source.length)),
+      severity: d.severity === 'error' ? 'error' : d.severity === 'warning' ? 'warning' : 'info',
+      message: d.message + (d.help ? `\nhelp: ${d.help}` : ''),
+      source: d.code,
+    });
+  }
+  return out;
 }
 
 /** pick the sources tplcc can compile for this project. */

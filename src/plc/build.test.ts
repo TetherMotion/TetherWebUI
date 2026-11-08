@@ -1,5 +1,11 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
-import { compileProject, encodeSrcFrame, projectSources } from './build';
+import {
+  byteToOffset,
+  compileProject,
+  diagsForFile,
+  encodeSrcFrame,
+  projectSources,
+} from './build';
 import type { PlcProject } from './store';
 import { emptyProject } from './model';
 
@@ -40,6 +46,50 @@ describe('encodeSrcFrame', () => {
   });
 });
 
+describe('byteToOffset / diagsForFile', () => {
+  it('maps utf8 byte offsets to string positions', () => {
+    // 'ü' is 2 bytes: byte offset of 'x' differs from its string index
+    const src = 'üx';
+    expect(byteToOffset(src, 2)).toBe(1); // after ü (bytes 0,1)
+    expect(byteToOffset(src, 3)).toBe(2); // after x
+    expect(byteToOffset(src, 0)).toBe(0);
+    expect(byteToOffset(src, 99)).toBe(2); // clamped
+  });
+
+  it('converts compile diags to editor ranges', () => {
+    const src = 'PROGRAM P\ny := x;\nEND_PROGRAM\n';
+    const diags = diagsForFile(
+      [
+        {
+          code: 'TPLC_E',
+          severity: 'error',
+          message: 'undeclared name y',
+          help: 'did you mean x?',
+          file: 'p.st',
+          offset: 10,
+          len: 1,
+        },
+        { code: 'TPLC_W', severity: 'note', message: 'other file', file: 'q.st', offset: 0 },
+      ],
+      'p.st',
+      src,
+    );
+    expect(diags).toHaveLength(1);
+    expect(src.slice(diags[0]!.from, diags[0]!.to)).toBe('y');
+    expect(diags[0]!.severity).toBe('error');
+    expect(diags[0]!.message).toContain('help: did you mean x?');
+  });
+
+  it('maps note severity to info', () => {
+    const diags = diagsForFile(
+      [{ code: 'W', severity: 'note', message: 'm', file: 'p.st', offset: 0, len: 1 }],
+      'p.st',
+      'ab',
+    );
+    expect(diags[0]!.severity).toBe('info');
+  });
+});
+
 describe('projectSources', () => {
   it('sends one .fbd.json when no ST sources exist', () => {
     const p = proj();
@@ -53,8 +103,8 @@ describe('projectSources', () => {
     });
     const { files, notes } = projectSources(p);
     expect(files).toHaveLength(1);
-    expect(files[0].name).toBe('project.fbd.json');
-    expect(JSON.parse(files[0].content).pous).toHaveLength(1);
+    expect(files[0]!.name).toBe('project.fbd.json');
+    expect(JSON.parse(files[0]!.content).pous).toHaveLength(1);
     expect(notes).toHaveLength(0);
   });
 
@@ -100,8 +150,8 @@ describe('projectSources', () => {
       ],
     });
     const { notes, files } = projectSources(p);
-    expect(files[0].name).toBe('main.st');
-    expect(notes[0]).toMatch(/FBD networks skipped/);
+    expect(files[0]!.name).toBe('main.st');
+    expect(notes[0]!).toMatch(/FBD networks skipped/);
   });
 });
 
@@ -136,7 +186,7 @@ describe('compileProject', () => {
       expect.objectContaining({ method: 'POST' }),
     );
     expect(r.ok).toBe(false);
-    expect(r.diags[0].file).toBe('a.st');
+    expect(r.diags[0]!.file).toBe('a.st');
     expect(r.package).toBeUndefined();
   });
 

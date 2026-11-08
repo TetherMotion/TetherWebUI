@@ -4,6 +4,8 @@ import type { StEditor } from './st-editor';
 import { stLanguage } from './st-lang';
 import { EditorState } from '@codemirror/state';
 import { ensureSyntaxTree } from '@codemirror/language';
+import { forEachDiagnostic } from '@codemirror/lint';
+import type { EditorView } from '@codemirror/view';
 
 function mount(value: string): StEditor {
   const el = document.createElement('st-editor') as StEditor;
@@ -36,6 +38,36 @@ describe('st-editor', () => {
     vi.useRealTimers();
     el.remove();
     void view;
+  });
+
+  it('setDiags stores lint markers at the given positions', async () => {
+    const el = mount('PROGRAM P\ny := x;\nEND_PROGRAM\n');
+    await el.updateComplete;
+    el.setDiags([
+      { from: 11, to: 12, severity: 'error', message: 'undeclared name y', source: 'TPLC_E' },
+    ]);
+    const view = (el as unknown as { view: EditorView }).view;
+    const found: { from: number; to: number; msg: string }[] = [];
+    forEachDiagnostic(view.state, (d, from, to) => {
+      found.push({ from, to, msg: d.message });
+    });
+    expect(found).toEqual([{ from: 11, to: 12, msg: 'undeclared name y' }]);
+    el.setDiags([]);
+    const cleared: unknown[] = [];
+    forEachDiagnostic(view.state, (d) => cleared.push(d));
+    expect(cleared).toHaveLength(0);
+    el.remove();
+  });
+
+  it('jumpTo moves the caret and clamps to the doc', async () => {
+    const el = mount('abc\ndef\n');
+    await el.updateComplete;
+    const view = (el as unknown as { view: EditorView }).view;
+    el.jumpTo(5);
+    expect(view.state.selection.main.head).toBe(5);
+    el.jumpTo(999);
+    expect(view.state.selection.main.head).toBe(8);
+    el.remove();
   });
 });
 

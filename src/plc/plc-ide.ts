@@ -12,7 +12,8 @@ import { DataHub } from '../data/hub';
 import './fbd-canvas';
 import './st-editor';
 import { CtlError, PlcCtl, ProgStatus, RtStatus } from './ctl';
-import { compileProject, CompileDiag } from './build';
+import { byteToOffset, compileProject, CompileDiag, diagsForFile } from './build';
+import type { StEditor } from './st-editor';
 import { Pou } from './model';
 import { entryWritable, writeScalar } from './mon';
 import { exportPlcopenXml, importPlcopenXml } from './plcopen';
@@ -301,14 +302,32 @@ export class TetherPlcIde extends LitElement {
     `;
   }
 
+  /** apply the current check diags to the ST editor's lint markers. */
+  private applyEditorDiags(): void {
+    const ed = this.querySelector<StEditor>('st-editor');
+    const pou = this.project.fbd.pous.find((p) => p.id === this.selPou) ?? this.project.fbd.pous[0];
+    if (!ed || !pou) return;
+    const src = this.project.stSources[pou.name] ?? '';
+    ed.setDiags(this.diags ? diagsForFile(this.diags, `${pou.name}.st`, src) : []);
+  }
+
+  protected updated(): void {
+    if (this.pane === 'st') this.applyEditorDiags();
+  }
+
   /** jump to the offending source: st pane on the file's POU, or the fbd network. */
-  private onDiagClick(d: CompileDiag): void {
+  private async onDiagClick(d: CompileDiag): Promise<void> {
     if (d.file) {
       const name = d.file.replace(/\.st$/, '');
       const pou = this.project.fbd.pous.find((p) => p.name === name);
       if (pou) {
         this.selPou = pou.id;
         this.pane = 'st';
+        if (d.offset !== undefined) {
+          await this.updateComplete;
+          const src = this.project.stSources[pou.name] ?? '';
+          this.querySelector<StEditor>('st-editor')?.jumpTo(byteToOffset(src, d.offset));
+        }
       }
     } else if (d.fbd) {
       // Prov::Fbd{sheet} is the network index inside its pou; find the

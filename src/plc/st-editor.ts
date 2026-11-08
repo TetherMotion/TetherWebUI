@@ -21,6 +21,7 @@ import {
   syntaxHighlighting,
 } from '@codemirror/language';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
+import { lintGutter, setDiagnostics, type Diagnostic } from '@codemirror/lint';
 import { st } from './st-lang';
 
 export class StEditor extends LitElement {
@@ -58,6 +59,7 @@ export class StEditor extends LitElement {
           drawSelection(),
           history(),
           foldGutter(),
+          lintGutter(),
           indentOnInput(),
           bracketMatching(),
           keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
@@ -87,6 +89,24 @@ export class StEditor extends LitElement {
         this.applying = false;
       }
     }
+  }
+
+  /** replace the lint markers (compile diags, from the check button). */
+  setDiags(diags: Diagnostic[]): void {
+    if (this.view) {
+      this.view.dispatch(setDiagnostics(this.view.state, diags));
+    }
+  }
+
+  /** move the caret to a byte offset and scroll it into view. */
+  jumpTo(offset: number): void {
+    if (!this.view) return;
+    const pos = Math.min(Math.max(0, offset), this.view.state.doc.length);
+    this.view.dispatch({
+      selection: { anchor: pos },
+      scrollIntoView: true,
+    });
+    this.view.focus();
   }
 
   disconnectedCallback(): void {
