@@ -52,6 +52,7 @@ export const CTL = {
   DBG_WATCH_LIST: 0x0514,
   DBG_BREAK_EXPR: 0x0515,
   DBG_CAPTURE_EXPR: 0x0516,
+  DBG_STATE_DIFF: 0x0517,
   IMAGE_STATS: 0x0701,
   RT_STATUS: 0x0901,
   RETAIN_STATUS: 0x0601,
@@ -166,6 +167,30 @@ export interface DbgTraceFrame {
   seq: bigint;
   ts: bigint;
   data: Uint8Array;
+}
+
+/** one migrate rule in a state.diff report.
+    kind: 0 copy 1 transform 2 init 3 drop 4 deny 5 alias */
+export interface DbgDiffRule {
+  kind: number;
+  sev: number;
+  tid: number;
+  aux: number;
+  oldOff: bigint;
+  oldLen: number;
+  newOff: bigint;
+  newLen: number;
+  oldVal: Uint8Array;
+  newVal: Uint8Array;
+  oldName: string;
+  newName: string;
+}
+
+/** post-migration report (DBG_STATE_DIFF) */
+export interface DbgStateDiff {
+  sameLayout: boolean;
+  migStatus: number;
+  rules: DbgDiffRule[];
 }
 
 export interface ProgStatus {
@@ -508,6 +533,41 @@ export class PlcCtl {
 
   dbgBreakClear(handle = 0xffffffff): Promise<CtlReply> {
     return this.call(CTL.DBG_BREAK_CLEAR, u32(handle));
+  }
+
+  /** what the last committed swap's migrate rules did */
+  dbgStateDiff(): Promise<DbgStateDiff> {
+    return this.call(CTL.DBG_STATE_DIFF).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      const p = r.payload;
+      const rules: DbgDiffRule[] = [];
+      let o = 8;
+      const n = d.getUint32(4, true);
+      const td = new TextDecoder();
+      for (let i = 0; i < n; i++) {
+        const rule: DbgDiffRule = {
+          kind: p[o]!, sev: p[o + 1]!,
+          tid: d.getUint16(o + 2, true),
+          aux: d.getUint32(o + 4, true),
+          oldOff: d.getBigUint64(o + 8, true),
+          oldLen: d.getUint32(o + 16, true),
+          newOff: d.getBigUint64(o + 24, true),
+          newLen: d.getUint32(o + 32, true),
+          oldVal: p.slice(o + 44, o + 44 + p[o + 40]!),
+          newVal: p.slice(o + 52, o + 52 + p[o + 41]!),
+          oldName: '', newName: '',
+        };
+        o += 60;
+        const ol = d.getUint16(o, true); o += 2;
+        rule.oldName = td.decode(p.subarray(o, o + ol)); o += ol;
+        const nl = d.getUint16(o, true); o += 2;
+        rule.newName = td.decode(p.subarray(o, o + nl)); o += nl;
+        rules.push(rule);
+      }
+      return {
+        sameLayout: p[0] !== 0, migStatus: p[1]!, rules,
+      };
+    });
   }
 
   /** arm the flight recorder: ≤8 channels, per-ch len ≤8, Σlen ≤64.

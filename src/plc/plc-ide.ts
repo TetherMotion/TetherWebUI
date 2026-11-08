@@ -11,7 +11,7 @@ import { html, LitElement, nothing, TemplateResult } from 'lit';
 import { DataHub } from '../data/hub';
 import './fbd-canvas';
 import './st-editor';
-import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgSym, DbgTraceStatus, DbgWatchEntry, EV, PlcCtl, ProgStatus, RetainStatus, RtStatus } from './ctl';
+import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgStateDiff, DbgSym, DbgTraceStatus, DbgWatchEntry, EV, PlcCtl, ProgStatus, RetainStatus, RtStatus } from './ctl';
 import { byteToOffset, compileProject, CompileDiag, diagsForFile } from './build';
 import type { StEditor } from './st-editor';
 import { IfaceKind, IfaceVar, Pou, Task } from './model';
@@ -21,6 +21,9 @@ import type { CatalogEntry } from '../protocol';
 import { exportFbdJson, importFbdJson, loadProject, PlcProject, saveProject } from './store';
 
 type Pane = 'explorer' | 'st' | 'fbd' | 'tasks' | 'watch' | 'deploy';
+
+/** migrate rule kinds shared with the runtime's MIGD encoding */
+const DBG_DIFF_KIND = ['copy', 'xform', 'init', 'drop', 'deny', 'alias'];
 
 const IFACE_KINDS: IfaceKind[] = [
   'var_input',
@@ -101,6 +104,7 @@ export class TetherPlcIde extends LitElement {
   private traceNoFreeze = false;
   private watchChs: { name: string; off: bigint; len: number }[] = [];
   private watchVals = new Map<number, string[]>();
+  private stateDiff: DbgStateDiff | undefined;
   private evSrc?: EventSource;
   private evTimer?: number;
 
@@ -1314,7 +1318,45 @@ export class TetherPlcIde extends LitElement {
             (l) => html`${l}<br />`,
           )}</code>`
         : nothing}
+      <div class="plc-forces">
+        <button
+          class="chip-btn"
+          title="what the last swap's migrate rules did"
+          @click=${() => void this.onStateDiff()}
+          >state.diff</button
+        >
+        ${this.stateDiff
+          ? html`<span class="plc-dim">
+              ${this.stateDiff.sameLayout ? 'same-layout' : 'migrated'}
+              · ${this.stateDiff.rules.length} rules</span
+            >`
+          : nothing}
+      </div>
+      ${this.stateDiff
+        ? html`<div class="plc-forces">
+            ${this.stateDiff.rules.map(
+              (r) => html`<span class="plc-force-tag">
+                ${DBG_DIFF_KIND[r.kind] ?? r.kind}
+                ${r.oldName || '-'}[${r.oldOff}:${r.oldLen}] →
+                ${r.newName || '-'}[${r.newOff}:${r.newLen}]
+                ${r.sev === 1 ? ' · degraded' : nothing}
+                ${r.sev === 2 ? ' · deny' : nothing}
+              </span>`,
+            )}
+          </div>`
+        : nothing}
     `;
+  }
+
+  private async onStateDiff(): Promise<void> {
+    try {
+      this.stateDiff = await this.ctl.dbgStateDiff();
+      this.ctlErr = '';
+    } catch (e) {
+      this.stateDiff = undefined;
+      this.ctlErr = `state.diff: ${e instanceof CtlError ? e.message : e}`;
+    }
+    this.requestUpdate();
   }
 
   private async onDbgResolve(): Promise<void> {
