@@ -1187,7 +1187,8 @@ export class TetherPlcIde extends LitElement {
         ? html`<div class="plc-forces">
             ${this.breaks.map(
               (b) => html`<span class="plc-force-tag">
-                h${b.handle} ${b.kind ? 'cap' : 'brk'} task ${b.taskIdx}
+                h${b.handle} ${b.kind ? 'cap' : 'brk'}
+                ${b.stale ? 'stale ' : ''}task ${b.taskIdx}
                 ${b.cmp === 0xff
                   ? 'expr'
                   : html`blob[${b.offset}..${b.len}]
@@ -1284,6 +1285,7 @@ export class TetherPlcIde extends LitElement {
               (wt) => html`<span class="plc-force-tag">
                 watch h${wt.handle} ${wt.items}×${wt.totalLen}B
                 ${wt.rateHz ? ` · ${wt.rateHz}Hz` : ''}
+                ${wt.stale ? ' · STALE' : ''}
                 ${this.watchVals.get(wt.handle)?.map(
                   (v) => html` =${v}`,
                 )}
@@ -1503,7 +1505,8 @@ export class TetherPlcIde extends LitElement {
     const items = this.watchChs;
     await this.ctlOp('watch add', async () => {
       await this.ctl.dbgWatchAdd(
-        items.map((c) => ({ offset: c.off, len: c.len })));
+        items.map((c) => ({ offset: c.off, len: c.len,
+                            name: c.name })));
       this.watchChs = [];
     });
   }
@@ -1512,7 +1515,9 @@ export class TetherPlcIde extends LitElement {
     await this.ctlOp('watch get', async () => {
       const items = await this.ctl.dbgWatchGet(handle);
       this.watchVals.set(handle, items.map(
-        (b) => [...b].map((x) => x.toString(16).padStart(2, '0')).join('')));
+        (b) => b.length
+          ? [...b].map((x) => x.toString(16).padStart(2, '0')).join('')
+          : 'stale'));
       this.requestUpdate();
     });
   }

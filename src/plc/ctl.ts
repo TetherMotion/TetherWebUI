@@ -132,6 +132,8 @@ export interface DbgBreak {
   cmp: number;
   /** 0 suspend task, 1 freeze recorder */
   kind: number;
+  /** re-resolution failed after a program swap */
+  stale: boolean;
   value: bigint;
   hits: bigint;
 }
@@ -151,6 +153,8 @@ export interface DbgWatchEntry {
   items: number;
   rateHz: number;
   totalLen: number;
+  /** items that failed post-swap re-resolution */
+  stale: number;
 }
 
 /** ring counters (TRACE_STATUS); frozen = post-trigger hold */
@@ -522,6 +526,7 @@ export class PlcCtl {
           len: d.getUint32(o + 16, true),
           cmp: r.payload[o + 20]!,
           kind: r.payload[o + 21]!,
+          stale: r.payload[o + 22] !== 0,
           value: d.getBigUint64(o + 24, true),
           hits: d.getBigUint64(o + 32, true),
         });
@@ -630,16 +635,26 @@ export class PlcCtl {
     return this.call(CTL.TRACE_CLEAR);
   }
 
-  /** register a named read set over blob ranges → handle.
-      items ≤ 16, per-item len ≤ 64, Σlen ≤ 512. */
-  dbgWatchAdd(items: { offset: bigint | number; len: number }[]):
-      Promise<number> {
-    const p = new Uint8Array(8 + items.length * 16);
+  /** register a watch set (≤16 items, Σlen ≤ 512). Items with a
+      name resolve through the symmap and re-resolve after a swap;
+      nameless offset items go stale on swap. */
+  dbgWatchAdd(items: { offset: bigint | number; len: number;
+                      name?: string }[]): Promise<number> {
+    const enc = new TextEncoder();
+    const names = items.map((c) => enc.encode(c.name ?? ''));
+    const size = 8 + items.reduce(
+      (s, c, i) => s + 14 + names[i]!.length, 0);
+    const p = new Uint8Array(size);
     const d = new DataView(p.buffer);
     d.setUint32(0, items.length, true);
+    let o = 8;
     items.forEach((c, i) => {
-      d.setBigUint64(8 + i * 16, BigInt(c.offset), true);
-      d.setUint32(8 + i * 16 + 8, c.len, true);
+      const nm = names[i]!;
+      d.setBigUint64(o, BigInt(c.offset), true);
+      d.setUint32(o + 8, c.len, true);
+      d.setUint16(o + 12, nm.length, true);
+      p.set(nm, o + 14);
+      o += 14 + nm.length;
     });
     return this.call(CTL.DBG_WATCH_ADD, p).then((r) =>
       new DataView(r.payload.buffer, r.payload.byteOffset)
@@ -682,14 +697,16 @@ export class PlcCtl {
       const n = d.getUint32(0, true);
       const out: DbgWatchEntry[] = [];
       let o = 4;
+      const rowSize = n > 0 ? (r.payload.length - 4) / n : 16;
       for (let i = 0; i < n; i++) {
         out.push({
           handle: d.getUint32(o, true),
           items: d.getUint32(o + 4, true),
           rateHz: d.getUint32(o + 8, true),
           totalLen: d.getUint32(o + 12, true),
+          stale: rowSize >= 20 ? d.getUint32(o + 16, true) : 0,
         });
-        o += 16;
+        o += rowSize;
       }
       return out;
     });
