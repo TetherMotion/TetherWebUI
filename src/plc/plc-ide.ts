@@ -11,6 +11,7 @@ import { html, LitElement, nothing, TemplateResult } from 'lit';
 import { DataHub } from '../data/hub';
 import './fbd-canvas';
 import './st-editor';
+import './tempcurve';
 import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgStateDiff, DbgSym, DbgTraceStatus, DbgWatchEntry, EV, PlcCtl, ProgStatus, RetainStatus, RtStatus, ShadowDiff, ShadowStatus } from './ctl';
 import { byteToOffset, compileProject, CompileDiag, diagsForFile } from './build';
 import type { StEditor } from './st-editor';
@@ -19,8 +20,17 @@ import { entryWritable, writeScalar } from './mon';
 import { exportPlcopenXml, importPlcopenXml } from './plcopen';
 import type { CatalogEntry } from '../protocol';
 import { exportFbdJson, importFbdJson, loadProject, PlcProject, saveProject } from './store';
+import { parseStInterfaces } from './stiface';
+import { catalogGroups, catalogPous, fetchCatalog, fetchLibSrc, libStem, type CatalogLib } from './catalog';
+import {
+  CurveProfile,
+  defaultProfile,
+  hasProfileLibrary,
+  profileFromPou,
+  sourceStem,
+} from './curve';
 
-type Pane = 'explorer' | 'st' | 'fbd' | 'tasks' | 'watch' | 'deploy';
+type Pane = 'explorer' | 'st' | 'fbd' | 'curves' | 'tasks' | 'watch' | 'deploy';
 
 /** migrate rule kinds shared with the runtime's MIGD encoding */
 const DBG_DIFF_KIND = ['copy', 'xform', 'init', 'drop', 'deny', 'alias'];
@@ -39,6 +49,7 @@ const PANES: { id: Pane; label: string }[] = [
   { id: 'explorer', label: 'Explorer' },
   { id: 'st', label: 'ST' },
   { id: 'fbd', label: 'FBD' },
+  { id: 'curves', label: 'Curves' },
   { id: 'tasks', label: 'Tasks' },
   { id: 'watch', label: 'Watch' },
   { id: 'deploy', label: 'Deploy' },
@@ -63,6 +74,7 @@ export class TetherPlcIde extends LitElement {
     deployFrac: { state: true },
     diags: { state: true },
     compiling: { state: true },
+    catalogLibs: { state: true },
     dbg: { state: true },
     dbgSym: { state: true },
     dbgHex: { state: true },
@@ -85,6 +97,12 @@ export class TetherPlcIde extends LitElement {
   declare shadowDiffs?: ShadowDiff[];
   declare deployFrac?: number;
   declare diags?: CompileDiag[];
+  /** memoized synthetic POU decls from attached library sources. */
+  private libCache?: { key: string; pous: Pou[] };
+  /** installed-library block catalog (proxy /blocks), fetched once. */
+  declare catalogLibs?: CatalogLib[];
+  /** memoized palette groups for catalogLibs. */
+  private catGroups: ReturnType<typeof catalogGroups> = [];
   declare compiling: boolean;
   declare dbg?: DbgState;
   declare dbgSym?: DbgSym;
@@ -133,6 +151,37 @@ export class TetherPlcIde extends LitElement {
   connectedCallback(): void {
     super.connectedCallback();
     this.syncHub();
+    void this.loadCatalog();
+  }
+
+  /** Fetch the proxy's library block catalog once (no-op without proxy/libs). */
+  private async loadCatalog(): Promise<void> {
+    const libs = await fetchCatalog(this.ctl.url);
+    if (libs.length && JSON.stringify(libs) !== JSON.stringify(this.catalogLibs ?? [])) {
+      this.catalogLibs = libs;
+      this.catGroups = catalogGroups(libs);
+      this.requestUpdate();
+    }
+  }
+
+  /** Canvas placed a catalog block — attach its library source. */
+  private onNeedLibSrc(e: CustomEvent<{ lib: string; file: string }>): void {
+    const { lib, file } = e.detail;
+    const stem = libStem(file);
+    const have = Object.keys(this.project.stSources).some(
+      (k) => k.toUpperCase() === stem.toUpperCase(),
+    );
+    if (have) return;
+    void fetchLibSrc(this.ctl.url, lib, file).then((src) => {
+      if (!src) {
+        this.flash(`library source ${file} not available from proxy`);
+        return;
+      }
+      this.project.stSources[stem] = src;
+      this.save();
+      this.requestUpdate();
+      this.flash(`attached ${file}`);
+    });
   }
 
   disconnectedCallback(): void {
@@ -248,23 +297,23 @@ export class TetherPlcIde extends LitElement {
       kind,
       en_eno: 'inherit',
       interface: [],
-      networks:
-        kind === 'function'
-          ? []
-          : [
-              {
-                id: 'net1',
-                kind: 'fbd',
-                label: '',
-                comments: [],
-                assocs: [],
-                labels: [],
-                jumps: [],
-                returns: [],
-                blocks: [],
-                wires: [],
-              },
-            ],
+      // FBD-authored functions need an explicit return type — it
+      // becomes the implicit output pin and the MIR return var.
+      ...(kind === 'function' ? { ret_ty: 'REAL' } : {}),
+      networks: [
+        {
+          id: 'net1',
+          kind: 'fbd',
+          label: '',
+          comments: [],
+          assocs: [],
+          labels: [],
+          jumps: [],
+          returns: [],
+          blocks: [],
+          wires: [],
+        },
+      ],
     });
     this.selPou = name;
     this.save();
@@ -419,6 +468,8 @@ export class TetherPlcIde extends LitElement {
         return this.stPane();
       case 'fbd':
         return this.fbdPane();
+      case 'curves':
+        return this.curvesPane();
       case 'tasks':
         return this.tasksPane();
       case 'watch':
@@ -440,6 +491,7 @@ export class TetherPlcIde extends LitElement {
             <span>Project</span>
             <button class="chip-btn" @click=${() => this.onNewPou('program')}>+PRG</button>
             <button class="chip-btn" @click=${() => this.onNewPou('function_block')}>+FB</button>
+            <button class="chip-btn" @click=${() => this.onNewPou('function')}>+FN</button>
           </div>
           ${fbd.pous.map(
             (pou) => html`
@@ -486,6 +538,23 @@ export class TetherPlcIde extends LitElement {
                   )}`
               : nothing
           }
+          ${(() => {
+            // attached library sources: stSources with no POU of that name
+            const pouNames = new Set(fbd.pous.map((p) => p.name.toUpperCase()));
+            const libs = Object.keys(this.project.stSources).filter(
+              (n) => this.project.stSources[n]!.trim() && !pouNames.has(n.toUpperCase()),
+            );
+            if (!libs.length) return nothing;
+            return html`<div class="plc-tree-head"><span>Libraries</span></div>
+              ${libs.map(
+                (n) => html`<div class="plc-tree-net">
+                  ${n} <span class="plc-dim">${this.project.stSources[n]!.length} B</span>
+                  <button class="chip-btn" title="detach source" @click=${() => this.detachSource(n)}>
+                    ✕
+                  </button>
+                </div>`,
+              )}`;
+          })()}
         </div>
         <div class="plc-detail">${this.selPouDetail()}</div>
       </div>
@@ -500,6 +569,22 @@ export class TetherPlcIde extends LitElement {
         ${pou.name} <span class="plc-dim">${pou.kind}</span>
         <button class="chip-btn" @click=${() => this.onDelPou(pou)}>delete pou</button>
       </h3>
+      ${
+        pou.kind === 'function'
+          ? html`<div class="plc-dim">
+              return type
+              <input
+                class="fbd-in"
+                .value=${pou.ret_ty ?? 'REAL'}
+                @change=${(e: Event) => {
+                  pou.ret_ty = (e.target as HTMLInputElement).value.trim() || 'REAL';
+                  this.save();
+                  this.requestUpdate();
+                }}
+              />
+            </div>`
+          : nothing
+      }
       <h4>
         interface
         <button class="chip-btn" @click=${() => this.addIfaceVar(pou)}>+ var</button>
@@ -684,16 +769,125 @@ export class TetherPlcIde extends LitElement {
           </button>
           <button class="chip-btn" @click=${() => this.addNetwork(pou)}>+ network</button>
         </div>
+        ${
+          pou.kind === 'function'
+            ? html`<div class="plc-dim">
+                function ${pou.name} : ${pou.ret_ty ?? 'REAL'} — a var-out block named
+                <b>${pou.name}</b> writes the return value; callers see it as the first output pin
+              </div>`
+            : nothing
+        }
         <fbd-canvas
           .pou=${pou}
           .netIndex=${this.selNet}
-          .pous=${this.project.fbd.pous}
+          .pous=${this.pousWithLibraries()}
           .values=${this.hub ? new Map(this.hub.values) : undefined}
           .diags=${this.diags}
+          .libSources=${Object.values(this.project.stSources)}
+          .catalog=${this.catGroups}
           @change=${() => this.save()}
+          @need-libsrc=${(e: CustomEvent<{ lib: string; file: string }>) => this.onNeedLibSrc(e)}
         ></fbd-canvas>
       </div>
     `;
+  }
+
+  // ---- temperature curves ----------------------------------------------
+
+  /** Project POUs + synthetic decls from attached sources + catalog. */
+  private pousWithLibraries(): Pou[] {
+    const srcs = Object.values(this.project.stSources);
+    const key = srcs.map((s) => s.length).join(',');
+    if (this.libCache?.key !== key) {
+      this.libCache = { key, pous: parseStInterfaces(srcs) };
+    }
+    // catalog decls fill in blocks whose source isn't attached yet;
+    // skip names already declared so attached sources win
+    const have = new Set(
+      [...this.project.fbd.pous, ...this.libCache.pous].map((p) => p.name.toUpperCase()),
+    );
+    const cat = catalogPous(this.catalogLibs ?? []).filter((p) => !have.has(p.name.toUpperCase()));
+    return [...this.project.fbd.pous, ...this.libCache.pous, ...cat];
+  }
+
+  private curvesPane(): TemplateResult {
+    const pou = this.project.fbd.pous.find((p) => p.id === this.selPou);
+    const key = pou?.name ?? '';
+    // saved editor state wins; otherwise recover the profile from the
+    // POU's own blocks (imported project, or one saved before the pane)
+    const prof =
+      (key ? this.project.curves?.[key] : undefined) ??
+      (pou ? profileFromPou(pou) : undefined) ??
+      defaultProfile();
+    const hasLib = hasProfileLibrary(Object.values(this.project.stSources));
+    return html`
+      ${
+        hasLib
+          ? nothing
+          : html`<div class="plc-dim">
+              FB_AtcProfile is not in this project — the generated config block needs the
+              Atc_TempCtrl library source. Attach it once per project:
+              <input
+                type="file"
+                accept=".st,text/plain"
+                @change=${(e: Event) => this.onAttachLibrary(e)}
+              />
+            </div>`
+      }
+      <temp-curve
+        .pou=${pou}
+        .profile=${prof}
+        @change=${(e: CustomEvent<CurveProfile>) => {
+          if (key) (this.project.curves ??= {})[key] = e.detail;
+          this.save();
+          this.requestUpdate();
+        }}
+        @export-st=${(e: CustomEvent<{ name: string; source: string }>) => {
+          this.project.stSources[e.detail.name] = e.detail.source;
+          // register the POU so the export shows up in the tree and the
+          // ST pane (projectSources drops it from the fbd JSON: no blocks)
+          if (!this.project.fbd.pous.some((p) => p.name === e.detail.name)) {
+            this.project.fbd.pous.push({
+              id: e.detail.name,
+              name: e.detail.name,
+              kind: 'function_block',
+              en_eno: 'off',
+              interface: [
+                { name: 'CFG', kind: 'var_input', type: 'BOOL' },
+                { name: 'PROF', kind: 'var_in_out', type: 'FB_AtcProfile' },
+                { name: 'DONE', kind: 'var_output', type: 'BOOL' },
+              ],
+              networks: [],
+            });
+          }
+          this.save();
+          this.requestUpdate();
+          this.flash(`exported ${e.detail.name}.st`);
+        }}
+      ></temp-curve>
+    `;
+  }
+
+  /** Attach a library `.st` (e.g. atc_tempctrl.st) as a project source. */
+  private onAttachLibrary(e: Event): void {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const name = sourceStem(file.name);
+      this.project.stSources[name] = String(reader.result ?? '');
+      this.save();
+      this.requestUpdate();
+      this.flash(`attached ${file.name} as ${name}.st`);
+    };
+    reader.readAsText(file);
+  }
+
+  /** Drop an attached library source. */
+  private detachSource(name: string): void {
+    delete this.project.stSources[name];
+    this.save();
+    this.requestUpdate();
   }
 
   /** Reorder networks — execution follows array order. */

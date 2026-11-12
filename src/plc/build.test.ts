@@ -150,8 +150,37 @@ describe('projectSources', () => {
       ],
     });
     const { notes, files } = projectSources(p);
-    expect(files[0]!.name).toBe('main.st');
-    expect(notes[0]!).toMatch(/FBD networks skipped/);
+    // mixed module: the fbd project and every .st compile together
+    expect(files.map((f) => f.name)).toEqual(['project.fbd.json', 'main.st']);
+    expect(notes).toHaveLength(0);
+  });
+
+  it('drops FBD stub POUs whose body lives in an stSource', () => {
+    const p = proj({ stSources: { helper: 'FUNCTION_BLOCK helper\nEND_FUNCTION_BLOCK\n' } });
+    p.fbd.pous.push({
+      id: 'p1',
+      name: 'helper',
+      kind: 'function_block',
+      en_eno: 'off',
+      interface: [],
+      networks: [
+        {
+          id: 'n1',
+          kind: 'fbd',
+          label: '',
+          blocks: [],
+          wires: [],
+          assocs: [],
+          comments: [],
+          labels: [],
+          jumps: [],
+          returns: [],
+        },
+      ],
+    });
+    const { files } = projectSources(p);
+    // stub dropped; no remaining fbd content → only the .st source goes
+    expect(files).toEqual([{ name: 'helper.st', content: p.stSources.helper }]);
   });
 });
 

@@ -1355,6 +1355,119 @@ tile-frame {
   width: 160px;
 }
 
+/* device wizard + channel tables + pin params */
+.fbd-devdlg {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 20;
+}
+
+.fbd-devdlg-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 340px;
+  padding: 14px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--glass-border);
+  background: var(--panel-bg, #1c1f26);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.fbd-devdlg-box label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.fbd-devdlg-box .fbd-in {
+  flex: 1;
+  max-width: 220px;
+}
+
+.fbd-devdlg-box .fbd-in.num {
+  max-width: 80px;
+}
+
+.fbd-devdlg-btns {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.fbd-devtbl {
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.fbd-devtbl th,
+.fbd-devtbl td {
+  padding: 1px 4px;
+  text-align: left;
+}
+
+.fbd-devtbl .fbd-in {
+  width: 74px;
+}
+
+.fbd-devtbl td:first-child .fbd-in {
+  width: 90px;
+}
+
+.fbd-devedit,
+.fbd-pinparams {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.fbd-pinparams .fbd-pname {
+  font-family: monospace;
+  white-space: nowrap;
+}
+
+.fbd-stprops {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.fbd-stpin {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.fbd-stpin select {
+  font-size: 11px;
+  padding: 2px;
+  border: 1px solid var(--input-border);
+  border-radius: 5px;
+  background: var(--input-bg);
+  color: var(--text);
+}
+
+.fbd-stcode {
+  width: 100%;
+  min-height: 90px;
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  padding: 6px;
+  border: 1px solid var(--input-border);
+  border-radius: 5px;
+  background: var(--input-bg);
+  color: var(--text);
+  resize: vertical;
+}
+
 .plc-ctlbar,
 .plc-ops {
   display: flex;
@@ -1411,4 +1524,152 @@ tile-frame {
 .plc-brk-task {
   width: 3em;
   min-width: 3em;
+}
+
+/* ---- temperature curve editor ---- */
+.curve-editor {
+  padding: 10px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.curve-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  color: var(--text-muted);
+}
+
+.curve-head label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.curve-head select {
+  font-size: 11px;
+  padding: 2px;
+  border: 1px solid var(--input-border);
+  border-radius: 5px;
+  background: var(--input-bg);
+  color: var(--text);
+}
+
+.curve-svg {
+  width: 100%;
+  max-width: 640px;
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  touch-action: none;
+}
+
+.curve-axis {
+  stroke: var(--glass-border);
+}
+
+.curve-line {
+  stroke: var(--accent, #4af);
+  stroke-width: 2;
+}
+
+.curve-pt {
+  fill: var(--input-bg);
+  stroke: var(--accent, #4af);
+  stroke-width: 2;
+  cursor: grab;
+}
+
+.curve-pt.sel {
+  fill: var(--accent, #4af);
+}
+
+.curve-lab {
+  fill: var(--text-muted);
+  font-size: 10px;
+}
+
+.curve-table {
+  margin-top: 8px;
+  max-width: 720px;
+}
+
+.curve-table tr.sel td {
+  background: var(--glass-border);
+}
+
+.curve-table select {
+  font-size: 11px;
+  background: var(--input-bg);
+  color: var(--text);
+  border: 1px solid var(--input-border);
+  border-radius: 4px;
+}
+
+.curve-ops {
+  white-space: nowrap;
+}
+
+/* ---- FBD palette: grouped + searchable ---- */
+.fbd-palette {
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+
+.fbd-palette-q {
+  width: 110px;
+  font-size: 11px;
+}
+
+.fbd-pgroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 4px;
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+}
+
+.fbd-pgroup-name {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-right: 2px;
+}
+
+.fbd-pitem {
+  font-size: 10px;
+  padding: 1px 5px;
+}
+
+/* ---- FBD typing + live pin values ---- */
+.fbd-pin-live {
+  fill: var(--accent, #4af);
+  font-size: 9px;
+  opacity: 0.85;
+}
+
+.fbd-pin.err {
+  stroke: #e5534b;
+  stroke-width: 2.5;
+}
+
+.fbd-pin.warn {
+  stroke: #d29922;
+  stroke-width: 2.5;
+}
+
+.fbd-wire.err {
+  stroke: #e5534b;
+}
+
+.fbd-wire.warn {
+  stroke: #d29922;
+}
+
+.fbd-note-warn {
+  color: #d29922;
 }

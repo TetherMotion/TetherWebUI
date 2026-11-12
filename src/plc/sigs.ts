@@ -156,9 +156,26 @@ export function blockSig(b: Block, pous: Pou[]): PinSig {
       return builtinFbSig(b.type_ref) ?? pouSigFor(b.type_ref, pous) ?? { ins: [], outs: [''] };
     case 'function':
       return pouSigFor(b.type_ref, pous) ?? { ins: [], outs: [''] };
+    case 'st':
+    case 'device':
+      return stBlockSig(b);
     case 'jump_target':
       return { ins: [], outs: [] };
   }
+}
+
+/**
+ * Inline-ST block signature — pins are the generated FB's interface:
+ * var_input → ins, var_output → outs, var_in_out → both sides
+ * (mirrors the extern-sig convention in fbd-lower's mir_sig).
+ */
+function stBlockSig(b: Block): PinSig {
+  const sig: PinSig = { ins: [], outs: [] };
+  for (const p of b.pins ?? []) {
+    if (p.kind === 'var_input' || p.kind === 'var_in_out') sig.ins.push(p.name);
+    if (p.kind === 'var_output' || p.kind === 'var_in_out') sig.outs.push(p.name);
+  }
+  return sig;
 }
 
 function pouSigFor(typeRef: string, pous: Pou[]): PinSig | undefined {

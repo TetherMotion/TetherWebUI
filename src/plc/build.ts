@@ -89,26 +89,39 @@ export function diagsForFile(diags: CompileDiag[], fileName: string, source: str
   return out;
 }
 
-/** pick the sources tplcc can compile for this project. */
+/**
+ * Pick the sources tplcc compiles for this project. Mixed FBD+ST is
+ * one module: the .fbd.json project plus every .st source compile
+ * together — FBD blocks instantiate ST POUs as extern signatures, ST
+ * calls FBD POUs after merge, and `st` blocks expand to generated
+ * FUNCTION_BLOCKs (params.CODE is the body, block.pins its interface).
+ * FBD POUs whose body is ST-authored (a non-empty stSource and no
+ * blocks) are editor bookkeeping, not declarations — they are dropped
+ * from the emitted JSON so the compiler sees the ST decl alone; FBD
+ * resolves them as extern signatures. A POU with both networks and an
+ * ST body stays in and produces the duplicate-implementation diag.
+ */
 export function projectSources(project: PlcProject): {
   files: { name: string; content: string }[];
   notes: string[];
 } {
   const notes: string[] = [];
   const st = Object.entries(project.stSources).filter(([, s]) => s.trim().length > 0);
-  if (st.length > 0) {
-    if (project.fbd.pous.some((p) => p.networks.some((n) => n.blocks.length > 0))) {
-      notes.push('mixed ST/FBD project: compiler accepts one language; FBD networks skipped');
-    }
-    return {
-      files: st.map(([name, content]) => ({ name: `${name}.st`, content })),
-      notes,
-    };
+  const stNames = new Set(st.map(([name]) => name.toUpperCase()));
+  const hasBody = (p: PlcProject['fbd']['pous'][number]) =>
+    p.networks.some((n) => n.blocks.length > 0);
+  const fbdPous = project.fbd.pous.filter((p) => hasBody(p) || !stNames.has(p.name.toUpperCase()));
+  const files: { name: string; content: string }[] = [];
+  const hasFbd =
+    fbdPous.length > 0 || project.fbd.global_vars.length > 0 || project.fbd.tasks.length > 0;
+  if (hasFbd || st.length === 0) {
+    files.push({
+      name: 'project.fbd.json',
+      content: JSON.stringify({ ...project.fbd, pous: fbdPous }),
+    });
   }
-  return {
-    files: [{ name: 'project.fbd.json', content: JSON.stringify(project.fbd) }],
-    notes,
-  };
+  files.push(...st.map(([name, content]) => ({ name: `${name}.st`, content })));
+  return { files, notes };
 }
 
 /** POST sources to the proxy; build=true returns the .tplc package too. */

@@ -10,7 +10,14 @@ export type PouKind = 'program' | 'function_block' | 'function';
 export type NetworkKind = 'fbd' | 'ld';
 export type IfaceKind =
   'var_input' | 'var_output' | 'var_in_out' | 'var' | 'var_temp' | 'var_external' | 'var_global';
-export type BlockKind = 'variable' | 'operator' | 'fb' | 'function' | 'jump_target';
+export type BlockKind =
+  | 'variable'
+  | 'operator'
+  | 'fb'
+  | 'function'
+  | 'jump_target'
+  | 'st'
+  | 'device';
 export type VarRole = 'in' | 'out' | 'in_out';
 export type PortSel = number | string;
 
@@ -72,6 +79,21 @@ export interface Block {
   role?: VarRole;
   name?: string;
   at?: string;
+  /**
+   * Inline-ST block pins (kind === 'st'). Each entry declares one
+   * generated-FB interface var: var_input → input pin, var_output →
+   * output pin, var_in_out → pin on both sides, var/var_temp → an
+   * internal local (no pin). The ST body lives in params.CODE; the
+   * compiler expands the block into a generated FUNCTION_BLOCK.
+   */
+  pins?: IfaceVar[];
+  /**
+   * Device block (kind === 'device'): a fieldbus terminal (e.g. a
+   * Beckhoff EK module). `type_ref` is the device/terminal name,
+   * `pins` are the channel declarations — each pin is a located var
+   * (`at` = process-image address); var_output = device→logic,
+   * var_input = logic→device, var_in_out = both.
+   */
 }
 
 export interface IfaceVar {
@@ -103,6 +125,8 @@ export interface Pou {
   en_eno: string;
   interface: IfaceVar[];
   networks: Network[];
+  /** declared return type — kind === 'function' only. */
+  ret_ty?: string;
 }
 
 export interface Task {

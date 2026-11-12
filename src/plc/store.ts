@@ -6,6 +6,7 @@
  * fbd.v1). Persisted in localStorage under `tether.plc.project.v1`;
  * import/export is canonical .fbd.json.
  */
+import { CurveProfile } from './curve';
 import { emptyProject, FbdProject, isFbdProject } from './model';
 
 const STORAGE_KEY = 'tether.plc.project.v1';
@@ -14,6 +15,8 @@ export interface PlcProject {
   fbd: FbdProject;
   /** POU name → ST source text (POUs written in ST, not the FBD model). */
   stSources: Record<string, string>;
+  /** POU name → temperature profile being edited for it (Curves pane). */
+  curves?: Record<string, CurveProfile>;
 }
 
 export function emptyPlcProject(): PlcProject {
@@ -29,6 +32,7 @@ export function loadProject(): PlcProject {
       return {
         fbd: parsed.fbd,
         stSources: parsed.stSources && typeof parsed.stSources === 'object' ? parsed.stSources : {},
+        curves: parsed.curves && typeof parsed.curves === 'object' ? parsed.curves : {},
       };
     }
     // tolerate a bare fbd.v1 doc saved by an earlier version
