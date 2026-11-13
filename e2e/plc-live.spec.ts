@@ -166,4 +166,63 @@ test.describe('TetherPLC IDE — live runtime', () => {
     const c1 = await cyclesOf(page);
     await cyclesAdvance(page, c1);
   });
+
+  test('debug plane: resolve/read/force drive live program memory', async ({
+    page,
+  }) => {
+    await openDeploy(page);
+
+    /* debugCard = the .plc-ops containing the symbol input */
+    const dbgOps = page.locator('.plc-ops', {
+      has: page.locator('input[placeholder*="symbol name"]'),
+    });
+    await expect(dbgOps).toBeVisible({ timeout: 15_000 });
+
+    // resolve 'cnt' — LiveDemo's DINT counter at blob offset 0
+    await dbgOps.locator('input[placeholder*="symbol name"]').fill('cnt');
+    await dbgOps.locator('button', { hasText: 'resolve' }).click();
+    await expect(dbgOps).toContainText('size 4B', { timeout: 10_000 });
+
+    /* first .plc-dbg-hex is the symbol read-out (a second one exists
+       for trace lines further down the card) */
+    const hexOut = page.locator('.plc-dbg-hex').first();
+    const hexText = () => hexOut.textContent().then((t) => (t ?? '').trim());
+    const clickRead = () =>
+      dbgOps.locator('button', { hasText: 'read', exact: true }).click();
+
+    // the counter ticks every scan — two reads must differ. Wait for the
+    // rendered text to actually change: toHaveText alone returns
+    // immediately on the previous value.
+    await clickRead();
+    await expect(hexOut).toHaveText(/^[0-9a-f]{2}( [0-9a-f]{2})*$/, {
+      timeout: 10_000,
+    });
+    const r1 = await hexText();
+    await page.waitForTimeout(300);
+    await clickRead();
+    await expect.poll(hexText, { timeout: 10_000 }).not.toBe(r1);
+    expect(await hexText()).not.toBe(r1);
+
+    // force cnt := 0 — the image byte is pinned against the program's
+    // cnt := cnt + 1 write, so reads keep returning 00 00 00 00
+    await dbgOps.locator('input[placeholder*="07000000"]').fill('00000000');
+    await dbgOps.locator('button', { hasText: 'force' }).click();
+    await expect(page.locator('.plc-force-tag').first()).toContainText('00000000', {
+      timeout: 10_000,
+    });
+    await page.waitForTimeout(300);
+    await clickRead();
+    await page.waitForTimeout(200);
+    expect(await hexText()).toBe('00 00 00 00');
+    await page.waitForTimeout(300);
+    await clickRead();
+    await page.waitForTimeout(200);
+    expect(await hexText()).toBe('00 00 00 00');
+
+    // clear all → the program owns the byte again; the counter resumes
+    await page.locator('.plc-forces button', { hasText: 'clear all' }).click();
+    await page.waitForTimeout(300);
+    await clickRead();
+    await expect.poll(hexText, { timeout: 10_000 }).not.toBe('00 00 00 00');
+  });
 });

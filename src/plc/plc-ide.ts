@@ -368,6 +368,7 @@ export class TetherPlcIde extends LitElement {
               <button
                 class="plc-nav-btn ${this.pane === p.id ? 'active' : ''}"
                 @click=${() => {
+                  this.flushStEditors();
                   this.pane = p.id;
                   if (p.id === 'deploy') void this.refreshCtl();
                 }}
@@ -447,10 +448,19 @@ export class TetherPlcIde extends LitElement {
     }
   }
 
+  /** commit any debounced st-editor edits before they can be lost
+      (pane unmount) or missed (compile reads stSources, not the DOM) */
+  private flushStEditors(): void {
+    this.querySelectorAll('st-editor').forEach((ed) =>
+      (ed as HTMLElement & { flushPending?: () => void }).flushPending?.(),
+    );
+  }
+
   /** run `tplcc check` through the ctl proxy; results land in the diags strip. */
   private async onCheck(): Promise<void> {
     if (this.compiling) return;
     this.compiling = true;
+    this.flushStEditors();
     try {
       const r = await compileProject(this.ctl.url, this.project);
       this.diags = r.diags;
@@ -1935,6 +1945,7 @@ export class TetherPlcIde extends LitElement {
     if (this.compiling) return;
     this.compiling = true;
     this.ctlErr = '';
+    this.flushStEditors();
     try {
       const r = await compileProject(this.ctl.url, this.project, true);
       this.diags = r.diags;

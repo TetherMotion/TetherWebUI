@@ -43,6 +43,21 @@ export class StEditor extends LitElement {
   private debounceTimer?: number;
   private applying = false;
 
+  /**
+   * Commit a pending debounced edit synchronously. The IDE calls this
+   * before compiling and before unmounting the editor on pane switches —
+   * otherwise the last <debounceMs of typing is silently dropped.
+   */
+  flushPending(): void {
+    if (this.debounceTimer === undefined || !this.view) return;
+    window.clearTimeout(this.debounceTimer);
+    this.debounceTimer = undefined;
+    this.value = this.view.state.doc.toString();
+    this.dispatchEvent(
+      new CustomEvent('change', { detail: this.value, bubbles: true, composed: true }),
+    );
+  }
+
   constructor() {
     super();
     this.value = '';
