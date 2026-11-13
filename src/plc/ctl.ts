@@ -53,6 +53,7 @@ export const CTL = {
   DBG_BREAK_EXPR: 0x0515,
   DBG_CAPTURE_EXPR: 0x0516,
   DBG_STATE_DIFF: 0x0517,
+  DBG_FIELDS: 0x0518,
   IMAGE_STATS: 0x0701,
   SHADOW_LOAD: 0x0801,
   SHADOW_STATUS: 0x0802,
@@ -61,6 +62,11 @@ export const CTL = {
   SHADOW_DROP: 0x0805,
   SHADOW_RESET: 0x0806,
   RT_STATUS: 0x0901,
+  OD_READ: 0x0a01,
+  OD_LIST: 0x0a02,
+  OD_WRITE: 0x0a03,
+  MAP_GET: 0x0c01,
+  JOURNAL_TAIL: 0x0d01,
   RETAIN_STATUS: 0x0601,
   RETAIN_FLUSH: 0x0602,
   RETAIN_CLEAR: 0x0603,
@@ -176,6 +182,23 @@ export interface DbgTraceStatus {
 export interface DbgTraceFrame {
   seq: bigint;
   ts: bigint;
+  data: Uint8Array;
+}
+
+/** one object-dictionary row (OD_LIST) — access 0 ro, 1 rw, 2 wo */
+export interface OdEntry {
+  index: number;
+  sub: number;
+  access: number;
+  /** declared value length in bytes */
+  len: number;
+  name: string;
+}
+
+/** OD_READ result — type: 0 u8 1 u16 2 u32 3 u64 4 i32 5 str 6 bytes */
+export interface OdValue {
+  type: number;
+  access: number;
   data: Uint8Array;
 }
 
@@ -938,6 +961,80 @@ export class PlcCtl {
   /** raw bytes of the running program's retain region. */
   retainDump(): Promise<Uint8Array> {
     return this.call(CTL.RETAIN_DUMP).then((r) => r.payload);
+  }
+
+  /** durable audit journal tail — newest `n` lines (≤256). */
+  journalTail(n = 50): Promise<string[]> {
+    const p = u32(n);
+    return this.call(CTL.JOURNAL_TAIL, p).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      const count = d.getUint32(0, true);
+      const out: string[] = [];
+      let o = 4;
+      for (let i = 0; i < count; i++) {
+        const l = d.getUint16(o, true);
+        out.push(new TextDecoder().decode(r.payload.subarray(o + 2, o + 2 + l)));
+        o += 2 + l;
+      }
+      return out;
+    });
+  }
+
+  /** object-dictionary listing (index/sub/access/len/name rows). */
+  odList(): Promise<OdEntry[]> {
+    return this.call(CTL.OD_LIST).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      const n = d.getUint32(0, true);
+      const out: OdEntry[] = [];
+      let o = 4;
+      for (let i = 0; i < n; i++) {
+        const index = d.getUint16(o, true);
+        const sub = r.payload[o + 2]!;
+        const access = r.payload[o + 3]!;
+        const len = d.getUint16(o + 4, true);
+        const nlen = d.getUint16(o + 6, true);
+        const name = new TextDecoder().decode(r.payload.subarray(o + 8, o + 8 + nlen));
+        out.push({ index, sub, access, len, name });
+        o += 8 + nlen;
+      }
+      return out;
+    });
+  }
+
+  /** read one OD object → {type, access, data}. */
+  odRead(index: number, sub: number): Promise<OdValue> {
+    const p = new Uint8Array(4);
+    const d = new DataView(p.buffer);
+    d.setUint16(0, index, true);
+    p[2] = sub;
+    return this.call(CTL.OD_READ, p).then((r) => {
+      const dv = new DataView(r.payload.buffer, r.payload.byteOffset);
+      const len = dv.getUint16(2, true);
+      return {
+        type: r.payload[0]!,
+        access: r.payload[1]!,
+        data: r.payload.slice(4, 4 + len),
+      };
+    });
+  }
+
+  /** write one OD object (rw/wo only); resolves false on refusal. */
+  async odWrite(index: number, sub: number, data: Uint8Array): Promise<boolean> {
+    /* wire: {u16 index, u8 sub, u8 pad, u32 len, u8 data[]} — the
+       runtime validates an 8-byte header before the payload */
+    const p = new Uint8Array(8 + data.length);
+    const d = new DataView(p.buffer);
+    d.setUint16(0, index, true);
+    p[2] = sub;
+    d.setUint32(4, data.length, true);
+    p.set(data, 8);
+    const r = await this.call(CTL.OD_WRITE, p);
+    return r.payload.length > 0 && r.payload[0] === 1;
+  }
+
+  /** deploy-map (I/O binding) section bytes of the loaded package. */
+  mapGet(): Promise<Uint8Array> {
+    return this.call(CTL.MAP_GET).then((r) => r.payload);
   }
 
   /** Deploy a .tplc package: BEGIN{size,sha256,mode} → CHUNKs → COMMIT. */

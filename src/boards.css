@@ -1214,6 +1214,42 @@ tile-frame {
   user-select: none;
 }
 
+.ld-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ld-toolbar .chip-btn.active {
+  outline: 1px solid var(--accent, #6cf);
+}
+
+.ld-svg {
+  display: block;
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  background: var(--plot-bg);
+  outline: none;
+  user-select: none;
+}
+
+.ld-svg text {
+  fill: var(--text-muted);
+  font-size: 10px;
+  font-family: monospace;
+}
+
+.ld-sym {
+  cursor: pointer;
+}
+
+.ld-sym.sel line,
+.ld-sym.sel rect,
+.ld-sym.sel circle {
+  stroke: var(--accent, #6cf);
+}
+
 .fbd-rect {
   fill: var(--glass-1);
   stroke: var(--glass-border);
@@ -1496,6 +1532,46 @@ tile-frame {
   color: var(--text-muted);
   word-break: break-all;
   margin: 4px 0;
+}
+
+.plc-journal {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  padding: 8px;
+  margin: 4px 0;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.plc-spark {
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.plc-trace {
+  display: block;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
+  margin: 6px 0;
+}
+
+.plc-trace-lbl {
+  font-size: 9px;
+  font-family: monospace;
+}
+
+.plc-trace-raw {
+  margin: 4px 0;
+}
+
+.plc-trace-raw summary {
+  cursor: pointer;
 }
 
 .plc-forces {

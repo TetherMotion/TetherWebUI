@@ -10,13 +10,15 @@
 import { html, LitElement, nothing, TemplateResult } from 'lit';
 import { DataHub } from '../data/hub';
 import './fbd-canvas';
+import './ld-canvas';
 import './st-editor';
 import './tempcurve';
-import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgStateDiff, DbgSym, DbgTraceStatus, DbgWatchEntry, EV, PlcCtl, ProgStatus, RetainStatus, RtStatus, ShadowDiff, ShadowStatus } from './ctl';
+import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgStateDiff, DbgSym, DbgTraceFrame, DbgTraceStatus, DbgWatchEntry, EV, OdEntry, OdValue, PlcCtl, ProgStatus, RetainStatus, RtStatus, ShadowDiff, ShadowStatus } from './ctl';
 import { byteToOffset, compileProject, CompileDiag, diagsForFile } from './build';
 import type { StEditor } from './st-editor';
 import { IfaceKind, IfaceVar, Pou, Task } from './model';
 import { entryWritable, writeScalar } from './mon';
+import { codecFromSchema, codecsForSize, defaultCodec, hex, odDecode, parseHex, type ScalarCodec } from './typedval';
 import { exportPlcopenXml, importPlcopenXml } from './plcopen';
 import type { CatalogEntry } from '../protocol';
 import { exportFbdJson, importFbdJson, loadProject, PlcProject, saveProject } from './store';
@@ -54,6 +56,97 @@ const PANES: { id: Pane; label: string }[] = [
   { id: 'watch', label: 'Watch' },
   { id: 'deploy', label: 'Deploy' },
 ];
+
+/** codec for a resolved symbol — prefer the user-picked label when it
+    fits the symbol's byte size, else the size-based default. */
+function codecForSym(s: DbgSym, preferred?: string): ScalarCodec {
+  const opts = codecsForSize(s.size);
+  if (preferred) {
+    const hit = opts.find((o) => o.label === preferred);
+    if (hit) return hit;
+  }
+  return defaultCodec(s.size);
+}
+
+function safeDecode(c: ScalarCodec, b: Uint8Array): string {
+  try {
+    return c.decode(b);
+  } catch {
+    return '—';
+  }
+}
+
+/** inline SVG sparkline for a numeric history sample. */
+function sparkline(samples: number[], w = 90, h = 22): TemplateResult {
+  if (samples.length < 2) return html`<span class="plc-dim">·</span>`;
+  let lo = Infinity, hi = -Infinity;
+  for (const v of samples) {
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  if (lo === hi) { lo -= 1; hi += 1; }
+  const pts = samples
+    .map((v, i) => {
+      const x = (i / (samples.length - 1)) * (w - 2) + 1;
+      const y = h - 2 - ((v - lo) / (hi - lo)) * (h - 4);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(' ');
+  return html`<svg class="plc-spark" width=${w} height=${h}>
+    <polyline points=${pts} fill="none" stroke="var(--accent, #6cf)" stroke-width="1" />
+  </svg>`;
+}
+
+/** safe arithmetic evaluator for watch expressions: numbers, plc.*
+    identifiers, + - * / % ( ) and unary minus. No eval(). */
+function evalWatchExpr(expr: string, lookup: (name: string) => number | undefined): number | undefined {
+  const tokens = expr.match(/(?:plc\.[A-Za-z0-9_.]+|[A-Za-z_][A-Za-z0-9_.]*|\d+\.?\d*|[-+*/%()])/g);
+  if (!tokens || tokens.join('').replace(/\s+/g, '') !== expr.replace(/\s+/g, '')) return undefined;
+  let pos = 0;
+  const peek = () => tokens[pos];
+  const eat = () => tokens[pos++];
+  function parseExpr(): number | undefined {
+    let v = parseTerm();
+    if (v === undefined) return undefined;
+    while (peek() === '+' || peek() === '-') {
+      const op = eat();
+      const r = parseTerm();
+      if (r === undefined) return undefined;
+      v = op === '+' ? v + r : v - r;
+    }
+    return v;
+  }
+  function parseTerm(): number | undefined {
+    let v = parseFactor();
+    if (v === undefined) return undefined;
+    while (peek() === '*' || peek() === '/' || peek() === '%') {
+      const op = eat();
+      const r = parseFactor();
+      if (r === undefined) return undefined;
+      v = op === '*' ? v * r : op === '/' ? v / r : v % r;
+    }
+    return v;
+  }
+  function parseFactor(): number | undefined {
+    const t = peek();
+    if (t === undefined) return undefined;
+    if (t === '-') { eat(); const v = parseFactor(); return v === undefined ? undefined : -v; }
+    if (t === '+') { eat(); return parseFactor(); }
+    if (t === '(') { eat(); const v = parseExpr(); if (eat() !== ')') return undefined; return v; }
+    if (/^\d/.test(t)) { eat(); return parseFloat(t); }
+    if (/^[A-Za-z_]/.test(t)) {
+      eat();
+      /* strip a leading "plc." the lexer may have split oddly — names
+         already include dots via the identifier pattern */
+      const name = t.startsWith('plc.') ? t : `plc.${t}`;
+      const v = lookup(name) ?? lookup(t);
+      return typeof v === 'number' ? v : undefined;
+    }
+    return undefined;
+  }
+  const r = parseExpr();
+  return pos === tokens.length ? r : undefined;
+}
 
 export class TetherPlcIde extends LitElement {
   declare hub?: DataHub;
@@ -111,23 +204,38 @@ export class TetherPlcIde extends LitElement {
   declare breaks?: DbgBreak[];
   declare trace?: DbgTraceStatus;
   declare traceLines?: string[];
+  private traceFrames: DbgTraceFrame[] = [];
+  private traceFrameLen = 0;
   declare watches?: DbgWatchEntry[];
+  declare journal?: string[];
+  declare odEntries?: OdEntry[];
+  declare odVals?: Record<string, string>;
+  declare ioMap?: { name: string; region: string; byte: number; bit: number | null }[];
+  declare odRaw?: Record<string, Uint8Array>;
 
   private ctl = new PlcCtl();
   private dbgSymName = '';
   private dbgSymShadow = false;
   private dbgWriteHex = '';
   private dbgMaskHex = '';
+  private dbgCodec = '';           // ScalarCodec.label for the resolved sym
+  private dbgTypedVal = '';        // typed text input alongside hex
+  private dbgTypedDirty = false;   // user edited typed field → it wins over hex
+  private dbgRawVal = '';          // decoded typed display of last read
   private brkTask = '0';
   private brkCmp = '4';
   private brkVal = '';
   private brkExpr = '';
   private brkKind = '0';
   private traceChs: { name: string; off: bigint; len: number }[] = [];
+  private watchExprInput = '';
+  private watchExprs: string[] = [];
+  private exprHistories: number[][] = [];
   private traceNoFreeze = false;
   private watchChs: { name: string; off: bigint; len: number }[] = [];
   private watchVals = new Map<number, string[]>();
   private stateDiff: DbgStateDiff | undefined;
+  private odWriteHex: Record<string, string> = {};
   private evSrc?: EventSource;
   private evTimer?: number;
 
@@ -213,7 +321,10 @@ export class TetherPlcIde extends LitElement {
         this.requestUpdate();
       }),
     );
-    this.unsubs.push(this.hub.on('values', () => this.requestUpdate()));
+    this.unsubs.push(this.hub.on('values', () => {
+      this.sampleExprs();
+      this.requestUpdate();
+    }));
     this.rebind();
   }
 
@@ -330,7 +441,13 @@ export class TetherPlcIde extends LitElement {
   private async onForce(entry: CatalogEntry, input: HTMLInputElement): Promise<void> {
     const hub = this.hub;
     if (!hub) return;
-    const v = Number(input.value.trim());
+    const text = input.value.trim();
+    /* accept BOOL spellings as well as numbers */
+    const lower = text.toLowerCase();
+    const v =
+      lower === 'true' || lower === 'on' ? 1
+      : lower === 'false' || lower === 'off' ? 0
+      : Number(text);
     if (!Number.isFinite(v)) {
       this.flash(`${entry.name}: not a number`);
       return;
@@ -539,6 +656,15 @@ export class TetherPlcIde extends LitElement {
               }
             `,
           )}
+          <div
+            class="plc-tree-pou ${this.selPou === '__globals' ? 'sel' : ''}"
+            @click=${() => {
+              this.selPou = '__globals';
+              this.selNet = 0;
+            }}
+          >
+            <span class="plc-kind">VAR</span> globals
+          </div>
           ${
             fbd.tasks.length
               ? html`<div class="plc-tree-head"><span>Tasks</span></div>
@@ -574,6 +700,7 @@ export class TetherPlcIde extends LitElement {
   }
 
   private selPouDetail(): TemplateResult {
+    if (this.selPou === '__globals') return this.globalsDetail();
     const pou = this.project.fbd.pous.find((p) => p.id === this.selPou);
     if (!pou) return html`<p class="plc-dim">Select a POU, or create one.</p>`;
     return html`
@@ -707,6 +834,86 @@ export class TetherPlcIde extends LitElement {
     this.save();
   }
 
+  // ---- globals ---------------------------------------------------------
+
+  /** VAR_GLOBAL table — same columns as a POU interface, kind forced
+      to var_global; emits a `g.<name>` symbol in the compiled package. */
+  private globalsDetail(): TemplateResult {
+    const gvars = this.project.fbd.global_vars;
+    return html`
+      <h3>globals <span class="plc-dim">VAR_GLOBAL</span></h3>
+      <p class="plc-dim">
+        Shared variables visible to every POU. Located globals carry an
+        <code>at</code> process-image address.
+      </p>
+      <h4>
+        variables
+        <button class="chip-btn" @click=${this.addGlobalVar}>+ var</button>
+      </h4>
+      <table class="plc-table">
+        <thead>
+          <tr><th>name</th><th>type</th><th>init</th><th>at</th><th>retain</th><th></th></tr>
+        </thead>
+        <tbody>
+          ${gvars.map(
+            (v, vi) => html`
+              <tr>
+                <td>
+                  <input class="fbd-in" .value=${v.name}
+                    @change=${(e: Event) =>
+                      this.editGlobalVar(vi, { name: (e.target as HTMLInputElement).value })} />
+                </td>
+                <td>
+                  <input class="fbd-in" .value=${v.type}
+                    @change=${(e: Event) =>
+                      this.editGlobalVar(vi, { type: (e.target as HTMLInputElement).value })} />
+                </td>
+                <td>
+                  <input class="fbd-in" .value=${v.init ?? ''}
+                    @change=${(e: Event) =>
+                      this.editGlobalVar(vi, { init: (e.target as HTMLInputElement).value })} />
+                </td>
+                <td>
+                  <input class="fbd-in" .value=${v.at ?? ''} placeholder="%MW0 / %QX0.0"
+                    @change=${(e: Event) =>
+                      this.editGlobalVar(vi, { at: (e.target as HTMLInputElement).value })} />
+                </td>
+                <td>
+                  <input type="checkbox" .checked=${v.retain === true}
+                    @change=${(e: Event) =>
+                      this.editGlobalVar(vi, { retain: (e.target as HTMLInputElement).checked || undefined })} />
+                </td>
+                <td>
+                  <button class="chip-btn" @click=${() => this.delGlobalVar(vi)}>✕</button>
+                </td>
+              </tr>
+            `,
+          )}
+          ${gvars.length ? nothing : html`<tr><td colspan="6" class="plc-dim">No globals — add shared variables here.</td></tr>`}
+        </tbody>
+      </table>
+    `;
+  }
+
+  private addGlobalVar(): void {
+    const gv = this.project.fbd.global_vars;
+    let n = gv.length + 1;
+    while (gv.some((v) => v.name === `gVar${n}`)) n++;
+    gv.push({ name: `gVar${n}`, kind: 'var_global', type: 'INT' });
+    this.save();
+  }
+
+  private delGlobalVar(i: number): void {
+    this.project.fbd.global_vars.splice(i, 1);
+    this.save();
+  }
+
+  private editGlobalVar(i: number, patch: Partial<IfaceVar>): void {
+    const gv = this.project.fbd.global_vars;
+    gv[i] = { ...gv[i]!, ...patch, kind: 'var_global' };
+    this.save();
+  }
+
   // ---- ST ------------------------------------------------------------
 
   private stPane(): TemplateResult {
@@ -779,7 +986,8 @@ export class TetherPlcIde extends LitElement {
           >
             ▶
           </button>
-          <button class="chip-btn" @click=${() => this.addNetwork(pou)}>+ network</button>
+          <button class="chip-btn" @click=${() => this.addNetwork(pou, 'fbd')}>+ fbd</button>
+          <button class="chip-btn" @click=${() => this.addNetwork(pou, 'ld')}>+ ld</button>
         </div>
         ${
           pou.kind === 'function'
@@ -789,17 +997,27 @@ export class TetherPlcIde extends LitElement {
               </div>`
             : nothing
         }
-        <fbd-canvas
-          .pou=${pou}
-          .netIndex=${this.selNet}
-          .pous=${this.pousWithLibraries()}
-          .values=${this.hub ? new Map(this.hub.values) : undefined}
-          .diags=${this.diags}
-          .libSources=${Object.values(this.project.stSources)}
-          .catalog=${this.catGroups}
-          @change=${() => this.save()}
-          @need-libsrc=${(e: CustomEvent<{ lib: string; file: string }>) => this.onNeedLibSrc(e)}
-        ></fbd-canvas>
+        ${
+          net.kind === 'ld'
+            ? html`<ld-canvas
+                .pou=${pou}
+                .netIndex=${this.selNet}
+                .pous=${this.pousWithLibraries()}
+                .values=${this.hub ? new Map(this.hub.values) : undefined}
+                @change=${() => this.save()}
+              ></ld-canvas>`
+            : html`<fbd-canvas
+                .pou=${pou}
+                .netIndex=${this.selNet}
+                .pous=${this.pousWithLibraries()}
+                .values=${this.hub ? new Map(this.hub.values) : undefined}
+                .diags=${this.diags}
+                .libSources=${Object.values(this.project.stSources)}
+                .catalog=${this.catGroups}
+                @change=${() => this.save()}
+                @need-libsrc=${(e: CustomEvent<{ lib: string; file: string }>) => this.onNeedLibSrc(e)}
+              ></fbd-canvas>`
+        }
       </div>
     `;
   }
@@ -913,10 +1131,10 @@ export class TetherPlcIde extends LitElement {
     this.save();
   }
 
-  private addNetwork(pou: Pou): void {
+  private addNetwork(pou: Pou, kind: 'fbd' | 'ld' = 'fbd'): void {
     pou.networks.push({
       id: `net${pou.networks.length + 1}`,
-      kind: 'fbd',
+      kind,
       label: '',
       comments: [],
       assocs: [],
@@ -1056,6 +1274,38 @@ export class TetherPlcIde extends LitElement {
 
   // ---- watch ---------------------------------------------------------
 
+  /** push one sample per watch expression into its sparkline history. */
+  private sampleExprs(): void {
+    const hub = this.hub;
+    if (!hub) return;
+    this.watchExprs.forEach((ex, i) => {
+      const v = evalWatchExpr(ex, (n) => {
+        const raw = hub.values.get(n);
+        return typeof raw === 'number' ? raw
+          : typeof raw === 'string' ? Number(raw) : undefined;
+      });
+      if (v === undefined || !Number.isFinite(v)) return;
+      const h = this.exprHistories[i] ?? (this.exprHistories[i] = []);
+      if (h[h.length - 1] !== v) {
+        h.push(v);
+        if (h.length > 120) h.shift();
+      }
+    });
+  }
+
+  private addWatchExpr(): void {
+    const ex = this.watchExprInput.trim();
+    if (!ex || this.watchExprs.includes(ex)) return;
+    this.watchExprs.push(ex);
+    this.exprHistories.push([]);
+    this.watchExprInput = '';
+    this.requestUpdate();
+  }
+
+  private exprHistory(i: number): number[] {
+    return this.exprHistories[i] ?? [];
+  }
+
   private watchPane(): TemplateResult {
     const hub = this.hub;
     const entries = hub
@@ -1063,9 +1313,57 @@ export class TetherPlcIde extends LitElement {
           (e) => e.name.startsWith('plc.') || e.group.startsWith('plc'),
         )
       : [];
+    /* evaluate watch expressions against live catalog values */
+    const exprRows = this.watchExprs.map((ex, i) => {
+      const v = hub ? evalWatchExpr(ex, (n) => {
+        const raw = hub.values.get(n);
+        return typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : undefined;
+      }) : undefined;
+      return { ex, i, v };
+    });
     return html`
       <div class="tile-scroll">
         <h3>Watch <span class="plc-dim">plc.* catalog entries</span></h3>
+        ${
+          hub
+            ? html`<div class="plc-ops">
+                <input
+                  class="fbd-in wide"
+                  placeholder="expression e.g. plc.POU1.sp - plc.POU1.pv"
+                  .value=${this.watchExprInput}
+                  @input=${(e: Event) =>
+                    (this.watchExprInput = (e.target as HTMLInputElement).value)}
+                  @keydown=${(e: KeyboardEvent) => {
+                    if (e.key === 'Enter') this.addWatchExpr();
+                  }}
+                />
+                <button class="chip-btn" @click=${() => this.addWatchExpr()}>+ expr</button>
+              </div>`
+            : nothing
+        }
+        ${
+          exprRows.length
+            ? html`<table class="plc-table">
+                <thead><tr><th>expr</th><th>value</th><th>trend</th><th></th></tr></thead>
+                <tbody>
+                  ${exprRows.map(
+                    ({ ex, i, v }) => html`<tr>
+                      <td><code>${ex}</code></td>
+                      <td class=${v === undefined ? 'plc-dim' : ''}>
+                        ${v === undefined ? '—' : v}
+                      </td>
+                      <td>${v === undefined ? nothing : sparkline(this.exprHistory(i))}</td>
+                      <td><button class="chip-btn" @click=${() => {
+                        this.watchExprs.splice(i, 1);
+                        this.exprHistories.splice(i, 1);
+                        this.requestUpdate();
+                      }}>×</button></td>
+                    </tr>`,
+                  )}
+                </tbody>
+              </table>`
+            : nothing
+        }
         ${
           !hub
             ? html`<p class="plc-dim">No machine connection.</p>`
@@ -1077,6 +1375,7 @@ export class TetherPlcIde extends LitElement {
                         <th>name</th>
                         <th>kind</th>
                         <th>value</th>
+                        <th>trend</th>
                         <th>force</th>
                       </tr>
                     </thead>
@@ -1087,6 +1386,7 @@ export class TetherPlcIde extends LitElement {
                             <td>${e.name}</td>
                             <td>${e.kind}</td>
                             <td>${hub.values.get(e.name) ?? '—'}</td>
+                            <td>${sparkline(hub.history.get(e.name) ?? [])}</td>
                             <td>
                               ${
                                 entryWritable(e)
@@ -1186,6 +1486,9 @@ export class TetherPlcIde extends LitElement {
         ${this.shadowCard()}
         ${this.dbg ? this.debugCard(this.dbg) : nothing}
         ${this.retain ? this.retainCard(this.retain) : nothing}
+        ${this.ioMapCard()}
+        ${this.odCard()}
+        ${this.journalCard()}
         ${this.rt ? html`<p class="plc-dim">rt: up ${this.rt.uptimeS}s · ${this.rt.progCount} progs (${this.rt.runningCount} running) · master ${this.rt.masterStatus} plc ${this.rt.plcStatus}${this.rt.version ? ` · ${this.rt.version}` : ''}</p>` : nothing}
         <p class="plc-dim">
           Requires <code>tplc-ctl-proxy</code> running on the plc host. Online-change
@@ -1454,6 +1757,16 @@ export class TetherPlcIde extends LitElement {
                     @input=${(e: Event) =>
                       (this.dbgWriteHex = (e.target as HTMLInputElement).value)}
                   />
+                  ${this.codecPicker()}
+                  <input
+                    class="fbd-in"
+                    placeholder=${this.dbgCodec ? `${this.dbgCodec} value` : 'typed value'}
+                    .value=${this.dbgTypedVal}
+                    @input=${(e: Event) => {
+                      this.dbgTypedVal = (e.target as HTMLInputElement).value;
+                      this.dbgTypedDirty = true;
+                    }}
+                  />
                   <button class="chip-btn" @click=${() => void this.onDbgWrite()}>write</button>
                   <input
                     class="fbd-in plc-brk-task"
@@ -1484,6 +1797,7 @@ export class TetherPlcIde extends LitElement {
           : nothing}
       </div>
       ${this.dbgHex ? html`<code class="plc-dbg-hex">${this.dbgHex}</code>` : nothing}
+      ${this.dbgRawVal ? html`<code class="plc-dbg-hex">${this.dbgRawVal}</code>` : nothing}
       ${this.forces && this.forces.length > 0
         ? html`<div class="plc-forces">
             ${this.forces.map(
@@ -1690,10 +2004,12 @@ export class TetherPlcIde extends LitElement {
             )}
           </div>`
         : nothing}
+      ${this.traceChart()}
       ${this.traceLines
-        ? html`<code class="plc-dbg-hex">${this.traceLines.map(
-            (l) => html`${l}<br />`,
-          )}</code>`
+        ? html`<details class="plc-trace-raw"><summary class="plc-dim">raw frames</summary>
+            <code class="plc-dbg-hex">${this.traceLines.map(
+              (l) => html`${l}<br />`,
+            )}</code></details>`
         : nothing}
       <div class="plc-forces">
         <button
@@ -1742,6 +2058,10 @@ export class TetherPlcIde extends LitElement {
       this.dbgSym = await this.ctl.dbgResolve(name);
       this.dbgSymShadow = name.startsWith('SHADOW.');
       this.dbgHex = undefined;
+      this.dbgRawVal = '';
+      this.dbgTypedVal = '';
+      this.dbgTypedDirty = false;
+      this.dbgCodec = this.dbgSym ? codecForSym(this.dbgSym).label : '';
       this.ctlErr = '';
     } catch (e) {
       this.dbgSym = undefined;
@@ -1758,11 +2078,75 @@ export class TetherPlcIde extends LitElement {
       const b = await this.ctl.dbgRead(s.offset, Math.min(s.size, 256),
                                      this.dbgSymShadow ? 1 : 0);
       this.dbgHex = [...b].map((x) => x.toString(16).padStart(2, '0')).join(' ');
+      const c = codecForSym(s, this.dbgCodec);
+      this.dbgRawVal = `${c.label}: ${safeDecode(c, b.slice(0, c.size))}`;
+      this.dbgTypedVal = safeDecode(c, b.slice(0, c.size));
+      this.dbgTypedDirty = false;
       this.ctlErr = '';
     } catch (e) {
       this.ctlErr = `read: ${e instanceof CtlError ? e.message : e}`;
     }
     this.requestUpdate();
+  }
+
+  /** codec picker for the resolved symbol — switches interpretation of
+      the typed value field; size-constrained by the symbol. */
+  private codecPicker(): TemplateResult | typeof nothing {
+    const s = this.dbgSym;
+    if (!s) return nothing;
+    const opts = codecsForSize(s.size);
+    if (opts.length <= 1) return nothing;
+    return html`<select
+      class="fbd-in"
+      title="value interpretation"
+      .value=${this.dbgCodec}
+      @change=${(e: Event) => {
+        this.dbgCodec = (e.target as HTMLSelectElement).value;
+        if (this.dbgRawVal) {
+          /* re-decode last read under the new codec */
+          const bytes = this.dbgHexBytesFromDisplay();
+          if (bytes) {
+            const c = codecForSym(s, this.dbgCodec);
+            this.dbgRawVal = `${c.label}: ${safeDecode(c, bytes.slice(0, c.size))}`;
+            this.dbgTypedVal = safeDecode(c, bytes.slice(0, c.size));
+          }
+        }
+        this.requestUpdate();
+      }}
+    >
+      ${opts.map((o) => html`<option value=${o.label}>${o.label}</option>`)}
+    </select>`;
+  }
+
+  /** re-parse the displayed hex blob (used when switching codecs). */
+  private dbgHexBytesFromDisplay(): Uint8Array | undefined {
+    const clean = (this.dbgHex ?? '').replace(/\s+/g, '');
+    if (!/^[0-9a-f]+$/i.test(clean) || clean.length % 2) return undefined;
+    const out = new Uint8Array(clean.length / 2);
+    for (let i = 0; i < out.length; i++)
+      out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16)!;
+    return out;
+  }
+
+  /** value bytes for write/force: typed field wins when non-empty and
+      decodable, else fall back to the raw hex field. */
+  private dbgWriteBytes(s: DbgSym): Uint8Array | undefined {
+    const t = this.dbgTypedDirty ? this.dbgTypedVal.trim() : '';
+    if (t) {
+      const c = codecForSym(s, this.dbgCodec);
+      try {
+        const b = c.encode(t);
+        if (b.length === s.size) return b;
+        this.ctlErr = `${c.label} encodes to ${b.length}B, symbol is ${s.size}B`;
+        this.requestUpdate();
+        return undefined;
+      } catch (e) {
+        this.ctlErr = e instanceof Error ? e.message : String(e);
+        this.requestUpdate();
+        return undefined;
+      }
+    }
+    return this.dbgHexBytes();
   }
 
   private dbgHexBytes(): Uint8Array | undefined {
@@ -1779,7 +2163,7 @@ export class TetherPlcIde extends LitElement {
 
   private async onDbgWrite(): Promise<void> {
     const s = this.dbgSym;
-    const bytes = s && this.dbgHexBytes();
+    const bytes = s && this.dbgWriteBytes(s);
     if (!s || !bytes) return;
     await this.ctlOp('dbg write', async () => {
       await this.ctl.dbgWrite(s.offset, bytes);
@@ -1789,7 +2173,7 @@ export class TetherPlcIde extends LitElement {
 
   private async onDbgForce(): Promise<void> {
     const s = this.dbgSym;
-    const bytes = s && this.dbgHexBytes();
+    const bytes = s && this.dbgWriteBytes(s);
     if (!s || !bytes) return;
     const mh = this.dbgMaskHex.trim();
     let mask: Uint8Array | undefined;
@@ -1815,9 +2199,19 @@ export class TetherPlcIde extends LitElement {
     try {
       value = BigInt(this.brkVal.trim());
     } catch {
-      this.ctlErr = 'break: integer value required';
-      this.requestUpdate();
-      return;
+      /* not a plain integer — try the typed codec against the resolved
+         symbol (encode → LE bytes → bigint compare value) */
+      try {
+        const b = codecForSym(s, this.dbgCodec).encode(this.brkVal.trim());
+        if (b.length > 8) throw new Error('compare value exceeds 8 B');
+        let v = 0n;
+        for (let i = b.length - 1; i >= 0; i--) v = (v << 8n) | BigInt(b[i]!);
+        value = v;
+      } catch (e2) {
+        this.ctlErr = `break: ${e2 instanceof Error ? e2.message : e2}`;
+        this.requestUpdate();
+        return;
+      }
     }
     if (isNaN(taskIdx)) {
       this.ctlErr = 'break: task index required';
@@ -1910,15 +2304,67 @@ export class TetherPlcIde extends LitElement {
 
   private async onTraceRead(): Promise<void> {
     await this.ctlOp('trace read', async () => {
-      const r = await this.ctl.dbgTraceRead(0n, 16);
-      this.traceLines = r.frames.map(
-        (f) =>
-          `#${f.seq} ${[...f.data]
-            .map((b) => b.toString(16).padStart(2, '0'))
-            .join(' ')}`);
-      if (r.frames.length === 0) this.traceLines = ['(ring empty)'];
+      const r = await this.ctl.dbgTraceRead(0n, 64);
+      this.traceFrames = r.frames;
+      this.traceFrameLen = r.frameLen;
+      this.traceLines = r.frames.length
+        ? r.frames.slice(0, 8).map(
+            (f) =>
+              `#${f.seq} ${[...f.data]
+                .map((b) => b.toString(16).padStart(2, '0'))
+                .join(' ')}`)
+        : ['(ring empty)'];
       this.requestUpdate();
     });
+  }
+
+  /** decode one channel's bytes out of a frame (channels are packed
+      consecutively, each `len` bytes, in traceChs order). */
+  private traceChannelValue(frame: DbgTraceFrame, chIdx: number): number | undefined {
+    const ch = this.traceChs[chIdx];
+    if (!ch) return undefined;
+    /* channels are laid out in traceChs order within frame.data */
+    let off = 0;
+    for (let i = 0; i < chIdx; i++) off += this.traceChs[i]!.len;
+    const bytes = frame.data.slice(off, off + ch.len);
+    if (bytes.length < ch.len) return undefined;
+    const c = defaultCodec(ch.len);
+    const s = safeDecode(c, bytes);
+    const n = Number(s);
+    return Number.isFinite(n) ? n : undefined;
+  }
+
+  /** waveform chart: one polyline per recorded channel. */
+  private traceChart(): TemplateResult | typeof nothing {
+    const frames = this.traceFrames;
+    if (!frames?.length || !this.traceChs.length) return nothing;
+    const w = 560, h = 120, pad = 4;
+    const nCh = Math.min(this.traceChs.length, 8);
+    const laneH = (h - pad * 2) / nCh;
+    return html`<svg class="plc-trace" width=${w} height=${h}>
+      ${Array.from({ length: nCh }, (_, ch) => {
+        const vals = frames
+          .map((f) => this.traceChannelValue(f, ch))
+          .filter((v): v is number => v !== undefined);
+        if (vals.length < 2) return nothing;
+        let lo = Infinity, hi = -Infinity;
+        for (const v of vals) { if (v < lo) lo = v; if (v > hi) hi = v; }
+        if (lo === hi) { lo -= 1; hi += 1; }
+        const y0 = pad + ch * laneH;
+        const pts = vals.map((v, i) => {
+          const x = pad + (i / (vals.length - 1)) * (w - pad * 2);
+          const y = y0 + laneH - 2 - ((v - lo) / (hi - lo)) * (laneH - 4);
+          return `${x.toFixed(1)},${y.toFixed(1)}`;
+        }).join(' ');
+        const hue = (ch * 67) % 360;
+        return html`<g>
+          <text x=${pad + 2} y=${y0 + 10} class="plc-trace-lbl"
+            fill="hsl(${hue},70%,65%)">${this.traceChs[ch]!.name}</text>
+          <polyline points=${pts} fill="none"
+            stroke="hsl(${hue},70%,60%)" stroke-width="1" />
+        </g>`;
+      })}
+    </svg>`;
   }
 
   private retainCard(r: RetainStatus): TemplateResult {
@@ -1966,6 +2412,252 @@ export class TetherPlcIde extends LitElement {
     } catch (e) {
       this.ctlErr = e instanceof Error ? e.message : String(e);
     }
+  }
+
+  // ---- object dictionary ----------------------------------------------
+
+  private odCard(): TemplateResult {
+    const entries = this.odEntries ?? [];
+    const vals = this.odVals ?? {};
+    return html`
+      <h4>
+        object dictionary
+        <span class="plc-dim">${entries.length ? `${entries.length} objects` : ''}</span>
+      </h4>
+      <div class="plc-ops">
+        <button class="chip-btn" @click=${() => void this.onOdList()}>list</button>
+        <button
+          class="chip-btn"
+          ?disabled=${!entries.length}
+          @click=${() => void this.onOdRefreshAll()}
+        >
+          read all
+        </button>
+      </div>
+      ${
+        entries.length
+          ? html`<table class="plc-table">
+              <thead>
+                <tr><th>index</th><th>sub</th><th>name</th><th>access</th><th>value</th><th></th></tr>
+              </thead>
+              <tbody>
+                ${entries.map((e) => {
+                  const key = `${e.index}.${e.sub}`;
+                  const acc = ['ro', 'rw', 'wo'][e.access] ?? '?';
+                  return html`<tr>
+                    <td class="plc-dim">0x${e.index.toString(16).padStart(4, '0')}</td>
+                    <td>${e.sub}</td>
+                    <td>${e.name}</td>
+                    <td>${acc}</td>
+                    <td>
+                      ${vals[key] !== undefined ? html`<code>${vals[key]}</code>` : '—'}
+                      ${e.access !== 0
+                        ? html`<input
+                            class="fbd-in plc-force-in"
+                            placeholder="hex"
+                            .value=${this.odWriteHex[key] ?? ''}
+                            @input=${(ev: Event) =>
+                              (this.odWriteHex[key] = (ev.target as HTMLInputElement).value)}
+                          />`
+                        : nothing}
+                    </td>
+                    <td>
+                      <button class="chip-btn" @click=${() => void this.onOdRead(e)}>read</button>
+                      ${e.access !== 0
+                        ? html`<button
+                            class="chip-btn"
+                            @click=${() => void this.onOdWrite(e)}
+                          >write</button>`
+                        : nothing}
+                    </td>
+                  </tr>`;
+                })}
+              </tbody>
+            </table>`
+          : html`<p class="plc-dim">No objects loaded — press list.</p>`
+      }
+    `;
+  }
+
+  private async onOdList(): Promise<void> {
+    try {
+      this.odEntries = await this.ctl.odList();
+      this.odVals = {};
+      this.ctlErr = '';
+    } catch (e) {
+      this.ctlErr = `od list: ${e instanceof Error ? e.message : e}`;
+    }
+    this.requestUpdate();
+  }
+
+  private async onOdRead(e: OdEntry): Promise<void> {
+    try {
+      const v = await this.ctl.odRead(e.index, e.sub);
+      this.odVals = { ...(this.odVals ?? {}), [`${e.index}.${e.sub}`]: odDecode(v) };
+      this.odRaw = { ...(this.odRaw ?? {}), [`${e.index}.${e.sub}`]: v.data };
+      this.ctlErr = '';
+    } catch (err) {
+      this.ctlErr = `od read: ${err instanceof Error ? err.message : err}`;
+    }
+    this.requestUpdate();
+  }
+
+  private async onOdRefreshAll(): Promise<void> {
+    const entries = this.odEntries ?? [];
+    const vals: Record<string, string> = {};
+    const raws: Record<string, Uint8Array> = {};
+    for (const e of entries) {
+      if (e.access === 2) continue; // write-only has nothing to read
+      try {
+        const v = await this.ctl.odRead(e.index, e.sub);
+        vals[`${e.index}.${e.sub}`] = odDecode(v);
+        raws[`${e.index}.${e.sub}`] = v.data;
+      } catch {
+        /* per-row read failure leaves the cell blank */
+      }
+    }
+    this.odVals = vals;
+    this.odRaw = raws;
+    this.requestUpdate();
+  }
+
+  private async onOdWrite(e: OdEntry): Promise<void> {
+    const key = `${e.index}.${e.sub}`;
+    const text = (this.odWriteHex[key] ?? '').trim();
+    if (!text) {
+      this.ctlErr = 'od write: empty value';
+      return;
+    }
+    /* prefer the declared type's width: if the typed text fits a
+       known scalar codec use it, else treat input as raw hex */
+    let bytes: Uint8Array;
+    const raw = this.odRaw?.[key];
+    const declaredLen = e.len || raw?.length || 0;
+    const codec =
+      declaredLen > 0
+        ? defaultCodec(declaredLen)
+        : undefined;
+    try {
+      const looksNumeric = /^-?[\d.]+\s*(ms|s|m|us|ns)?$/i.test(text) ||
+        /^(true|false|on|off)$/i.test(text);
+      if (codec && looksNumeric) bytes = codec.encode(text);
+      else bytes = parseHex(text);
+    } catch (err) {
+      this.ctlErr = `od write: ${err instanceof Error ? err.message : err}`;
+      return;
+    }
+    if (declaredLen && bytes.length !== declaredLen) {
+      this.ctlErr = `od write: ${bytes.length}B != declared ${declaredLen}B`;
+      return;
+    }
+    try {
+      const ok = await this.ctl.odWrite(e.index, e.sub, bytes);
+      this.ctlErr = ok ? '' : `od write 0x${e.index.toString(16)}/sub${e.sub}: refused`;
+      delete this.odWriteHex[key];
+      await this.onOdRead(e);
+    } catch (err) {
+      this.ctlErr = `od write: ${err instanceof Error ? err.message : err}`;
+    }
+    this.requestUpdate();
+  }
+
+  // ---- io map ---------------------------------------------------------
+
+  /** process-image layout from the package's DEPLOY_MAP section —
+      JSON rows {name, region I|Q|M, byte, bit}. */
+  private ioMapCard(): TemplateResult {
+    const rows = this.ioMap ?? [];
+    return html`
+      <h4>
+        io map
+        <span class="plc-dim">${rows.length ? `${rows.length} bindings` : ''}</span>
+      </h4>
+      <div class="plc-ops">
+        <button class="chip-btn" @click=${() => void this.onIoMap()}>load</button>
+      </div>
+      ${
+        rows.length
+          ? html`<table class="plc-table">
+              <thead>
+                <tr><th>name</th><th>region</th><th>byte</th><th>bit</th></tr>
+              </thead>
+              <tbody>
+                ${rows.map(
+                  (r) => html`<tr>
+                    <td>${r.name}</td>
+                    <td>%${r.region}</td>
+                    <td>${r.byte}</td>
+                    <td>${r.bit ?? '—'}</td>
+                  </tr>`,
+                )}
+              </tbody>
+            </table>`
+          : html`<p class="plc-dim">Process-image bindings of the deployed package.</p>`
+      }
+    `;
+  }
+
+  private async onIoMap(): Promise<void> {
+    try {
+      const raw = await this.ctl.mapGet();
+      const text = new TextDecoder().decode(raw);
+      const parsed = JSON.parse(text) as {
+        name: string; region: string; byte: number; bit: number | null;
+      }[];
+      this.ioMap = Array.isArray(parsed) ? parsed : [];
+      this.ctlErr = '';
+    } catch (e) {
+      this.ioMap = [];
+      this.ctlErr = `io map: ${e instanceof Error ? e.message : e}`;
+    }
+    this.requestUpdate();
+  }
+
+  // ---- audit journal ----------------------------------------------------
+
+  private journalCard(): TemplateResult {
+    const lines = this.journal ?? [];
+    return html`
+      <h4>
+        audit journal
+        <span class="plc-dim">${lines.length ? `${lines.length} lines` : ''}</span>
+      </h4>
+      <div class="plc-ops">
+        <button class="chip-btn" @click=${() => void this.onJournal()}>tail</button>
+        <button
+          class="chip-btn"
+          ?disabled=${!lines.length}
+          @click=${() => void this.onJournal(200)}
+        >
+          tail 200
+        </button>
+        <button
+          class="chip-btn"
+          ?disabled=${!lines.length}
+          @click=${() => {
+            this.journal = undefined;
+            this.requestUpdate();
+          }}
+        >
+          clear
+        </button>
+      </div>
+      ${
+        lines.length
+          ? html`<pre class="plc-journal">${lines.join('\n')}</pre>`
+          : html`<p class="plc-dim">Durable audit tail — every management and debug op with client, uid and result.</p>`
+      }
+    `;
+  }
+
+  private async onJournal(n = 50): Promise<void> {
+    try {
+      this.journal = await this.ctl.journalTail(n);
+      this.ctlErr = '';
+    } catch (e) {
+      this.ctlErr = `journal: ${e instanceof Error ? e.message : e}`;
+    }
+    this.requestUpdate();
   }
 
   /** compile on the plc host and deploy the returned package directly. */
