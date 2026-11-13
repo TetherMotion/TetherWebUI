@@ -208,6 +208,8 @@ export interface ProgStatus {
   name: string;
   state: number;
   cycles: bigint;
+  /** program-set generation (proto v2+; bumps on deploy/promote) */
+  epoch?: bigint;
   /** proto-v3 shadow tail (absent on older runtimes) */
   shadowState?: number;
   shadowCycles?: bigint;
@@ -392,6 +394,7 @@ export class PlcCtl {
         name: cstr(r.payload.subarray(16, 80)),
         state: r.payload[80]!,
         cycles: d.getBigUint64(88, true),
+        epoch: lay.base >= 296 ? d.getBigUint64(288, true) : undefined,
         shadowState: v3 ? r.payload[296]! : undefined,
         shadowCycles: v3 ? d.getBigUint64(304, true) : undefined,
         shadowMissed: v3 ? d.getBigUint64(312, true) : undefined,

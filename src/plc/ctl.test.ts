@@ -37,6 +37,7 @@ function progStatusV3(taskCount: number): Uint8Array {
   p[80] = 1;
   d.setUint32(84, taskCount, true);
   d.setBigUint64(88, 4242n, true);
+  d.setBigUint64(288, 42n, true); /* epoch (proto v2+) */
   p[296] = 1; /* shadow_state */
   d.setBigUint64(304, 55n, true); /* shadow_cycles */
   d.setBigUint64(312, 2n, true); /* shadow_missed */
@@ -63,6 +64,7 @@ describe('PlcCtl progStatus', () => {
     expect(s.name).toBe('RampProg');
     expect(s.state).toBe(1);
     expect(s.cycles).toBe(4242n);
+    expect(s.epoch).toBe(42n);
     expect(s.shadowState).toBe(1);
     expect(s.shadowCycles).toBe(55n);
     expect(s.shadowMissed).toBe(2n);
@@ -87,6 +89,7 @@ describe('PlcCtl progStatus', () => {
     mock(p);
     const s = await new PlcCtl().progStatus();
     expect(s.name).toBe('OldProg');
+    expect(s.epoch).toBeUndefined();
     expect(s.shadowState).toBeUndefined();
     expect(s.tasks).toHaveLength(1);
     expect(s.tasks[0]!.name).toBe('t0');

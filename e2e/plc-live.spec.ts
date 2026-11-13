@@ -87,6 +87,8 @@ test.describe('TetherPLC IDE — live runtime', () => {
   }) => {
     await openDeploy(page);
     await expect(progHead(page)).toContainText('running');
+    // proto-v2+ status surfaces the program-set epoch
+    await expect(progHead(page).locator('.plc-dim')).toContainText('epoch');
 
     // cycles must advance — proof the scan loop is live, not a cached reply
     const c1 = await cyclesOf(page);
