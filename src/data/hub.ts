@@ -168,6 +168,7 @@ export class DataHub extends EventTarget {
   private pollTimer?: number;
   private polling = false;
   private pollingEvents = false;
+  private pollingBounds = false;
 
   constructor() {
     super();
@@ -623,7 +624,21 @@ export class DataHub extends EventTarget {
   }
 
   private async pollBoundValues(): Promise<void> {
-    if (!this.connected || !this.boundKeys.size) return;
+    /* large catalogs (plc.* field expansions) make a full bound sweep
+       slower than the poll interval — overlapping cycles would pile
+       requests onto the serial io session until reads start timing
+       out, so a still-running sweep simply skips this tick */
+    if (!this.connected || !this.boundKeys.size || this.pollingBounds)
+      return;
+    this.pollingBounds = true;
+    try {
+      await this.sweepBoundValues();
+    } finally {
+      this.pollingBounds = false;
+    }
+  }
+
+  private async sweepBoundValues(): Promise<void> {
     const entries = [...this.params, ...this.signals];
     const byName = new Map(entries.map((s) => [s.name, s]));
     /* binding keys are `entry` or `entry.field`; entry names may contain
@@ -689,11 +704,32 @@ export class DataHub extends EventTarget {
           if (hist.length > 120) hist.shift();
           this.history.set(key, hist);
         }
-      } catch {
-        /* single-entry read failure leaves the last value in place */
+      } catch (error) {
+        /* single-entry read failure leaves the last value in place —
+           but catalog-consistency errors mean the entry list is behind
+           the server's schema epoch and every typed read will keep
+           failing, so schedule one catalog reload to heal it */
+        if (
+          error instanceof Error &&
+          error.message.includes('stale schema epoch')
+        ) {
+          this.reloadCatalogsDebounced();
+        }
       }
     }
     if (changed) this.emit('values');
+  }
+
+  private catalogReloadTimer?: number;
+
+  /** Debounced catalog reload — epoch bumps during reconnect can leave
+      list responses stamped with a superseded schema epoch. */
+  private reloadCatalogsDebounced(): void {
+    if (this.catalogReloadTimer !== undefined) return;
+    this.catalogReloadTimer = window.setTimeout(() => {
+      this.catalogReloadTimer = undefined;
+      if (this.connected) void this.loadCatalogs().catch(() => {});
+    }, 250);
   }
 
   // ---- Stream mux -------------------------------------------------------------------

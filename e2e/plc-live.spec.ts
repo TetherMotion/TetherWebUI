@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
 import {
   block,
@@ -239,6 +240,63 @@ test.describe('TetherPLC IDE — live runtime', () => {
     await expect.poll(hexText, { timeout: 10_000 }).not.toBe('00 00 00 00');
   });
 
+  test('debug watch channel: staged item streams live memory at 10 Hz', async ({
+    page,
+  }) => {
+    await openDeploy(page);
+
+    /* drop watch sets a previous (crashed) run may have left registered —
+       handles persist on the runtime across browser sessions */
+    const watchTags = page.locator('.plc-force-tag', { hasText: 'watch h' });
+    for (let i = 0; i < 8 && (await watchTags.count()) > 0; i++) {
+      await watchTags
+        .first()
+        .locator('button', { hasText: '×' })
+        .click();
+      await page.waitForTimeout(300);
+    }
+
+    const dbgOps = page.locator('.plc-ops', {
+      has: page.locator('input[placeholder*="symbol name"]'),
+    });
+    await dbgOps.locator('input[placeholder*="symbol name"]').fill('cnt');
+    await dbgOps.locator('button', { hasText: 'resolve' }).click();
+    await expect(dbgOps).toContainText('size 4B', { timeout: 10_000 });
+
+    // stage cnt as a watch item, then register the set on the runtime
+    await dbgOps.locator('button', { hasText: '+ watch' }).click();
+    const staged = page.locator('.plc-forces', { hasText: 'watch items' });
+    await expect(staged).toContainText('cnt', { timeout: 5_000 });
+    await staged.locator('button', { hasText: 'add watch' }).click();
+
+    // refreshCtl re-lists DBG_WATCH_LIST → the watch tag renders
+    const tag = page.locator('.plc-force-tag', { hasText: 'watch h' });
+    await expect(tag).toHaveCount(1, { timeout: 10_000 });
+    await expect(tag).toContainText('1×4B', { timeout: 5_000 });
+
+    // one-shot read → the 4-byte DINT as 8 hex nibbles
+    await tag.locator('button', { hasText: 'get' }).click();
+    await expect(tag).toContainText(/=[0-9a-f]{8}/, { timeout: 10_000 });
+
+    // stream at 10 Hz — cnt increments every scan, so the streamed =hex
+    // rendered from DBG_WATCH events must keep changing
+    await tag.locator('button', { hasText: 'stream' }).click();
+    await expect(tag).toContainText('10Hz', { timeout: 10_000 });
+    const streamed = () => tag.textContent();
+    const s1 = await streamed();
+    await expect
+      .poll(streamed, { timeout: 15_000, intervals: [300, 600, 1000] })
+      .not.toBe(s1);
+
+    // stop streaming and remove the watch — leaves the runtime clean
+    await tag.locator('button', { hasText: 'stop' }).click();
+    await expect(tag.locator('button', { hasText: 'stream' })).toHaveCount(1, {
+      timeout: 5_000,
+    });
+    await tag.locator('button', { hasText: '×' }).click();
+    await expect(tag).toHaveCount(0, { timeout: 10_000 });
+  });
+
   test('live catalog: plc.* program values stream into the watch pane', async ({
     page,
   }) => {
@@ -450,5 +508,151 @@ test.describe('TetherPLC IDE — live runtime', () => {
     });
     // the new epoch is visible in the program card header
     await expect(progHead(page).locator('.plc-dim')).toContainText('epoch');
+  });
+
+  test('temperature loop: AtcProfile+AtcPid run live; catalog shows the ramp', async ({
+    page,
+  }) => {
+    /* headline path end-to-end: atc_tempctrl.st attaches as project
+       source, an ST program runs FB_AtcProfile (RAMPT+DWELL) into
+       FB_AtcPid against a simulated PT1 plant, and every value —
+       program vars AND FB member pins — streams through plc.* catalog
+       entries into the watch pane against the real scan loop. */
+    const FIXTURES = fileURLToPath(new URL('../test-fixtures', import.meta.url));
+    await freshPlcProject(page, LIVE_CTL);
+    await connectDashboard(page, 'operator', 'ws://127.0.0.1:8090/tether-io');
+    await openPlcIde(page);
+    await newPou(page, 'program');
+
+    // Curves pane offers the one-time library attach until the project
+    // contains FB_AtcProfile — the file lands in stSources and compiles
+    // together with the program
+    await pane(page, 'Curves');
+    await page.waitForSelector('temp-curve', { timeout: 15_000 });
+    await page.locator('.plc-main input[type="file"]').setInputFiles(
+      `${FIXTURES}/atc_tempctrl.st`,
+    );
+
+    await pane(page, 'ST');
+    await setStSource(
+      page,
+      [
+        'PROGRAM POU1',
+        'VAR',
+        '    pid : FB_AtcPid;',
+        '    prof : FB_AtcProfile;',
+        '    pv : LREAL := 20.0;',
+        '    u : LREAL;',
+        '    sp : LREAL;',
+        '    flags : DINT := 0;',
+        'END_VAR',
+        '    prof.SEG[1].KIND := 3;', // RAMPT: reach 80 in 500 s
+        '    prof.SEG[1].TGT := 80.0;',
+        '    prof.SEG[1].P1 := 500.0;',
+        '    prof.SEG[2].KIND := 1;', // DWELL 400 s at 80
+        '    prof.SEG[2].TGT := 80.0;',
+        '    prof.SEG[2].P1 := 400.0;',
+        '    prof.SEG[3].KIND := 0;', // END
+        '    prof(NUM_SEG := 3, RUN := TRUE, HOLD := FALSE, RESET := FALSE,',
+        '         PvStart := TRUE, PV := pv, CycleTime := 0.5);',
+        '    pid(Execute := TRUE, Setpoint := prof.SP, Actual := pv,',
+        '        Kp := 2.0, Tn := 20.0, Tv := 0.0,',
+        '        OutMin := 0.0, OutMax := 100.0,',
+        '        ManEn := FALSE, ManOut := 0.0, CycleTime := 0.5,',
+        '        Reset := FALSE);',
+        '    u := pid.Out;',
+        '    sp := prof.SP;',
+        '    pv := pv + (1.5 * u - pv) * (0.5 / (20.0 + 0.5));',
+        '    flags := 0;',
+        '    IF pv > 75.0 AND pv < 85.0 THEN flags := flags + 1; END_IF;',
+        '    IF prof.Done THEN flags := flags + 2; END_IF;',
+        '    IF NOT prof.Err AND NOT pid.Err THEN flags := flags + 4; END_IF;',
+        'END_PROGRAM',
+      ].join('\n'),
+    );
+
+    await pane(page, 'Deploy');
+    await page.locator('.plc-ops button', { hasText: 'build & deploy' }).click();
+    await expect(page.locator('.plc-status')).toContainText('deployed', {
+      timeout: 60_000,
+    });
+
+    await pane(page, 'watch');
+    const consoleLog: string[] = [];
+    page.on('console', (m) => consoleLog.push(`${m.type()}: ${m.text()}`));
+    page.on('pageerror', (e) => consoleLog.push(`pageerror: ${e.message}`));
+    const dumpHub = () =>
+      page.evaluate(() => {
+        const sh = document.querySelector('tether-shell') as any;
+        const hub = sh?.hub;
+        if (!hub) return { err: 'no hub' };
+        const cat = hub.client.verifiedCatalog;
+        const entries = [...hub.params, ...hub.signals].filter((e: any) =>
+          e.name.startsWith('plc.POU1'),
+        );
+        return {
+          state: hub.client.state,
+          catEpoch: cat ? String(cat.epoch) : null,
+          entryEpochs: [...new Set(entries.map((e: any) => String(e.schemaEpoch)))],
+          sample: entries.slice(0, 3).map((e: any) => ({
+            name: e.name,
+            kind: e.kind,
+            id: String(e.id),
+            epoch: String(e.schemaEpoch),
+            schema: e.metadata?.['schema.name'],
+          })),
+          boundCount: (hub as any).boundKeys?.size,
+          valSp: hub.values.get('plc.POU1.sp'),
+          valFlags: hub.values.get('plc.POU1.flags'),
+        };
+      });
+    /* exact name-cell match — 'plc.POU1.pid.Out' must not also hit
+       '…pid.OutMin'/'…pid.OutMax' rows */
+    const val = (name: string) => {
+      const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return page
+        .locator('td', { hasText: new RegExp(`^${esc}$`) })
+        .locator('xpath=following-sibling::td[2]');
+    };
+    const num = async (name: string) => Number(await val(name).textContent());
+    try {
+      for (const n of [
+        'plc.POU1.sp',
+        'plc.POU1.pv',
+        'plc.POU1.u',
+        'plc.POU1.flags',
+        'plc.POU1.prof.Done',
+        'plc.POU1.prof.SegIdx',
+        'plc.POU1.pid.Out',
+      ]) {
+        await expect(val(n)).not.toHaveText('—', { timeout: 45_000 });
+      }
+    } catch (e) {
+      console.log('HUBDUMP', JSON.stringify(await dumpHub(), null, 1));
+      console.log('CONSOLE', consoleLog.slice(-40).join('\n'));
+      throw e;
+    }
+
+    /* 10 ms scans × CycleTime 0.5 → ~50 process-s per wall-s: the 900 s
+       profile spans ~18 s wall — long enough to watch the ramp. */
+    const sp1 = await num('plc.POU1.sp');
+    await expect
+      .poll(() => num('plc.POU1.sp'), { timeout: 20_000, intervals: [800, 1500] })
+      .not.toBe(sp1);
+
+    // the plant heats toward the rising setpoint
+    const pv1 = await num('plc.POU1.pv');
+    await expect
+      .poll(() => num('plc.POU1.pv'), { timeout: 20_000, intervals: [800, 1500] })
+      .toBeGreaterThan(pv1);
+
+    // profile runs RAMPT→DWELL→END; Done latches and the self-check
+    // bits (pv in band, no faults) accumulate in flags
+    await expect
+      .poll(() => num('plc.POU1.prof.Done'), { timeout: 45_000, intervals: [2000] })
+      .toBe(1);
+    await expect
+      .poll(() => num('plc.POU1.flags'), { timeout: 20_000, intervals: [2000] })
+      .toBeGreaterThan(0);
   });
 });
