@@ -117,6 +117,46 @@ describe('PlcCtl progStatus', () => {
   });
 });
 
+describe('PlcCtl rtStatus', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('decodes status fields, heartbeats and version banner', async () => {
+    const p = new Uint8Array(104);
+    const d = new DataView(p.buffer);
+    d.setUint32(0, 3, true); /* proto_ver */
+    d.setUint32(4, 3600, true);
+    d.setUint32(8, 2, true);
+    d.setUint32(12, 1, true);
+    d.setUint32(16, 0, true);
+    d.setUint32(20, 1, true);
+    d.setBigUint64(24, 111n, true);
+    d.setBigUint64(32, 222n, true);
+    cstr(p, 'tether-plc 0.1', 40);
+    mock(p);
+    const s = await new PlcCtl().rtStatus();
+    expect(s.uptimeS).toBe(3600);
+    expect(s.progCount).toBe(2);
+    expect(s.runningCount).toBe(1);
+    expect(s.masterStatus).toBe(0);
+    expect(s.plcStatus).toBe(1);
+    expect(s.masterHbNs).toBe(111n);
+    expect(s.plcHbNs).toBe(222n);
+    expect(s.version).toBe('tether-plc 0.1');
+  });
+
+  it('tolerates a short legacy reply', async () => {
+    const p = new Uint8Array(24);
+    const d = new DataView(p.buffer);
+    d.setUint32(4, 5, true);
+    d.setUint32(8, 1, true);
+    mock(p);
+    const s = await new PlcCtl().rtStatus();
+    expect(s.uptimeS).toBe(5);
+    expect(s.masterHbNs).toBeUndefined();
+    expect(s.version).toBeUndefined();
+  });
+});
+
 describe('PlcCtl shadow ops', () => {
   afterEach(() => vi.unstubAllGlobals());
 

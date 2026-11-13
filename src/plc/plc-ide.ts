@@ -1186,7 +1186,7 @@ export class TetherPlcIde extends LitElement {
         ${this.shadowCard()}
         ${this.dbg ? this.debugCard(this.dbg) : nothing}
         ${this.retain ? this.retainCard(this.retain) : nothing}
-        ${this.rt ? html`<p class="plc-dim">rt: up ${this.rt.uptimeS}s · ${this.rt.progCount} progs (${this.rt.runningCount} running) · master ${this.rt.masterStatus} plc ${this.rt.plcStatus}</p>` : nothing}
+        ${this.rt ? html`<p class="plc-dim">rt: up ${this.rt.uptimeS}s · ${this.rt.progCount} progs (${this.rt.runningCount} running) · master ${this.rt.masterStatus} plc ${this.rt.plcStatus}${this.rt.version ? ` · ${this.rt.version}` : ''}</p>` : nothing}
         <p class="plc-dim">
           Requires <code>tplc-ctl-proxy</code> running on the plc host. Online-change
           (state-preserving swap + rollback) is live through PROG_SWAP / PROG_ROLLBACK.

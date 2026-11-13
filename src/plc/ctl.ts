@@ -265,6 +265,11 @@ export interface RtStatus {
   runningCount: number;
   masterStatus: number;
   plcStatus: number;
+  /** CLOCK_MONOTONIC ns heartbeats — staleness needs a local poll
+      delta, the browser has no shared monotonic clock           */
+  masterHbNs?: bigint;
+  plcHbNs?: bigint;
+  version?: string;
 }
 
 export interface RetainStatus {
@@ -435,6 +440,9 @@ export class PlcCtl {
         runningCount: d.getUint32(12, true),
         masterStatus: d.getUint32(16, true),
         plcStatus: d.getUint32(20, true),
+        masterHbNs: r.payload.length >= 40 ? d.getBigUint64(24, true) : undefined,
+        plcHbNs: r.payload.length >= 40 ? d.getBigUint64(32, true) : undefined,
+        version: r.payload.length >= 104 ? cstr(r.payload.subarray(40, 104)) : undefined,
       };
     });
   }
