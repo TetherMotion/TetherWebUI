@@ -26,6 +26,7 @@ export function readFunctionCatalog(payload: Uint8Array): FunctionEntry[] {
   reader.u32();
   reader.u32();
   const count = reader.u32();
+  reader.u64(); // schema epoch — uniform catalog header, not modeled on FunctionEntry
   const functions: FunctionEntry[] = [];
   for (let index = 0; index < count; index += 1) {
     const id = reader.u64();

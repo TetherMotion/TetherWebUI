@@ -624,11 +624,24 @@ export class DataHub extends EventTarget {
 
   private async pollBoundValues(): Promise<void> {
     if (!this.connected || !this.boundKeys.size) return;
-    const byName = new Map([...this.params, ...this.signals].map((s) => [s.name, s]));
+    const entries = [...this.params, ...this.signals];
+    const byName = new Map(entries.map((s) => [s.name, s]));
+    /* binding keys are `entry` or `entry.field`; entry names may contain
+       dots (plc.* catalogs), so resolve the entry as the longest name that
+       equals the key or prefixes it at a '.' boundary */
+    const resolveEntry = (key: string): { entry?: CatalogEntry; field?: string } => {
+      const exact = byName.get(key);
+      if (exact) return { entry: exact };
+      let best: CatalogEntry | undefined;
+      for (const e of entries) {
+        if (key.startsWith(e.name + '.') && (!best || e.name.length > best.name.length))
+          best = e;
+      }
+      return best ? { entry: best, field: key.slice(best.name.length + 1) } : {};
+    };
     let changed = false;
     for (const key of this.boundKeys) {
-      const [entryName, field] = splitKey(key);
-      const entry = entryName ? byName.get(entryName) : undefined;
+      const { entry, field } = resolveEntry(key);
       if (!entry) continue;
       try {
         let value: unknown;
@@ -1450,8 +1463,4 @@ export class DataHub extends EventTarget {
   }
 }
 
-/** Split `entry.field` (field is a single dotted segment; entries never contain dots). */
-function splitKey(key: string): [string, string | undefined] {
-  const dot = key.indexOf('.');
-  return dot < 0 ? [key, undefined] : [key.slice(0, dot), key.slice(dot + 1)];
-}
+

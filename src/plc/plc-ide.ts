@@ -224,7 +224,7 @@ export class TetherPlcIde extends LitElement {
     const hub = this.hub;
     if (!hub) return;
     const keys = [...hub.params, ...hub.signals]
-      .filter((e) => e.name.startsWith('plc.'))
+      .filter((e) => e.name.startsWith('plc.') || e.group.startsWith('plc'))
       .map((e) => e.name);
     if (keys.length) this.bindingRelease = hub.acquireBindings(keys);
   }

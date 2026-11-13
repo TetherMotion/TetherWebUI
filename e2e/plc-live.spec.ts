@@ -1,7 +1,10 @@
 import { expect, test, type Page } from '@playwright/test';
 import {
+  connectDashboard,
+  freshPlcProject,
   newPou,
   openFreshIde,
+  openPlcIde,
   pane,
   setStSource,
 } from './plc-helpers';
@@ -224,5 +227,59 @@ test.describe('TetherPLC IDE — live runtime', () => {
     await page.waitForTimeout(300);
     await clickRead();
     await expect.poll(hexText, { timeout: 10_000 }).not.toBe('00 00 00 00');
+  });
+
+  test('live catalog: plc.* program values stream into the watch pane', async ({
+    page,
+  }) => {
+    /* the dashboard's data connection goes to the live proxy's
+       /tether-io WebSocket → tplc-io → ctl.sock, so hub.params/signals
+       are the runtime's real plc.* catalog, not the simulator's */
+    await freshPlcProject(page, LIVE_CTL);
+    await connectDashboard(page, 'operator', 'ws://127.0.0.1:8090/tether-io');
+    await openPlcIde(page);
+    await pane(page, 'watch');
+
+    // the active program's DINT counter (LiveDemo.cnt, or POU1.cnt when
+    // an earlier test's build & deploy swapped the program) increments
+    // every scan — the row must appear and its value must keep changing
+    const row = page.locator('tr', { hasText: /plc\.\w+\.cnt/ });
+    await expect(row).toHaveCount(1, { timeout: 30_000 });
+    const val = row.locator('td').nth(2);
+    await expect(val).not.toHaveText('—', { timeout: 15_000 });
+    const v1 = await val.textContent();
+    await expect
+      .poll(() => val.textContent(), { timeout: 15_000, intervals: [400, 800] })
+      .not.toBe(v1);
+  });
+
+  test('deploy rebuilds the live catalog: new program vars appear in watch', async ({
+    page,
+  }) => {
+    await freshPlcProject(page, LIVE_CTL);
+    await connectDashboard(page, 'operator', 'ws://127.0.0.1:8090/tether-io');
+    await openPlcIde(page);
+
+    // ship POU1 (cnt counter) to the runtime — the epoch bump makes
+    // tplc-io rebuild its registry, dropping the WS bridge's TCP leg;
+    // the dashboard reconnects and re-lists the catalog
+    await newPou(page, 'program');
+    await pane(page, 'ST');
+    await setStSource(
+      page,
+      'PROGRAM POU1\nVAR\n    cnt : DINT := 0;\nEND_VAR\ncnt := cnt + 1;\nEND_PROGRAM',
+    );
+    await pane(page, 'Deploy');
+    await page.locator('.plc-ops button', { hasText: 'build & deploy' }).click();
+    await expect(page.locator('.plc-status')).toContainText('deployed', {
+      timeout: 60_000,
+    });
+
+    await pane(page, 'watch');
+    const row = page.locator('tr', { hasText: 'plc.POU1.cnt' });
+    await expect(row).toHaveCount(1, { timeout: 45_000 });
+    await expect(row.locator('td').nth(2)).not.toHaveText('—', {
+      timeout: 20_000,
+    });
   });
 });

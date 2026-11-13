@@ -23,14 +23,16 @@ export async function freshPlcProject(page: Page, ctl = CTL_URL): Promise<void> 
   );
 }
 
-/** Connect the dashboard shell over the simulated machine WebSocket. */
+/** Connect the dashboard shell over a machine WebSocket (default: the
+    simulated backend on :8099; live tests pass the tplc-io bridge). */
 export async function connectDashboard(
   page: Page,
   role: 'observer' | 'operator' | 'technician' | 'admin' = 'operator',
+  wsUrl = WS_URL,
 ): Promise<void> {
   await page.goto('/');
   await page.locator('button[title="Connection settings"]').click();
-  await page.locator('#conn-url').fill(`${WS_URL}?role=${role}`);
+  await page.locator('#conn-url').fill(`${wsUrl}?role=${role}`);
   await page.locator('#conn-connect').click();
   await expect(page.locator('.status-strip')).toContainText('connected', { timeout: 20_000 });
 }
