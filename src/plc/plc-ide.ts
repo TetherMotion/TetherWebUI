@@ -18,7 +18,7 @@ import { byteToOffset, compileProject, CompileDiag, diagsForFile } from './build
 import type { StEditor } from './st-editor';
 import { FbdProject, IfaceKind, IfaceVar, Pou, Task } from './model';
 import { entryWritable, writeScalar } from './mon';
-import { codecFromSchema, codecsForSize, defaultCodec, hex, odDecode, parseHex, type ScalarCodec } from './typedval';
+import { codecFromSchema, codecsForSize, defaultCodec, hex, odDecode, odEncode, odTypeName, parseHex, type ScalarCodec } from './typedval';
 import { exportPlcopenXml, importPlcopenXml } from './plcopen';
 import type { CatalogEntry } from '../protocol';
 import { exportFbdJson, importFbdJson, loadProject, PlcProject, saveProject } from './store';
@@ -347,6 +347,7 @@ export class TetherPlcIde extends LitElement {
   declare journal?: string[];
   declare odEntries?: OdEntry[];
   declare odVals?: Record<string, string>;
+  declare odTypes?: Record<string, number>;
   declare ioMap?: DeployMap;
   declare odRaw?: Record<string, Uint8Array>;
 
@@ -2581,6 +2582,7 @@ export class TetherPlcIde extends LitElement {
                 ${entries.map((e) => {
                   const key = `${e.index}.${e.sub}`;
                   const acc = ['ro', 'rw', 'wo'][e.access] ?? '?';
+                  const odTy = this.odTypes?.[key];
                   return html`<tr>
                     <td class="plc-dim">0x${e.index.toString(16).padStart(4, '0')}</td>
                     <td>${e.sub}</td>
@@ -2588,10 +2590,12 @@ export class TetherPlcIde extends LitElement {
                     <td>${acc}</td>
                     <td>
                       ${vals[key] !== undefined ? html`<code>${vals[key]}</code>` : '—'}
+                      ${odTy !== undefined ? html`<span class="plc-dim"> ${odTypeName(odTy)}</span>` : nothing}
                       ${e.access !== 0
                         ? html`<input
                             class="fbd-in plc-force-in"
-                            placeholder="hex"
+                            placeholder=${odTy !== undefined ? odTypeName(odTy) : 'hex'}
+                            title=${odTy !== undefined ? `write as ${odTypeName(odTy)}` : 'write as hex'}
                             .value=${this.odWriteHex[key] ?? ''}
                             @input=${(ev: Event) =>
                               (this.odWriteHex[key] = (ev.target as HTMLInputElement).value)}
@@ -2632,6 +2636,7 @@ export class TetherPlcIde extends LitElement {
       const v = await this.ctl.odRead(e.index, e.sub);
       this.odVals = { ...(this.odVals ?? {}), [`${e.index}.${e.sub}`]: odDecode(v) };
       this.odRaw = { ...(this.odRaw ?? {}), [`${e.index}.${e.sub}`]: v.data };
+      this.odTypes = { ...(this.odTypes ?? {}), [`${e.index}.${e.sub}`]: v.type };
       this.ctlErr = '';
     } catch (err) {
       this.ctlErr = `od read: ${err instanceof Error ? err.message : err}`;
@@ -2643,18 +2648,21 @@ export class TetherPlcIde extends LitElement {
     const entries = this.odEntries ?? [];
     const vals: Record<string, string> = {};
     const raws: Record<string, Uint8Array> = {};
+    const types: Record<string, number> = {};
     for (const e of entries) {
       if (e.access === 2) continue; // write-only has nothing to read
       try {
         const v = await this.ctl.odRead(e.index, e.sub);
         vals[`${e.index}.${e.sub}`] = odDecode(v);
         raws[`${e.index}.${e.sub}`] = v.data;
+        types[`${e.index}.${e.sub}`] = v.type;
       } catch {
         /* per-row read failure leaves the cell blank */
       }
     }
     this.odVals = vals;
     this.odRaw = raws;
+    this.odTypes = types;
     this.requestUpdate();
   }
 
@@ -2665,25 +2673,32 @@ export class TetherPlcIde extends LitElement {
       this.ctlErr = 'od write: empty value';
       return;
     }
-    /* prefer the declared type's width: if the typed text fits a
-       known scalar codec use it, else treat input as raw hex */
+    /* declared OD_T_* type wins (learned on read); write-only objects
+       fall back to the length-codec/hex path */
     let bytes: Uint8Array;
     const raw = this.odRaw?.[key];
     const declaredLen = e.len || raw?.length || 0;
+    const odType = this.odTypes?.[key];
     const codec =
       declaredLen > 0
         ? defaultCodec(declaredLen)
         : undefined;
     try {
-      const looksNumeric = /^-?[\d.]+\s*(ms|s|m|us|ns)?$/i.test(text) ||
-        /^(true|false|on|off)$/i.test(text);
-      if (codec && looksNumeric) bytes = codec.encode(text);
-      else bytes = parseHex(text);
+      if (odType !== undefined) bytes = odEncode(odType, text);
+      else {
+        const looksNumeric = /^-?[\d.]+\s*(ms|s|m|us|ns)?$/i.test(text) ||
+          /^(true|false|on|off)$/i.test(text);
+        if (codec && looksNumeric) bytes = codec.encode(text);
+        else bytes = parseHex(text);
+      }
     } catch (err) {
       this.ctlErr = `od write: ${err instanceof Error ? err.message : err}`;
       return;
     }
-    if (declaredLen && bytes.length !== declaredLen) {
+    /* length check applies to fixed-width types only — for STR/BYTES
+       the listed len is the *current* value size, not a capacity */
+    const fixedWidth = odType === undefined || odType <= 4;
+    if (fixedWidth && declaredLen && bytes.length !== declaredLen) {
       this.ctlErr = `od write: ${bytes.length}B != declared ${declaredLen}B`;
       return;
     }

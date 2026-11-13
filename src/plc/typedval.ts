@@ -168,6 +168,43 @@ export function odDecode(v: OdValue): string {
   }
 }
 
+/** Encode text for an OD_WRITE per the object's declared OD_T_*
+    type (0 u8, 1 u16, 2 u32, 3 u64, 4 i32, 5 str, 6 bytes). Throws on
+    bad input; callers fall back to the length-codec/hex path when
+    the type is unknown (write-only objects are never readable). */
+export function odEncode(type: number, text: string): Uint8Array {
+  const t = text.trim();
+  const num = () => {
+    if (!/^[+-]?\d+$/.test(t)) throw new Error(`OD: "${text}" is not an integer`);
+    return BigInt(t);
+  };
+  const le = (size: number, v: bigint, signed: boolean) => {
+    const out = new Uint8Array(size);
+    const dv = new DataView(out.buffer);
+    if (size === 1) { if (signed) dv.setInt8(0, Number(v)); else dv.setUint8(0, Number(v)); }
+    else if (size === 2) { if (signed) dv.setInt16(0, Number(v), true); else dv.setUint16(0, Number(v), true); }
+    else if (size === 4) { if (signed) dv.setInt32(0, Number(v), true); else dv.setUint32(0, Number(v), true); }
+    else if (signed) dv.setBigInt64(0, v, true);
+    else dv.setBigUint64(0, v, true);
+    return out;
+  };
+  switch (type) {
+    case 0: { const v = num(); if (v < 0n || v > 0xffn) throw new Error('OD u8: out of range'); return le(1, v, false); }
+    case 1: { const v = num(); if (v < 0n || v > 0xffffn) throw new Error('OD u16: out of range'); return le(2, v, false); }
+    case 2: { const v = num(); if (v < 0n || v > 0xffffffffn) throw new Error('OD u32: out of range'); return le(4, v, false); }
+    case 3: return le(8, num(), false);
+    case 4: return le(4, num(), true);
+    case 5: return new TextEncoder().encode(t);
+    case 6: return parseHex(t);
+    default: return parseHex(t);
+  }
+}
+
+/** OD_T_* type name for editor hints. */
+export function odTypeName(type: number): string {
+  return ['u8', 'u16', 'u32', 'u64', 'i32', 'str', 'bytes'][type] ?? 'raw';
+}
+
 export function hex(b: Uint8Array): string {
   return [...b].map((x) => x.toString(16).padStart(2, '0')).join(' ');
 }
