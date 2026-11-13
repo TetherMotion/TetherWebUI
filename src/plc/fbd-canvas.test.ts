@@ -268,6 +268,25 @@ describe('fbd-canvas', () => {
     cv.remove();
   });
 
+  it('P toggles the live probe flag on the selected wire', async () => {
+    const { cv, pou } = mount();
+    await cv.updateComplete;
+    const net = pou.networks[0]!;
+    net.wires.push({ id: 9, src: { block: 1, port: 0 }, dsts: [{ block: 2, port: 0 }] });
+    cv.requestUpdate();
+    await cv.updateComplete;
+    cv.selWire = 9;
+    cv.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', bubbles: true }));
+    await cv.updateComplete;
+    expect(net.wires[0]!.probe).toBe(true);
+    expect(cv.querySelector('.fbd-wire')!.getAttribute('class')).toContain('probe');
+    // second press clears it — the flag round-trips as absent, not false
+    cv.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', bubbles: true }));
+    await cv.updateComplete;
+    expect(net.wires[0]!.probe).toBeUndefined();
+    cv.remove();
+  });
+
   it('undo restores the pre-mutation network', async () => {
     const { cv, pou } = mount();
     await cv.updateComplete;

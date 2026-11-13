@@ -3,12 +3,15 @@ import { expect, test, type Page } from '@playwright/test';
 import {
   block,
   connectDashboard,
+  dragWire,
   freshPlcProject,
   newPou,
   openFreshIde,
   openPlcIde,
   paletteItem,
   pane,
+  pin,
+  projectJson,
   setStSource,
 } from './plc-helpers';
 
@@ -354,6 +357,34 @@ test.describe('TetherPLC IDE — live runtime', () => {
     await pt.fill('T#60s');
     await pt.blur(); // param commits on `change`, not `input`
 
+    // second TON: t1.ET → t2.PT — ET counts up every scan, so the probed
+    // wire's live value must keep changing after deploy
+    await paletteItem(page, 'TON').first().click();
+    const tons = block(page, 'TON');
+    await expect(tons).toHaveCount(2);
+    const t1 = tons.nth(0);
+    const t2 = tons.nth(1);
+    await dragWire(page, pin(t1, 'out', 1), pin(t2, 'in', 1)); // ET → PT
+    await expect(page.locator('fbd-canvas .fbd-wire')).toHaveCount(1);
+
+    // t2.IN literal TRUE — its PT is driven by the wire
+    await t2.locator('.fbd-rect').click();
+    await expect(t2).toHaveClass(/sel/); // pinparams now shows t2
+    await pinRow('IN').locator('input[type=checkbox]').check();
+
+    // select the wire, press P → live probe flag (lowerer emits __probe_<id>)
+    await page
+      .locator('fbd-canvas .fbd-wire')
+      .dispatchEvent('pointerdown', { bubbles: true });
+    await page.locator('fbd-canvas').dispatchEvent('keydown', { key: 'p' });
+    await expect(page.locator('fbd-canvas .fbd-wire.probe')).toHaveCount(1);
+    await expect
+      .poll(
+        async () =>
+          (await projectJson(page)).fbd.pous[0].networks[0].wires[0].probe,
+      )
+      .toBe(true);
+
     // ship it to the real runtime
     await pane(page, 'Deploy');
     await page.locator('.plc-ops button', { hasText: 'build & deploy' }).click();
@@ -371,6 +402,16 @@ test.describe('TetherPLC IDE — live runtime', () => {
     await expect
       .poll(texts, { timeout: 20_000, intervals: [500, 900, 1500] })
       .not.toEqual(before);
+
+    // probed wire: the __probe_<id> field streams the wire's value (t1.ET,
+    // which counts every scan) beside the wire itself
+    const wireLive = page.locator('fbd-canvas .fbd-wire.probe .fbd-live');
+    await expect(wireLive).toBeVisible({ timeout: 45_000 });
+    const wireTexts = () => wireLive.allTextContents();
+    const wBefore = await wireTexts();
+    await expect
+      .poll(wireTexts, { timeout: 20_000, intervals: [500, 900, 1500] })
+      .not.toEqual(wBefore);
   });
 
   test('shadow run: upload candidate, watch it scan, promote atomically', async ({

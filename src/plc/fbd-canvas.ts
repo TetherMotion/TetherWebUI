@@ -242,6 +242,19 @@ export class FbdCanvas extends LitElement {
     });
   }
 
+  /** P on a selected wire toggles its live probe — the lowerer emits a
+      `__probe_<id>` field whose value renders beside the wire. */
+  private toggleProbe(): void {
+    const id = this.selWire;
+    if (id === undefined) return;
+    this.mutate((net) => {
+      const w = net.wires.find((x) => x.id === id);
+      if (!w) return;
+      if (w.probe) delete w.probe;
+      else w.probe = true;
+    });
+  }
+
   private deleteSel(): void {
     const ids = this.selIds;
     const wire = this.selWire;
@@ -448,6 +461,16 @@ export class FbdCanvas extends LitElement {
   }
 
   private onKey = (e: KeyboardEvent): void => {
+    // shortcuts must not eat keystrokes typed into palette/pin/param fields
+    const t = e.target as HTMLElement | null;
+    if (
+      t &&
+      (t.tagName === 'INPUT' ||
+        t.tagName === 'TEXTAREA' ||
+        t.tagName === 'SELECT' ||
+        t.isContentEditable)
+    )
+      return;
     const mod = e.ctrlKey || e.metaKey;
     if (
       (e.key === 'Delete' || e.key === 'Backspace') &&
@@ -459,6 +482,9 @@ export class FbdCanvas extends LitElement {
       this.pending = undefined;
       this.selIds = new Set();
       this.selWire = undefined;
+    } else if ((e.key === 'p' || e.key === 'P') && this.selWire !== undefined) {
+      this.toggleProbe();
+      e.preventDefault();
     } else if (mod && e.key === 'z' && !e.shiftKey) {
       this.undo();
       e.preventDefault();
@@ -899,6 +925,11 @@ export class FbdCanvas extends LitElement {
           `,
         )}
         <span class="spacer"></span>
+        <button
+          class="chip-btn ${this.selWire !== undefined && this.net?.wires.find((w) => w.id === this.selWire)?.probe ? 'active' : ''}"
+          title="toggle live probe on the selected wire (P)"
+          @click=${() => this.toggleProbe()}
+        >⌁</button>
         <button class="chip-btn" title="Undo (ctrl-z)" @click=${this.undo}>↶</button>
         <button class="chip-btn" title="Redo (ctrl-y)" @click=${this.redo}>↷</button>
       </div>
