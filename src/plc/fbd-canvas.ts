@@ -775,6 +775,9 @@ export class FbdCanvas extends LitElement {
           <div class="plc-dim">
             e.g. ${preview.map((p) => p.at ?? '?').join(', ')}${f.count > 4 ? ' …' : ''}
             <br />${region}${width}${f.base}.0 … — channels become block pins
+            ${this.devDlg?.tpl?.channel2
+              ? html`<br />+ ${this.devDlg.tpl.count2 ?? 8}× ${this.devDlg.tpl.channel2} (${this.devDlg.tpl.ty2 ?? 'BOOL'})`
+              : ''}
           </div>
           <div class="fbd-devdlg-btns">
             <button class="chip-btn primary" @click=${() => this.addDevice()}>Add</button>
@@ -908,8 +911,11 @@ export class FbdCanvas extends LitElement {
     this.devDlg = { tpl };
   }
 
-  /** Generate channel pins for the wizard form (or editor "add channel"). */
-  private devicePins(f: DeviceForm, prefix?: string): IfaceVar[] {
+  /** Generate channel pins for a channel spec (wizard or template group). */
+  private devicePins(
+    f: { channel: 'DI' | 'DO' | 'AI' | 'AO'; count: number; ty: string; base: number },
+    prefix?: string,
+  ): IfaceVar[] {
     const p = prefix ?? '';
     const out: IfaceVar[] = [];
     const digital = f.channel === 'DI' || f.channel === 'DO';
@@ -931,13 +937,28 @@ export class FbdCanvas extends LitElement {
     return out;
   }
 
-  /** Create a device block from the wizard form. */
+  /** Create a device block from the wizard form (+ template group 2). */
   private addDevice(): void {
     const f = this.devForm;
     if (!f) return;
+    const tpl = this.devDlg?.tpl;
     this.devDlg = undefined;
     this.devForm = undefined;
     const pins = this.devicePins(f);
+    /* mixed terminals (EK1110 DI+DO, EK1122 AI+AO): the template's
+       second group lands in the other %I/%Q region or a different pin
+       prefix, so it shares base 0 without address collisions */
+    if (tpl?.channel2) {
+      const d2 = tpl.channel2 === 'DI' || tpl.channel2 === 'DO';
+      pins.push(
+        ...this.devicePins({
+          channel: tpl.channel2,
+          count: Math.max(1, Math.min(64, tpl.count2 ?? 8)),
+          ty: tpl.ty2 ?? (d2 ? 'BOOL' : 'REAL'),
+          base: 0,
+        }),
+      );
+    }
     this.mutate((net) => {
       const x = net.blocks.reduce((m, b) => Math.max(m, b.pos.x), 0);
       net.blocks.push({
@@ -948,7 +969,9 @@ export class FbdCanvas extends LitElement {
         params: {},
         exec_order: 0,
         negated: [],
-        comment: `${f.channel} terminal — ${f.count}ch ${f.ty}`,
+        comment: tpl?.channel2
+          ? `${f.name} — ${f.channel}${f.count} + ${tpl.channel2}${tpl.count2 ?? ''}`
+          : `${f.channel} terminal — ${f.count}ch ${f.ty}`,
         pins,
       });
       const nb = net.blocks[net.blocks.length - 1]!;

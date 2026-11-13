@@ -450,6 +450,40 @@ describe('fbd-canvas', () => {
     cv.remove();
   });
 
+  it('mixed template (EK1110) creates DI+DO channel groups in one block', async () => {
+    const { cv, pou } = mount();
+    await cv.updateComplete;
+    const btn = [...cv.querySelectorAll<HTMLButtonElement>('.fbd-palette .chip-btn')].find(
+      (b) => b.textContent === 'EK1110 DI/DO',
+    )!;
+    expect(btn).toBeTruthy();
+    btn.click();
+    await cv.updateComplete;
+    const dlg = cv.querySelector('.fbd-devdlg')!;
+    // dialog previews the second channel group
+    expect(dlg.textContent).toContain('4× DO');
+    const add = [...dlg.querySelectorAll<HTMLButtonElement>('button')].find(
+      (b) => b.textContent === 'Add',
+    )!;
+    add.click();
+    await cv.updateComplete;
+    const dev = pou.networks[0]!.blocks.find((b) => b.kind === 'device')!;
+    expect(dev.type_ref).toBe('EK1110');
+    // 4 DI outputs (%I) + 4 DO inputs (%Q), distinct pin names
+    expect(dev.pins).toHaveLength(8);
+    expect(dev.pins!.map((p) => p.name)).toEqual([
+      'DI0', 'DI1', 'DI2', 'DI3', 'DO0', 'DO1', 'DO2', 'DO3',
+    ]);
+    expect(dev.pins![0]).toMatchObject({ kind: 'var_output', at: '%IX0.0' });
+    expect(dev.pins![3]).toMatchObject({ kind: 'var_output', at: '%IX0.3' });
+    expect(dev.pins![4]).toMatchObject({
+      kind: 'var_input',
+      at: '%QX0.0',
+    });
+    expect(dev.pins![7]).toMatchObject({ kind: 'var_input', at: '%QX0.3' });
+    cv.remove();
+  });
+
   it('device block wires DI→logic→DO and tolerates self-channel wiring', async () => {
     const { cv, pou } = mount();
     await cv.updateComplete;

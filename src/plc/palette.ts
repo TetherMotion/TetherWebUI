@@ -35,6 +35,12 @@ export interface DeviceTemplate {
   count: number;
   /** IEC type for the channels. */
   ty: string;
+  /** optional second channel group for mixed terminals
+      (EK1110 = DI+DO, EK1122 = AI+AO). Lands in the other %I/%Q
+      region or a different pin prefix, so it shares base 0. */
+  channel2?: 'DI' | 'DO' | 'AI' | 'AO';
+  count2?: number;
+  ty2?: string;
 }
 
 export interface PaletteGroup {
@@ -148,8 +154,31 @@ export const PALETTE: PaletteGroup[] = [
         kind: 'device',
         type: 'EK1122',
         label: 'EK1122 AI/AO',
-        hint: '2-ch analog terminal — ±10 V / 0..20 mA',
-        template: { name: 'EK1122', channel: 'AI', count: 2, ty: 'REAL' },
+        hint: '2-ch analog terminal — 2× AI + 2× AO, ±10 V / 0..20 mA',
+        template: {
+          name: 'EK1122',
+          channel: 'AI',
+          count: 2,
+          ty: 'REAL',
+          channel2: 'AO',
+          count2: 2,
+          ty2: 'REAL',
+        },
+      },
+      {
+        kind: 'device',
+        type: 'EK1110',
+        label: 'EK1110 DI/DO',
+        hint: 'mixed terminal — 4× DI + 4× DO',
+        template: {
+          name: 'EK1110',
+          channel: 'DI',
+          count: 4,
+          ty: 'BOOL',
+          channel2: 'DO',
+          count2: 4,
+          ty2: 'BOOL',
+        },
       },
     ],
   },
