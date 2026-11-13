@@ -1,10 +1,12 @@
 import { expect, test, type Page } from '@playwright/test';
 import {
+  block,
   connectDashboard,
   freshPlcProject,
   newPou,
   openFreshIde,
   openPlcIde,
+  paletteItem,
   pane,
   setStSource,
 } from './plc-helpers';
@@ -281,5 +283,52 @@ test.describe('TetherPLC IDE — live runtime', () => {
     await expect(row.locator('td').nth(2)).not.toHaveText('—', {
       timeout: 20_000,
     });
+  });
+
+  test('live FBD pins: deployed TON member values stream onto the canvas', async ({
+    page,
+  }) => {
+    /* tplc-io expands FB instance members into plc.<prog>.<inst>.<mem>
+       catalog entries; the canvas resolves pinKeys against them, so a
+       deployed TON's ET/Q pins must show live, changing values. */
+    await freshPlcProject(page, LIVE_CTL);
+    await connectDashboard(page, 'operator', 'ws://127.0.0.1:8090/tether-io');
+    await openPlcIde(page);
+    await newPou(page, 'program');
+    await pane(page, 'FBD');
+    await page.waitForSelector('fbd-canvas svg');
+
+    await paletteItem(page, 'TON').first().click();
+    const ton = block(page, 'TON');
+    await expect(ton).toHaveCount(1);
+
+    // select the block → pin params: IN=TRUE, PT=T#60s so ET accumulates
+    await ton.locator('.fbd-rect').click();
+    const pinRow = (name: string) =>
+      page
+        .locator('.fbd-pinparams tr')
+        .filter({ has: page.locator('.fbd-pname', { hasText: new RegExp(`^${name}$`) }) });
+    await pinRow('IN').locator('input[type=checkbox]').check();
+    const pt = pinRow('PT').locator('input');
+    await pt.fill('T#60s');
+    await pt.blur(); // param commits on `change`, not `input`
+
+    // ship it to the real runtime
+    await pane(page, 'Deploy');
+    await page.locator('.plc-ops button', { hasText: 'build & deploy' }).click();
+    await expect(page.locator('.plc-status')).toContainText('deployed', {
+      timeout: 60_000,
+    });
+
+    // canvas live overlays: TON's out pins resolve plc.<prog>.i1.Q/ET
+    await pane(page, 'FBD');
+    const lives = ton.locator('.fbd-pin-live');
+    await expect(lives.first()).toBeVisible({ timeout: 45_000 });
+    // ET accumulates every scan — at least one live text must change
+    const texts = () => lives.allTextContents();
+    const before = await texts();
+    await expect
+      .poll(texts, { timeout: 20_000, intervals: [500, 900, 1500] })
+      .not.toEqual(before);
   });
 });
