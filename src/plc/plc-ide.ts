@@ -16,7 +16,7 @@ import './tempcurve';
 import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgStateDiff, DbgSym, DbgTraceFrame, DbgTraceStatus, DbgWatchEntry, EV, OdEntry, OdValue, PlcCtl, ProgStatus, RetainStatus, RtStatus, ShadowDiff, ShadowStatus } from './ctl';
 import { byteToOffset, compileProject, CompileDiag, diagsForFile } from './build';
 import type { StEditor } from './st-editor';
-import { IfaceKind, IfaceVar, Pou, Task } from './model';
+import { FbdProject, IfaceKind, IfaceVar, Pou, Task } from './model';
 import { entryWritable, writeScalar } from './mon';
 import { codecFromSchema, codecsForSize, defaultCodec, hex, odDecode, parseHex, type ScalarCodec } from './typedval';
 import { exportPlcopenXml, importPlcopenXml } from './plcopen';
@@ -148,6 +148,143 @@ function evalWatchExpr(expr: string, lookup: (name: string) => number | undefine
   return pos === tokens.length ? r : undefined;
 }
 
+// ---- deploy map (bridge format, DEPLOY_MAP section 0x0031) ------------
+
+export interface DeployMapChannel {
+  dir: 'in' | 'out';
+  off: number;
+  size: number;
+  key: string;
+  pdo?: string;
+  type?: string;
+  safe?: string;
+}
+
+export interface DeployMapBinding {
+  at: string;
+  key: string;
+}
+
+export interface DeployMap {
+  inSize?: number;
+  outSize?: number;
+  hash?: string;
+  channels: DeployMapChannel[];
+  bindings: DeployMapBinding[];
+  safety: string[];
+}
+
+/** Parse the bridge-format deploy map text (`image`/`in`/`out`/`bind`/
+    `safety`/`hash` lines, `#` comments). Unknown lines are skipped —
+    the runtime's parser is authoritative; this view is best-effort. */
+export function parseDeployMap(text: string): DeployMap {
+  const m: DeployMap = { channels: [], bindings: [], safety: [] };
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/#.*$/, '').trim();
+    if (!line) continue;
+    const t = line.split(/\s+/);
+    const kv = (p: string) => {
+      const tok = t.find((x) => x.startsWith(p));
+      return tok ? tok.slice(p.length) : undefined;
+    };
+    if (t[0] === 'image') {
+      const iv = kv('in=');
+      const ov = kv('out=');
+      /* `image in=64 out=64` — tokens are "in=64" style */
+      for (let i = 1; i + 1 < t.length; i += 2) {
+        if (t[i] === 'in') m.inSize = parseInt(t[i + 1]!, 0) || undefined;
+        if (t[i] === 'out') m.outSize = parseInt(t[i + 1]!, 0) || undefined;
+      }
+      if (iv !== undefined) m.inSize = parseInt(iv, 0) || m.inSize;
+      if (ov !== undefined) m.outSize = parseInt(ov, 0) || m.outSize;
+      continue;
+    }
+    if (t[0] === 'hash') {
+      m.hash = t[1];
+      continue;
+    }
+    if (t[0] === 'safety') {
+      if (t[1]) m.safety.push(t[1]);
+      continue;
+    }
+    if (t[0] === 'bind') {
+      if (t.length >= 3) {
+        let at = t[1]!;
+        if (at.startsWith('"') && at.endsWith('"')) at = at.slice(1, -1);
+        m.bindings.push({ at, key: t[2]! });
+      }
+      continue;
+    }
+    if (t[0] === 'in' || t[0] === 'out') {
+      const dir = t[0] as 'in' | 'out';
+      const pdo = kv('pdo=');
+      /* runtime derives the channel key for bus endpoints:
+         pdo=<ep> → key=<ep>.tx (in) / <ep>.rx (out) */
+      const key = kv('key=') ?? (pdo !== undefined ? `${pdo}.${dir === 'in' ? 'tx' : 'rx'}` : '');
+      const c: DeployMapChannel = {
+        dir,
+        off: parseInt(kv('off=') ?? '0', 0) || 0,
+        size: parseInt(kv('size=') ?? '0', 0) || 0,
+        key,
+      };
+      if (pdo !== undefined) c.pdo = pdo;
+      const ty = kv('type=');
+      if (ty !== undefined) c.type = ty;
+      const safe = kv('safe=');
+      if (safe !== undefined) c.safe = safe;
+      if (c.key) m.channels.push(c);
+    }
+  }
+  return m;
+}
+
+export interface ProjectBinding {
+  /** dotted name: global, POU.var, or POU.block.channel. */
+  name: string;
+  at: string;
+  type?: string;
+}
+
+/** Every `at` binding declared in the project — globals, POU
+    interface vars, variable blocks and device channels. This is the
+    compile-time view (what tplcc writes to the IO_MAP section);
+    the deploy map above is the runtime channel view. */
+export function projectIoBindings(fbd: FbdProject): ProjectBinding[] {
+  const out: ProjectBinding[] = [];
+  const push = (name: string, at?: string, type?: string) => {
+    if (at) out.push({ name, at, type });
+  };
+  for (const g of fbd.global_vars) push(`⚙ ${g.name}`, g.at, g.type);
+  for (const pou of fbd.pous) {
+    for (const v of pou.interface) push(`${pou.name}.${v.name}`, v.at, v.type);
+    for (const net of pou.networks) {
+      for (const b of net.blocks) {
+        if (b.kind === 'variable') push(`${pou.name}.${b.name ?? `#${b.id}`}`, b.at);
+        else if (b.kind === 'device')
+          for (const p of b.pins ?? []) push(`${pou.name}.${b.type_ref}.${p.name}`, p.at, p.type);
+      }
+    }
+  }
+  return out.sort((a, b) => a.at.localeCompare(b.at) || a.name.localeCompare(b.name));
+}
+
+function rangesOverlap(a: DeployMapChannel, b: DeployMapChannel): boolean {
+  return a.dir === b.dir && a.off < b.off + b.size && b.off < a.off + a.size;
+}
+
+/** Indices of channels whose image range overlaps another channel in
+    the same direction — two writers fighting over the same bytes. */
+export function deployMapOverlaps(chans: DeployMapChannel[]): number[] {
+  const bad = new Set<number>();
+  for (let i = 0; i < chans.length; i++)
+    for (let j = i + 1; j < chans.length; j++)
+      if (rangesOverlap(chans[i]!, chans[j]!)) {
+        bad.add(i);
+        bad.add(j);
+      }
+  return [...bad];
+}
+
 export class TetherPlcIde extends LitElement {
   declare hub?: DataHub;
 
@@ -210,7 +347,7 @@ export class TetherPlcIde extends LitElement {
   declare journal?: string[];
   declare odEntries?: OdEntry[];
   declare odVals?: Record<string, string>;
-  declare ioMap?: { name: string; region: string; byte: number; bit: number | null }[];
+  declare ioMap?: DeployMap;
   declare odRaw?: Record<string, Uint8Array>;
 
   private ctl = new PlcCtl();
@@ -2563,51 +2700,114 @@ export class TetherPlcIde extends LitElement {
 
   // ---- io map ---------------------------------------------------------
 
-  /** process-image layout from the package's DEPLOY_MAP section —
-      JSON rows {name, region I|Q|M, byte, bit}. */
+  /** process-image layout — the package's DEPLOY_MAP section in
+      bridge format: `image in=N out=M`, `in|out off= size= key=
+      [pdo=] [type=] [safe=]`, `bind <at> <key>`, `safety <key>`,
+      `hash <sha>`. */
   private ioMapCard(): TemplateResult {
-    const rows = this.ioMap ?? [];
+    const m = this.ioMap ?? parseDeployMap('');
+    const chans = m.channels;
+    const overlaps = deployMapOverlaps(chans);
+    const overlapIdx = new Set(overlaps);
+    const dirRows = (dir: 'in' | 'out') =>
+      chans
+        .map((c, i) => ({ c, i }))
+        .filter(({ c }) => c.dir === dir)
+        .sort((a, b) => a.c.off - b.c.off || a.c.size - b.c.size);
+    const chanRow = (dir: 'in' | 'out') => (e: { c: DeployMapChannel; i: number }) => {
+      const c = e.c;
+      return html`<tr class=${overlapIdx.has(e.i) ? 'plc-row-warn' : nothing}>
+        <td>%${dir === 'in' ? 'I' : 'Q'}</td>
+        <td>${c.off}</td>
+        <td>${c.size}</td>
+        <td>${c.key}</td>
+        <td>${c.pdo ?? ''}</td>
+        <td>${c.type ?? ''}</td>
+        <td>${c.safe ?? ''}${m.safety.includes(c.key) ? ' 🔒' : ''}</td>
+      </tr>`;
+    };
     return html`
       <h4>
         io map
-        <span class="plc-dim">${rows.length ? `${rows.length} bindings` : ''}</span>
+        <span class="plc-dim">${chans.length ? `${chans.length} channels` : ''}</span>
+        ${overlaps.length ? html`<span class="plc-warn"> ⚠ ${overlaps.length} overlap${overlaps.length > 1 ? 's' : ''}</span>` : nothing}
       </h4>
       <div class="plc-ops">
         <button class="chip-btn" @click=${() => void this.onIoMap()}>load</button>
       </div>
       ${
-        rows.length
-          ? html`<table class="plc-table">
-              <thead>
-                <tr><th>name</th><th>region</th><th>byte</th><th>bit</th></tr>
-              </thead>
-              <tbody>
-                ${rows.map(
-                  (r) => html`<tr>
-                    <td>${r.name}</td>
-                    <td>%${r.region}</td>
-                    <td>${r.byte}</td>
-                    <td>${r.bit ?? '—'}</td>
-                  </tr>`,
-                )}
-              </tbody>
-            </table>`
-          : html`<p class="plc-dim">Process-image bindings of the deployed package.</p>`
+        chans.length
+          ? html`
+              <p class="plc-dim">
+                image in=${m.inSize ?? '?'}B out=${m.outSize ?? '?'}B${m.hash ? html` · hash ${m.hash.slice(0, 12)}…` : nothing}
+                ${m.bindings.length ? html` · ${m.bindings.length} binds` : nothing}
+              </p>
+              <table class="plc-table">
+                <thead>
+                  <tr><th>dir</th><th>off</th><th>size</th><th>key</th><th>pdo</th><th>type</th><th>safe</th></tr>
+                </thead>
+                <tbody>
+                  ${dirRows('in').map(chanRow('in'))}
+                  ${dirRows('out').map(chanRow('out'))}
+                </tbody>
+              </table>
+              ${
+                m.bindings.length
+                  ? html`<details class="plc-raw"><summary>binds (${m.bindings.length})</summary>
+                      <table class="plc-table">
+                        <tbody>
+                          ${m.bindings.map(
+                            (b) => html`<tr><td>${b.at}</td><td>→</td><td>${b.key}</td></tr>`,
+                          )}
+                        </tbody>
+                      </table>
+                    </details>`
+                  : nothing
+              }
+              ${
+                overlaps.length
+                  ? html`<ul class="plc-od-warn">
+                      ${overlaps.map((i) => {
+                        const c = chans[i]!;
+                        return html`<li>%${c.dir === 'in' ? 'I' : 'Q'}[${c.off}..${c.off + c.size}) shared by ${c.key} and ${overlaps
+                          .filter((j) => j !== i && rangesOverlap(chans[j]!, c))
+                          .map((j) => chans[j]!.key)
+                          .join(', ')}</li>`;
+                      })}
+                    </ul>`
+                  : nothing
+              }`
+          : html`<p class="plc-dim">Deploy map (bridge format) of the running package — channel image ranges, PDO endpoints, safe-state policy, safety keys.</p>`
       }
+      ${(() => {
+        const binds = projectIoBindings(this.project.fbd);
+        return binds.length
+          ? html`<details class="plc-raw">
+              <summary>project bindings (${binds.length})</summary>
+              <table class="plc-table">
+                <tbody>
+                  ${binds.map(
+                    (b) => html`<tr>
+                      <td>${b.name}</td>
+                      <td class="plc-dim">${b.at}</td>
+                      <td class="plc-dim">${b.type ?? ''}</td>
+                    </tr>`,
+                  )}
+                </tbody>
+              </table>
+            </details>`
+          : nothing;
+      })()}
     `;
   }
 
   private async onIoMap(): Promise<void> {
     try {
       const raw = await this.ctl.mapGet();
-      const text = new TextDecoder().decode(raw);
-      const parsed = JSON.parse(text) as {
-        name: string; region: string; byte: number; bit: number | null;
-      }[];
-      this.ioMap = Array.isArray(parsed) ? parsed : [];
+      this.ioMap = parseDeployMap(new TextDecoder().decode(raw));
       this.ctlErr = '';
     } catch (e) {
-      this.ioMap = [];
+      this.ioMap = undefined;
       this.ctlErr = `io map: ${e instanceof Error ? e.message : e}`;
     }
     this.requestUpdate();

@@ -81,3 +81,85 @@ describe('plc-ide tasks pane', () => {
     el.remove();
   });
 });
+
+describe('parseDeployMap', () => {
+  it('parses bridge-format channels, binds, safety and hash', async () => {
+    const { parseDeployMap, deployMapOverlaps } = await import('./plc-ide');
+    const text = [
+      '# deploy map',
+      'image in=64 out=64',
+      'in off=0 size=1 key=temp_in type=i16',
+      'in off=4 size=2 pdo=el1004.c1 safe=last',
+      'out off=0 size=1 key=heater safe=defined 42',
+      'bind "%IX0.0" temp_in',
+      'safety heater',
+      'hash abcdef0123456789',
+    ].join('\n');
+    const m = parseDeployMap(text);
+    expect(m.inSize).toBe(64);
+    expect(m.outSize).toBe(64);
+    expect(m.channels).toHaveLength(3);
+    expect(m.channels[0]).toMatchObject({ dir: 'in', off: 0, size: 1, key: 'temp_in', type: 'i16' });
+    // pdo channel derives the runtime key suffix
+    expect(m.channels[1]).toMatchObject({ key: 'el1004.c1.tx', pdo: 'el1004.c1', safe: 'last' });
+    expect(m.channels[2]).toMatchObject({ dir: 'out', key: 'heater', safe: 'defined' });
+    expect(m.bindings).toEqual([{ at: '%IX0.0', key: 'temp_in' }]);
+    expect(m.safety).toEqual(['heater']);
+    expect(m.hash).toBe('abcdef0123456789');
+    expect(deployMapOverlaps(m.channels)).toHaveLength(0);
+  });
+
+  it('flags overlapping image ranges in the same direction only', async () => {
+    const { parseDeployMap, deployMapOverlaps } = await import('./plc-ide');
+    const m = parseDeployMap(
+      [
+        'in off=0 size=4 key=a',
+        'in off=2 size=4 key=b',
+        'in off=8 size=1 key=c',
+        'out off=0 size=4 key=a_out',
+        'out off=2 size=4 key=b_out',
+      ].join('\n'),
+    );
+    const bad = deployMapOverlaps(m.channels);
+    // a/b overlap in, a_out/b_out overlap out; c is clean
+    expect(bad).toHaveLength(4);
+    expect(bad).not.toContain(2);
+  });
+
+  it('returns an empty map for missing section bytes', async () => {
+    const { parseDeployMap } = await import('./plc-ide');
+    const m = parseDeployMap('');
+    expect(m.channels).toHaveLength(0);
+    expect(m.bindings).toHaveLength(0);
+    expect(m.safety).toHaveLength(0);
+  });
+});
+
+describe('projectIoBindings', () => {
+  it('collects at bindings from globals, interfaces, vars and device pins', async () => {
+    const { projectIoBindings } = await import('./plc-ide');
+    const { emptyProject } = await import('./model');
+    const fbd = emptyProject('x');
+    fbd.global_vars.push({ name: 'g_in', kind: 'var_global', type: 'BOOL', at: '%IX0.0' });
+    fbd.pous.push({
+      id: 'p1', name: 'main', kind: 'program', en_eno: 'off',
+      interface: [{ name: 'pv', kind: 'var_input', type: 'LREAL', at: '%IW0' }],
+      networks: [{
+        id: 'n1', kind: 'fbd', label: '', comments: [], assocs: [], labels: [],
+        jumps: [], returns: [], wires: [],
+        blocks: [
+          { id: 1, kind: 'variable', type_ref: '', pos: { x: 0, y: 0 }, params: {}, exec_order: 0, negated: [], comment: '', role: 'in', name: 'run', at: '%IX1.0' },
+          { id: 2, kind: 'device', type_ref: 'EK1123', pos: { x: 0, y: 0 }, params: {}, exec_order: 0, negated: [], comment: '',
+            pins: [{ name: 'CH1', kind: 'var_output', type: 'INT', at: '%QW2' }] },
+        ],
+      }],
+    });
+    const binds = projectIoBindings(fbd);
+    const names = binds.map((b) => b.name);
+    expect(names).toContain('⚙ g_in');
+    expect(names).toContain('main.pv');
+    expect(names).toContain('main.run');
+    expect(names).toContain('main.EK1123.CH1');
+    expect(binds.find((b) => b.name === 'main.EK1123.CH1')?.at).toBe('%QW2');
+  });
+});

@@ -1754,3 +1754,29 @@ tile-frame {
 .fbd-note-warn {
   color: #d29922;
 }
+
+.plc-warn {
+  color: #d29922;
+  font-size: 11px;
+}
+
+.plc-row-warn td {
+  background: rgba(210, 153, 34, 0.10);
+}
+
+.plc-od-warn {
+  margin: 4px 0;
+  padding-left: 18px;
+  font-size: 11px;
+  color: #d29922;
+}
+
+.plc-raw {
+  margin: 4px 0;
+}
+
+.plc-raw summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--text-muted);
+}
