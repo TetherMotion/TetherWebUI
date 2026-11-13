@@ -21,7 +21,7 @@ const SYM_H = 44;         // symbol height
 const RAIL_L = 24;
 const RAIL_R = 24;
 
-type Tool = 'select' | 'no' | 'nc' | 'coil' | 'box';
+type Tool = 'select' | 'no' | 'nc' | 'coil' | 'box' | 'wire';
 
 export class LdCanvas extends LitElement {
   static properties = {
@@ -39,6 +39,8 @@ export class LdCanvas extends LitElement {
   declare values?: Map<string, unknown>;
   declare tool: Tool;
   declare selId: number;
+  /** wire tool: armed source block awaiting destinations. */
+  private wireSrc = 0;
 
   constructor() {
     super();
@@ -175,15 +177,96 @@ export class LdCanvas extends LitElement {
   }
 
   private onCanvasClick(e: MouseEvent): void {
-    if (this.tool === 'select') { this.selId = 0; return; }
     const svg = (e.currentTarget as SVGSVGElement);
     const pt = svg.createSVGPoint();
     pt.x = e.clientX; pt.y = e.clientY;
     const loc = pt.matrixTransform(svg.getScreenCTM()?.inverse());
+    if (this.tool === 'wire') {
+      this.onWireClick(loc.x, loc.y);
+      return;
+    }
+    if (this.tool === 'select') { this.selId = 0; this.wireSrc = 0; return; }
     const gx = Math.round((loc.x - RAIL_L) / GRID) * GRID;
     const gy = Math.round(loc.y / (GRID * 2)) * GRID * 2 + GRID / 2;
     if (gx < 0 || gy < 0) return;
     this.placeBlock(gx, gy);
+  }
+
+  /** block whose symbol contains the svg point, if any. */
+  private blockAt(x: number, y: number): Block | undefined {
+    return this.net?.blocks.find(
+      (b) =>
+        x >= RAIL_L + b.pos.x && x <= RAIL_L + b.pos.x + SYM_W &&
+        y >= b.pos.y && y <= b.pos.y + SYM_H,
+    );
+  }
+
+  /** wire tool: click a contact to arm it as source, then click
+      contacts/coils to add destinations. Click empty space or the
+      source again to disarm. */
+  private onWireClick(x: number, y: number): void {
+    const net = this.net;
+    if (!net) return;
+    const b = this.blockAt(x, y);
+    if (!b) { this.wireSrc = 0; this.requestUpdate(); return; }
+    if (!this.wireSrc) {
+      // only contacts source flow
+      if (this.isContact(b)) {
+        this.wireSrc = b.id;
+        this.selId = b.id;
+        this.requestUpdate();
+      }
+      return;
+    }
+    if (b.id === this.wireSrc) { this.wireSrc = 0; this.requestUpdate(); return; }
+    if (this.isContact(b) || this.isCoil(b)) {
+      // first wire in the network: freeze every rung's positional
+      // series order into explicit wires so branch edits don't
+      // strand unwired elements (series wires ≡ positional ANDs)
+      if (net.wires.length === 0) this.autoWireSeries(net);
+      this.addWire(this.wireSrc, b.id);
+      this.emit();
+    }
+  }
+
+  /** dst into an existing same-src wire's dsts, else a new wire. */
+  private addWire(src: number, dst: number): void {
+    const net = this.net;
+    if (!net || src === dst) return;
+    const w = net.wires.find((w) => w.src.block === src);
+    const ref = { block: dst, port: 0 as const };
+    if (w) {
+      if (!w.dsts.some((d) => d.block === dst)) w.dsts.push(ref);
+    } else {
+      net.wires.push({
+        id: nextNodeId(this.pou!),
+        src: { block: src, port: 0 },
+        dsts: [ref],
+      });
+    }
+  }
+
+  /** Convert each rung row's positional order into series wires:
+      contacts chained left→right by x, every coil fed by the last
+      contact. Semantics identical to positional lowering. */
+  private autoWireSeries(net: Network): void {
+    const rows = new Map<number, Block[]>();
+    for (const b of net.blocks) {
+      if (b.kind !== 'variable') continue;
+      const r = this.rungOf(b);
+      const arr = rows.get(r) ?? [];
+      arr.push(b);
+      rows.set(r, arr);
+    }
+    for (const arr of rows.values()) {
+      arr.sort((a, b) => a.pos.x - b.pos.x);
+      const contacts = arr.filter((b) => this.isContact(b));
+      const coils = arr.filter((b) => this.isCoil(b));
+      for (let i = 0; i + 1 < contacts.length; i++)
+        this.addWire(contacts[i]!.id, contacts[i + 1]!.id);
+      const last = contacts[contacts.length - 1];
+      if (last) for (const c of coils) this.addWire(last.id, c.id);
+    }
   }
 
   private placeBlock(x: number, y: number): void {
@@ -233,12 +316,14 @@ export class LdCanvas extends LitElement {
     net.blocks = net.blocks.filter((b) => b.id !== this.selId);
     net.wires = net.wires.filter(
       (w) => w.src.block !== this.selId && !w.dsts.some((d) => d.block === this.selId));
+    if (this.wireSrc === this.selId) this.wireSrc = 0;
     this.selId = 0;
     this.emit();
   }
 
   private onKey(e: KeyboardEvent): void {
     if ((e.target as HTMLElement).closest('input,textarea,select')) return;
+    if (e.key === 'Escape') { this.wireSrc = 0; this.requestUpdate(); return; }
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
       this.deleteSel();
@@ -252,15 +337,18 @@ export class LdCanvas extends LitElement {
     const h = this.svgH();
     return html`
       <div class="ld-toolbar">
-        ${(['select', 'no', 'nc', 'coil', 'box'] as Tool[]).map(
+        ${(['select', 'no', 'nc', 'coil', 'box', 'wire'] as Tool[]).map(
           (t) => html`<button
             class="chip-btn ${this.tool === t ? 'active' : ''}"
-            @click=${() => { this.tool = t; }}
-          >${{ select: 'select', no: 'NO | |', nc: 'NC |/|', coil: 'coil -( )-', box: 'box' }[t]}</button>`,
+            @click=${() => { this.tool = t; if (t !== 'wire') this.wireSrc = 0; }}
+          >${{ select: 'select', no: 'NO | |', nc: 'NC |/|', coil: 'coil -( )-', box: 'box', wire: 'wire →' }[t]}</button>`,
         )}
         <button class="chip-btn" ?disabled=${!this.selId}
           @click=${() => this.deleteSel()}>delete</button>
-        <span class="plc-dim">${net.blocks.length} elements · ${net.kind}</span>
+        <span class="plc-dim">${net.blocks.length} elements · ${net.wires?.length ?? 0} wires · ${net.kind}</span>
+        ${this.wireSrc
+          ? html`<span class="plc-dim">wire: click destinations (Esc to finish)</span>`
+          : nothing}
       </div>
       <svg class="ld-svg" width=${w} height=${h} tabindex="0"
         @click=${(e: MouseEvent) => this.onCanvasClick(e)}
