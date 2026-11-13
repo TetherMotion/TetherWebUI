@@ -1944,11 +1944,12 @@ export class TetherPlcIde extends LitElement {
       }
       this.flash('deploying…');
       this.deployFrac = 0;
-      const progName = await this.ctl.deploy(r.package, 0, (f) => {
+      const uuid = await this.ctl.deploy(r.package, 0, (f) => {
         this.deployFrac = f;
       });
       this.deployFrac = undefined;
-      this.flash(`deployed ${progName}`);
+      await this.activateDeployed(uuid);
+      this.flash(`deployed ${uuid.slice(0, 8)}`);
       await this.refreshCtl();
     } catch (e) {
       this.ctlErr = e instanceof Error ? e.message : String(e);
@@ -1956,6 +1957,18 @@ export class TetherPlcIde extends LitElement {
       this.compiling = false;
       this.deployFrac = undefined;
     }
+  }
+
+  /**
+   * DEPLOY_COMMIT only stores the package under packages_dir — make it
+   * the running program: stop the current one (PROG_PREPARE rejects
+   * while RUNNING), prepare the stored uuid, start.
+   */
+  private async activateDeployed(uuid: string): Promise<void> {
+    const st = await this.ctl.progStatus().catch(() => undefined);
+    if (st && st.state === 1) await this.ctl.progStop();
+    await this.ctl.progPrepare(uuid);
+    await this.ctl.progStart();
   }
 
   private setCtlUrl(url: string): void {
@@ -2065,6 +2078,7 @@ export class TetherPlcIde extends LitElement {
         this.deployFrac = f;
         this.requestUpdate();
       });
+      await this.activateDeployed(uuid);
       this.ctlErr = '';
       this.flash(`deployed ${file.name} → ${uuid.slice(0, 8)}`);
       await this.refreshCtl();

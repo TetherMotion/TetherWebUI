@@ -188,3 +188,17 @@ describe('PlcCtl shadow ops', () => {
     expect(d.getUint32(8, true)).toBe(8);
   });
 });
+
+describe('PlcCtl program ops', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('progPrepare sends the 16-byte package uuid as PROG_PREPARE', async () => {
+    mock(new Uint8Array(0));
+    const uuid = '0123456789abcdef0123456789abcdef';
+    await new PlcCtl().progPrepare(uuid);
+    expect(lastReq!).toHaveLength(16 + 16);
+    expect(new DataView(lastReq!.buffer).getUint16(0, true)).toBe(0x0301);
+    const want = [...uuid.matchAll(/../g)].map((m) => parseInt(m[0], 16));
+    expect([...lastReq!.subarray(16)]).toEqual(want);
+  });
+});

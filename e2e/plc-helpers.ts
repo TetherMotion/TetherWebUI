@@ -8,7 +8,7 @@ export const CTL_URL = 'http://127.0.0.1:8089';
  * Fresh PLC project + proxy endpoint, installed before app scripts run.
  * Must be called before page.goto().
  */
-export async function freshPlcProject(page: Page): Promise<void> {
+export async function freshPlcProject(page: Page, ctl = CTL_URL): Promise<void> {
   await page.addInitScript(
     ({ ctl }) => {
       localStorage.setItem('tether.plc.ctlUrl', ctl);
@@ -19,7 +19,7 @@ export async function freshPlcProject(page: Page): Promise<void> {
         localStorage.removeItem('tether.plc.project.v1');
       }
     },
-    { ctl: CTL_URL },
+    { ctl },
   );
 }
 
@@ -51,8 +51,8 @@ export async function openPlcIde(page: Page): Promise<Locator> {
 }
 
 /** Full path: fresh project → connect → PLC IDE on the FBD-capable state. */
-export async function openFreshIde(page: Page): Promise<void> {
-  await freshPlcProject(page);
+export async function openFreshIde(page: Page, ctl = CTL_URL): Promise<void> {
+  await freshPlcProject(page, ctl);
   await connectDashboard(page);
   await openPlcIde(page);
 }

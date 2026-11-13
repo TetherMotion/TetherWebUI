@@ -422,6 +422,18 @@ export class PlcCtl {
     return this.call(CTL.PROG_STOP);
   }
 
+  /**
+   * Load a stored package (by 16-byte uuid hex from DEPLOY_COMMIT, or a
+   * `packages_dir` path) as the program — lands STOPPED; PROG_START runs
+   * it. Rejected while a program is RUNNING (stop first).
+   */
+  progPrepare(uuidHex: string): Promise<CtlReply> {
+    const b = new Uint8Array(16);
+    for (let i = 0; i < 16; i++)
+      b[i] = parseInt(uuidHex.slice(i * 2, i * 2 + 2), 16);
+    return this.call(CTL.PROG_PREPARE, b);
+  }
+
   taskSuspend(idx: number): Promise<CtlReply> {
     return this.call(CTL.TASK_SUSPEND, u32(idx));
   }

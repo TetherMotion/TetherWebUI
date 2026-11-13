@@ -70,6 +70,14 @@ built; override with `TPLC_PROXY`, `TPLCC`, `TPLC_LIBDIRS`,
 `npx playwright install chromium` (or `PW_CHANNEL=chrome` for system
 Chrome).
 
+`e2e/plc-live.spec.ts` goes further: `e2e/live-stack.sh` boots a real
+`tether-plc` runtime (shm process image + pre-deployed package + ctl
+socket) behind a second proxy on :8090, and the spec drives actual
+scan-loop state — program stop/start, task suspend/step/resume, and a
+browser `build & deploy` that ends with the new package RUNNING. It
+needs `build/tether-plc` and `build/tplc-image` as well (override with
+`TPLC_HOST`, `TPLC_IMAGE`, `TPLC_ROOT`, `LIVE_PORT`).
+
 ### Cross-language schema digest vectors
 
 `test-fixtures/schema-digest-vectors.json` is a contract shared with the Tether

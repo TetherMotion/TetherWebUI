@@ -31,6 +31,9 @@ const webDashboard = abs(
 );
 const proxy = abs(process.env.TPLC_PROXY ?? '../TetherPLC/build/tplc-ctl-proxy');
 const tplcc = abs(process.env.TPLCC ?? '../TetherPLC/compiler/target/debug/tplcc');
+const tplcRoot = abs(process.env.TPLC_ROOT ?? '../TetherPLC');
+const tetherPlc = abs(process.env.TPLC_HOST ?? `${tplcRoot}/build/tether-plc`);
+const tplcImage = abs(process.env.TPLC_IMAGE ?? `${tplcRoot}/build/tplc-image`);
 /* the proxy cd's into a temp dir before invoking tplcc — every path it
    receives must be absolute */
 const libdirs = (
@@ -42,6 +45,8 @@ const libdirs = (
   .flatMap((d) => ['--libdir', abs(d)]);
 
 const plcE2E = existsSync(webDashboard) && existsSync(proxy) && existsSync(tplcc);
+/* live-runtime stack: real tether-plc + ctl proxy on :8090 (plc-live.spec) */
+const liveE2E = plcE2E && existsSync(tetherPlc) && existsSync(tplcImage);
 
 export default defineConfig({
   testDir: './e2e',
@@ -69,6 +74,18 @@ export default defineConfig({
                200 as soon as the proxy is serving (catalog is lazy). */
             url: 'http://127.0.0.1:8089/blocks',
             timeout: 20_000,
+            reuseExistingServer: !process.env.CI,
+          },
+        ]
+      : []),
+    ...(liveE2E
+      ? [
+          {
+            /* e2e/live-stack.sh: image + tether-plc + proxy --socket ctl.sock.
+               /health is 200 only once the runtime's ctl socket answers. */
+            command: `TPLC_ROOT=${tplcRoot} TPLC_HOST=${tetherPlc} TPLC_IMAGE=${tplcImage} TPLCC=${tplcc} TPLC_PROXY=${proxy} bash ${repoRoot}e2e/live-stack.sh`,
+            url: 'http://127.0.0.1:8090/health',
+            timeout: 30_000,
             reuseExistingServer: !process.env.CI,
           },
         ]

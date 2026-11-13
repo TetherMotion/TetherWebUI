@@ -21,3 +21,6 @@ npm-debug.log*
 .vscode/
 .idea/
 .DS_Store
+
+# tether-plc runtime artifact dir (deployed packages when cwd-relative)
+packages/
