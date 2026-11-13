@@ -217,14 +217,21 @@ export class FbdCanvas extends LitElement {
 
   // ---- palette --------------------------------------------------------
 
+  /** Grid x for a new block — right of the rightmost existing block so
+      pins never hide under a later block's rect. */
+  private nextBlockX(net: Network, kind: Block['kind']): number {
+    const uw = (k: Block['kind']) => (k === 'variable' ? 7 : 8);
+    const right = net.blocks.reduce((m, b) => Math.max(m, b.pos.x + uw(b.kind)), 0);
+    return right + 2;
+  }
+
   private addBlock(kind: Block['kind'], typeRef: string, role?: Block['role']): void {
     this.mutate((net) => {
-      const maxX = net.blocks.reduce((m, b) => Math.max(m, b.pos.x), 0);
       net.blocks.push({
         id: nextNodeId(this.pou!),
         kind,
         type_ref: typeRef,
-        pos: { x: 2 + (maxX % 40), y: 2 },
+        pos: { x: this.nextBlockX(net, kind), y: 2 },
         params: {},
         exec_order: 0,
         negated: [],
@@ -519,9 +526,15 @@ export class FbdCanvas extends LitElement {
   }
 
   private onInPinUp(e: PointerEvent, b: Block, i: number): void {
+    if (!this.pending) return;
+    e.stopPropagation();
+    this.completeWire(b, i);
+  }
+
+  /** Connect the pending out-pin to input pin `i` of block `b`. */
+  private completeWire(b: Block, i: number): void {
     const pend = this.pending;
     if (!pend) return;
-    e.stopPropagation();
     if (pend.block === b.id && pend.port === i) return;
     this.mutate((net) => {
       const dst = { block: b.id, port: i as PortSel };
@@ -624,6 +637,42 @@ export class FbdCanvas extends LitElement {
       return;
     }
     if (this.pending) {
+      /* pointer capture retargets pointerup to the out-pin, so the in-pin's
+         own handler never sees drag releases — resolve the drop target here
+         by hit-testing the release point instead */
+      const pend = this.pending;
+      /* elementsFromPoint is missing in some DOM impls (jsdom) — fall back
+         to the legacy direct pin handler, which still fires there */
+      const stack =
+        typeof document.elementsFromPoint === 'function'
+          ? document.elementsFromPoint(e.clientX, e.clientY)
+          : [];
+      const pinEl = stack
+        .map((el) => el.closest?.('.fbd-pin.in'))
+        .find((el): el is Element => !!el);
+      if (pinEl) {
+        const net = this.net;
+        const b = net?.blocks.find((x) => x.id === Number(pinEl.getAttribute('data-node')));
+        const i = Number(pinEl.getAttribute('data-pin'));
+        if (b && Number.isInteger(i)) {
+          this.completeWire(b, i);
+        } else {
+          this.pending = undefined;
+        }
+        return;
+      }
+      /* released over the same out-pin: keep pending so a following click
+         on an input completes the wire (click-click wiring) */
+      const sameOut = stack
+        .map((el) => el.closest?.('.fbd-pin.out'))
+        .find((el): el is Element => !!el);
+      if (
+        sameOut &&
+        Number(sameOut.getAttribute('data-node')) === pend.block &&
+        Number(sameOut.getAttribute('data-pin')) === pend.port
+      ) {
+        return;
+      }
       this.pending = undefined;
       return;
     }
@@ -861,12 +910,11 @@ export class FbdCanvas extends LitElement {
     const net = this.net;
     if (!net) return;
     this.mutate((n) => {
-      const x = n.blocks.reduce((m, b) => Math.max(m, b.pos.x), 0);
       n.blocks.push({
         id: nextNodeId(this.pou!),
         kind: 'operator',
         type_ref: type,
-        pos: { x: Math.min(60, x + 6), y: 2 },
+        pos: { x: this.nextBlockX(n, 'operator'), y: 2 },
         params: {},
         exec_order: 0,
         negated: [],
@@ -883,13 +931,12 @@ export class FbdCanvas extends LitElement {
       const used = new Set(n.blocks.map((b) => b.instance ?? ''));
       let i = 1;
       while (used.has(`i${i}`)) i++;
-      const x = n.blocks.reduce((m, b) => Math.max(m, b.pos.x), 0);
       n.blocks.push({
         id: nextNodeId(this.pou!),
         kind,
         type_ref: type,
         instance: `i${i}`,
-        pos: { x: Math.min(60, x + 6), y: 2 },
+        pos: { x: this.nextBlockX(n, kind), y: 2 },
         params: {},
         exec_order: 0,
         negated: [],
@@ -960,12 +1007,11 @@ export class FbdCanvas extends LitElement {
       );
     }
     this.mutate((net) => {
-      const x = net.blocks.reduce((m, b) => Math.max(m, b.pos.x), 0);
       net.blocks.push({
         id: nextNodeId(this.pou!),
         kind: 'device',
         type_ref: f.name,
-        pos: { x: Math.min(60, x + 6), y: 2 },
+        pos: { x: this.nextBlockX(net, 'device'), y: 2 },
         params: {},
         exec_order: 0,
         negated: [],
@@ -1107,7 +1153,7 @@ export class FbdCanvas extends LitElement {
           id: nextNodeId(this.pou!),
           kind: 'st',
           type_ref: 'ST',
-          pos: { x: 2 + (net.blocks.reduce((m, b) => Math.max(m, b.pos.x), 0) % 40), y: 2 },
+          pos: { x: this.nextBlockX(net, 'st'), y: 2 },
           params: { CODE: 'OUT := IN;\n' },
           exec_order: 0,
           negated: [],
@@ -1350,6 +1396,7 @@ export class FbdCanvas extends LitElement {
           const v = pn ? liveOf(pn) : undefined;
           return svg`
             <circle class="fbd-pin in ${pinCls(pn, 'in')}" cx="0" cy="${ROW + i * ROW + ROW / 2}" r="${PIN_R}"
+              data-node="${b.id}" data-pin="${i}"
               @pointerdown=${(e: PointerEvent) => e.stopPropagation()}
               @pointerup=${(e: PointerEvent) => this.onInPinUp(e, b, i)}
               @click=${(e: MouseEvent) => this.onPinClick(e, b, i)}>
@@ -1365,6 +1412,7 @@ export class FbdCanvas extends LitElement {
           const v = pn ? liveOf(pn) : undefined;
           return svg`
             <circle class="fbd-pin out ${pinCls(pn, 'out')}" cx="${w}" cy="${ROW + i * ROW + ROW / 2}" r="${PIN_R}"
+              data-node="${b.id}" data-pin="${i}"
               @pointerdown=${(e: PointerEvent) => this.onOutPinDown(e, b, i)}>
               ${pn || t ? svg`<title>${pn}${pn && t ? ' : ' : ''}${t}</title>` : nothing}
             </circle>

@@ -223,6 +223,34 @@ describe('fbd-canvas', () => {
     cv.remove();
   });
 
+  it('completes a drag wire when pointerup is retargeted to the svg', async () => {
+    /* real browsers: setPointerCapture on the out-pin retargets pointerup
+       so it bubbles to the svg, never reaching the in-pin — the canvas
+       resolves the drop target via elementsFromPoint instead */
+    const { cv, pou } = mount();
+    await cv.updateComplete;
+    const blocks = cv.querySelectorAll('.fbd-block');
+    const outPin = blocks[0]!.querySelector('.fbd-pin.out')!;
+    const inPin = blocks[1]!.querySelectorAll('.fbd-pin.in')[0]!;
+    const svg = cv.querySelector('svg')!;
+    const orig = document.elementsFromPoint;
+    document.elementsFromPoint = (() => [inPin]) as typeof document.elementsFromPoint;
+    try {
+      outPin.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, clientX: 10, clientY: 10 }),
+      );
+      svg.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 20, clientY: 20 }));
+      await cv.updateComplete;
+      const wires = pou.networks[0]!.wires;
+      expect(wires.length).toBe(1);
+      expect(wires[0]!.src.block).toBe(1);
+      expect(wires[0]!.dsts[0]).toEqual({ block: 2, port: 0 });
+    } finally {
+      document.elementsFromPoint = orig;
+      cv.remove();
+    }
+  });
+
   it('deletes the selected block and its wires', async () => {
     const { cv, pou } = mount();
     await cv.updateComplete;

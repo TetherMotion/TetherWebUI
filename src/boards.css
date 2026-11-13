@@ -984,6 +984,7 @@ tile-frame {
 .plc-main > * {
   flex: 1;
   min-height: 0;
+  min-width: 0;
 }
 
 .plc-split {
@@ -1616,6 +1617,9 @@ tile-frame {
 .fbd-palette {
   flex-wrap: wrap;
   gap: 4px 8px;
+  flex-shrink: 0;
+  max-height: 168px;
+  overflow-y: auto;
 }
 
 .fbd-palette-q {
@@ -1625,6 +1629,7 @@ tile-frame {
 
 .fbd-pgroup {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 3px;
   padding: 2px 4px;

@@ -61,6 +61,15 @@ npm run test:e2e   # Playwright e2e (needs the Tether repo checked out as a
 npm run format:check
 ```
 
+The `e2e/plc-ide.spec.ts` suite additionally drives the TetherPLC IDE
+against a real `tplc-ctl-proxy` + `tplcc` (compile, /blocks catalog,
+/libsrc, device wizard, curve editor). It needs the TetherPLC repo as a
+sibling with `build/tplc-ctl-proxy` and `compiler/target/debug/tplcc`
+built; override with `TPLC_PROXY`, `TPLCC`, `TPLC_LIBDIRS`,
+`WEB_DASHBOARD_EXAMPLE`. Browsers install via
+`npx playwright install chromium` (or `PW_CHANNEL=chrome` for system
+Chrome).
+
 ### Cross-language schema digest vectors
 
 `test-fixtures/schema-digest-vectors.json` is a contract shared with the Tether

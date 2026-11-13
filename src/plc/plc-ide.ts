@@ -138,7 +138,9 @@ export class TetherPlcIde extends LitElement {
   constructor() {
     super();
     this.pane = 'explorer';
-    this.selPou = '';
+    /* restore the selection a persisted project implies — otherwise a
+       reload lands on an empty detail pane until a POU is re-clicked */
+    this.selPou = this.project.fbd.pous[0]?.id ?? '';
     this.selNet = 0;
     this.status = '';
     this.ctlErr = '';

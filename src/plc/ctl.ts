@@ -342,9 +342,15 @@ export class PlcCtl {
     return es;
   }
 
+  /**
+   * Proxy reachability — any HTTP response counts, including the proxy's
+   * 503 "backend down" from /health (that status means tplccd is absent,
+   * not that the proxy is unreachable; /compile and /blocks still work).
+   */
   async health(): Promise<boolean> {
     try {
-      return (await fetch(`${this.url}/health`)).ok;
+      await fetch(`${this.url}/health`);
+      return true;
     } catch {
       return false;
     }
