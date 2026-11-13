@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { expect, test, type Page } from '@playwright/test';
 import {
   block,
@@ -289,6 +290,42 @@ test.describe('TetherPLC IDE — live runtime', () => {
     });
   });
 
+  test('catalog write: watch-pane set drives live program memory', async ({
+    page,
+  }) => {
+    /* setpoint is never assigned by the program, so a catalog write
+       must persist and read back — exercises setParameter → tplc-io
+       ParamEntry.writeFn → TPLC_OP_DBG_WRITE end to end. */
+    await freshPlcProject(page, LIVE_CTL);
+    await connectDashboard(page, 'operator', 'ws://127.0.0.1:8090/tether-io');
+    await openPlcIde(page);
+
+    await newPou(page, 'program');
+    await pane(page, 'ST');
+    await setStSource(
+      page,
+      'PROGRAM POU1\nVAR\n    cnt : DINT := 0;\n    setpoint : DINT := 21;\nEND_VAR\ncnt := cnt + 1;\nEND_PROGRAM',
+    );
+    await pane(page, 'Deploy');
+    await page.locator('.plc-ops button', { hasText: 'build & deploy' }).click();
+    await expect(page.locator('.plc-status')).toContainText('deployed', {
+      timeout: 60_000,
+    });
+
+    await pane(page, 'watch');
+    const row = page.locator('tr', { hasText: 'plc.POU1.setpoint' });
+    await expect(row).toHaveCount(1, { timeout: 45_000 });
+    const val = row.locator('td').nth(2);
+    await expect(val).toHaveText('21', { timeout: 20_000 });
+
+    await row.locator('.plc-force-in').fill('77');
+    await row.locator('button', { hasText: 'set' }).click();
+    await expect(val).toHaveText('77', { timeout: 15_000 });
+    // still 77 on the next polls — the program never rewrites it
+    await page.waitForTimeout(1200);
+    await expect(val).toHaveText('77');
+  });
+
   test('live FBD pins: deployed TON member values stream onto the canvas', async ({
     page,
   }) => {
@@ -334,5 +371,43 @@ test.describe('TetherPLC IDE — live runtime', () => {
     await expect
       .poll(texts, { timeout: 20_000, intervals: [500, 900, 1500] })
       .not.toEqual(before);
+  });
+
+  test('shadow run: upload candidate, watch it scan, promote atomically', async ({
+    page,
+  }) => {
+    /* live-stack.sh builds ShadowDemo.tplc --change-against LiveDemo,
+       so the migration predecessor must be the boot program — earlier
+       tests may have left POU1 active. Re-deploy LiveDemo first. */
+    await openDeploy(page);
+    await page.locator('#plc-pkg').setInputFiles({
+      name: 'livedemo.tplc',
+      mimeType: 'application/octet-stream',
+      buffer: readFileSync('/tmp/tplc-live-demo.tplc'),
+    });
+    await expect(progHead(page)).toContainText('LiveDemo', {
+      timeout: 60_000,
+    });
+    await expect(progHead(page)).toContainText('running', { timeout: 15_000 });
+
+    await page.locator('#plc-shpkg').setInputFiles({
+      name: 'shadowcand.tplc',
+      mimeType: 'application/octet-stream',
+      buffer: readFileSync('/tmp/tplc-live-shadow-cand.tplc'),
+    });
+
+    // candidate shows loaded + running with advancing cycles
+    const sh = page.locator('h4', { hasText: 'shadow run' });
+    await expect(sh).toContainText('ShadowDemo', { timeout: 60_000 });
+    await expect(sh).toContainText('running');
+
+    // promote asks for confirmation, then the active program swaps
+    page.once('dialog', (d) => void d.accept());
+    await page.locator('.plc-ops button', { hasText: 'promote' }).click();
+    await expect(progHead(page)).toContainText('ShadowDemo', {
+      timeout: 30_000,
+    });
+    // the new epoch is visible in the program card header
+    await expect(progHead(page).locator('.plc-dim')).toContainText('epoch');
   });
 });

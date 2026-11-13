@@ -26,6 +26,7 @@ cleanup() {
     [ -n "$RT_PID" ] && kill "$RT_PID" 2>/dev/null || true
     [ -n "$RT_PID" ] && wait "$RT_PID" 2>/dev/null || true
     "$TPLC/build/tplc-image" unlink "$IMG" >/dev/null 2>&1 || true
+    rm -f /tmp/tplc-live-shadow-cand.tplc /tmp/tplc-live-demo.tplc
     rm -rf "$W"
 }
 trap cleanup EXIT INT TERM
@@ -52,6 +53,29 @@ tick(IN := TRUE, PT := T#100ms);
 END_PROGRAM
 EOF
 "$TPLCC" build "$W/livedemo.st" -o "$W/livedemo.tplc" >/dev/null
+# fixed paths the spec reads: the boot program (deploy .tplc… restores
+# it as the shadow candidate's migration predecessor) and the candidate
+cp "$W/livedemo.tplc" /tmp/tplc-live-demo.tplc
+
+# shadow candidate for the promote E2E: same layout (clean state
+# migration), +2/scan counter, distinct program name so the post-promote
+# PROG_STATUS name proves the swap. Copied to a fixed path the spec reads.
+cat > "$W/shadowcand.st" <<'EOF'
+PROGRAM ShadowDemo
+VAR
+    cnt  : DINT := 0;
+    tick : TON;
+END_VAR
+cnt := cnt + 2;
+tick(IN := TRUE, PT := T#100ms);
+END_PROGRAM
+EOF
+# --change-against embeds the migrate_desc + tplc_migrate rule table
+# SHADOW_LOAD requires for active→candidate state migration
+"$TPLCC" build "$W/shadowcand.st" --change-against "$W/livedemo.tplc" \
+    -o "$W/shadowcand.tplc" >/dev/null
+cp "$W/shadowcand.tplc" /tmp/tplc-live-shadow-cand.tplc
+
 "$IMAGE_CLI" create "$IMG" 64 64 >/dev/null
 "$PLC" --image "$IMG" --package "$W/livedemo.tplc" --ctl "$W/ctl.sock" \
     --packages "$W/packages" >"$W/rt.log" 2>&1 &
