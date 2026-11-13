@@ -208,8 +208,20 @@ export interface ProgStatus {
   name: string;
   state: number;
   cycles: bigint;
+  lastFaultCode: number;
+  forceCount: number;
   /** program-set generation (proto v2+; bumps on deploy/promote) */
   epoch?: bigint;
+  /** proto-v2 program metadata (absent on v1 runtimes) */
+  version?: string;
+  faultTask?: number;
+  faultCycle?: bigint;
+  retainRestored?: number;
+  retainDirtyBytes?: bigint;
+  /** CLOCK_REALTIME ns when the active package was deployed */
+  deployedAtNs?: bigint;
+  swapStage?: number;
+  quarantineLeft?: number;
   /** proto-v3 shadow tail (absent on older runtimes) */
   shadowState?: number;
   shadowCycles?: bigint;
@@ -394,7 +406,17 @@ export class PlcCtl {
         name: cstr(r.payload.subarray(16, 80)),
         state: r.payload[80]!,
         cycles: d.getBigUint64(88, true),
+        lastFaultCode: d.getInt32(96, true),
+        forceCount: d.getUint32(100, true),
         epoch: lay.base >= 296 ? d.getBigUint64(288, true) : undefined,
+        version: lay.base >= 296 ? cstr(r.payload.subarray(168, 200)) : undefined,
+        faultTask: lay.base >= 296 ? d.getUint32(200, true) : undefined,
+        faultCycle: lay.base >= 296 ? d.getBigUint64(208, true) : undefined,
+        retainRestored: lay.base >= 296 ? r.payload[216]! : undefined,
+        retainDirtyBytes: lay.base >= 296 ? d.getBigUint64(224, true) : undefined,
+        deployedAtNs: lay.base >= 296 ? d.getBigUint64(240, true) : undefined,
+        swapStage: lay.base >= 296 ? r.payload[272]! : undefined,
+        quarantineLeft: lay.base >= 296 ? d.getUint32(280, true) : undefined,
         shadowState: v3 ? r.payload[296]! : undefined,
         shadowCycles: v3 ? d.getBigUint64(304, true) : undefined,
         shadowMissed: v3 ? d.getBigUint64(312, true) : undefined,

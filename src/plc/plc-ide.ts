@@ -1257,7 +1257,33 @@ export class TetherPlcIde extends LitElement {
           )}
         </tbody>
       </table>
+      ${this.progMeta(p)}
     `;
+  }
+
+  /** v2+ program metadata: version, deploy time, fault/force/retain
+      and online-change quarantine state — omitted when all default */
+  private progMeta(p: ProgStatus): TemplateResult | typeof nothing {
+    const parts: string[] = [];
+    if (p.version) parts.push(`v${p.version}`);
+    if (p.deployedAtNs)
+      parts.push(
+        `deployed ${new Date(Number(p.deployedAtNs / 1000000n)).toLocaleString()}`,
+      );
+    if (p.lastFaultCode)
+      parts.push(
+        `last fault rc=${p.lastFaultCode}` +
+          (p.faultCycle !== undefined ? ` @cycle ${p.faultCycle}` : ''),
+      );
+    if (p.forceCount) parts.push(`${p.forceCount} force(s) active`);
+    if (p.retainDirtyBytes) parts.push(`retain dirty ${p.retainDirtyBytes} B`);
+    if (p.swapStage)
+      parts.push(
+        `swap stage ${p.swapStage}` +
+          (p.quarantineLeft ? ` (${p.quarantineLeft} left)` : ''),
+      );
+    if (!parts.length) return nothing;
+    return html`<div class="plc-dim plc-progmeta">${parts.join(' · ')}</div>`;
   }
 
   private shadowCard(): TemplateResult | typeof nothing {

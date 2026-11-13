@@ -37,6 +37,14 @@ function progStatusV3(taskCount: number): Uint8Array {
   p[80] = 1;
   d.setUint32(84, taskCount, true);
   d.setBigUint64(88, 4242n, true);
+  d.setInt32(96, -7, true); /* last_fault_code */
+  d.setUint32(100, 3, true); /* force_count */
+  cstr(p, '1.2.3', 168); /* version */
+  d.setUint32(200, 1, true); /* fault_task */
+  d.setBigUint64(208, 1234n, true); /* fault_cycle */
+  p[216] = 1; /* retain_restored */
+  d.setBigUint64(224, 512n, true); /* retain_dirty_bytes */
+  d.setBigUint64(240, 1_700_000_000_000_000_000n, true); /* deployed_at_ns */
   d.setBigUint64(288, 42n, true); /* epoch (proto v2+) */
   p[296] = 1; /* shadow_state */
   d.setBigUint64(304, 55n, true); /* shadow_cycles */
@@ -65,6 +73,14 @@ describe('PlcCtl progStatus', () => {
     expect(s.state).toBe(1);
     expect(s.cycles).toBe(4242n);
     expect(s.epoch).toBe(42n);
+    expect(s.lastFaultCode).toBe(-7);
+    expect(s.forceCount).toBe(3);
+    expect(s.version).toBe('1.2.3');
+    expect(s.faultTask).toBe(1);
+    expect(s.faultCycle).toBe(1234n);
+    expect(s.retainRestored).toBe(1);
+    expect(s.retainDirtyBytes).toBe(512n);
+    expect(s.deployedAtNs).toBe(1_700_000_000_000_000_000n);
     expect(s.shadowState).toBe(1);
     expect(s.shadowCycles).toBe(55n);
     expect(s.shadowMissed).toBe(2n);
@@ -89,7 +105,11 @@ describe('PlcCtl progStatus', () => {
     mock(p);
     const s = await new PlcCtl().progStatus();
     expect(s.name).toBe('OldProg');
+    expect(s.lastFaultCode).toBe(0);
+    expect(s.forceCount).toBe(0);
     expect(s.epoch).toBeUndefined();
+    expect(s.version).toBeUndefined();
+    expect(s.deployedAtNs).toBeUndefined();
     expect(s.shadowState).toBeUndefined();
     expect(s.tasks).toHaveLength(1);
     expect(s.tasks[0]!.name).toBe('t0');
