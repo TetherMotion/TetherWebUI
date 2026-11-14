@@ -489,4 +489,31 @@ describe('LD body import', () => {
     const d7 = net.wires.flatMap((w) => w.dsts).find((d) => d.block === 7)!;
     expect(d7.port).toBe(1); // formalParameter IN1 → pin index 1
   });
+
+  it('extracts nested <type> elements on interface vars', () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://www.plcopen.org/xml/tc6_0201">
+  <contentHeader name="typed"/>
+  <types/>
+  <pous>
+    <pou name="Typed" pouType="program">
+      <interface>
+        <inputVars>
+          <variable name="A"><type><INT/></type></variable>
+          <variable name="B"><type><BOOL/></type></variable>
+        </inputVars>
+        <localVars>
+          <variable name="ARR"><type><array><dimension lower="1" upper="4"/><baseType><DINT/></baseType></array></type></variable>
+        </localVars>
+      </interface>
+      <body><FBD/></body>
+    </pou>
+  </pous>
+</project>`;
+    const { project } = importPlcopenXml(xml);
+    const iface = project.pous[0]!.interface;
+    expect(iface.find((v) => v.name === 'A')?.type).toBe('INT');
+    expect(iface.find((v) => v.name === 'B')?.type).toBe('BOOL');
+    expect(iface.find((v) => v.name === 'ARR')?.type).toBe('ARRAY[1..4] OF DINT');
+  });
 });

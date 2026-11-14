@@ -153,11 +153,60 @@ export function importPlcopenXml(xml: string): PlcopenImport {
       }) as Record<string, IfaceKind>
     )[parentTag] ?? 'var';
 
+  // IEC elementary type element names inside <type> — Beremiz emits
+  // <type><INT/></type> rather than a type attribute
+  const ELEM_TYPES = new Set([
+    'BOOL', 'SINT', 'USINT', 'BYTE', 'INT', 'UINT', 'WORD',
+    'DINT', 'UDINT', 'DWORD', 'LINT', 'ULINT', 'LWORD',
+    'REAL', 'LREAL', 'TIME', 'DATE', 'TOD', 'DT', 'STRING', 'WSTRING',
+  ]);
+
+  // Extract a type string from a <type> (or nested baseType/
+  // subrange) element: elementary child, derived name, or
+  // ARRAY[lo..hi] OF elem.
+  const xmlType = (el: Element): string => {
+    for (const c of children(el)) {
+      const t = local(c).toUpperCase();
+      if (ELEM_TYPES.has(t)) {
+        let s = t;
+        const len = attr(c, 'length');
+        if ((t === 'STRING' || t === 'WSTRING') && len !== undefined) s += `[${len}]`;
+        return s;
+      }
+      if (t === 'DERIVED') {
+        const n = attr(c, 'name');
+        if (n !== undefined) return n;
+      }
+      if (t === 'ARRAY') {
+        const dim = descendant(c, 'dimension');
+        const bt = descendant(c, 'baseType');
+        const elem = bt ? xmlType(bt) : '';
+        if (elem) {
+          const lo = attr(dim, 'lower') ?? '0';
+          const hi = attr(dim, 'upper') ?? '0';
+          return `ARRAY[${lo}..${hi}] OF ${elem}`;
+        }
+      }
+      if (t === 'STRUCT' || t === 'ENUM') {
+        notes.push(`<${local(c)}> type not imported (no struct/enum support)`);
+        return '';
+      }
+      // containers — baseType/subrange/type nest the real type
+      if (t === 'BASETYPE' || t === 'SUBRANGE' || t === 'TYPE') {
+        const inner = xmlType(c);
+        if (inner) return inner;
+      }
+    }
+    return '';
+  };
+
   const importVar = (v: Element, kind: IfaceKind): IfaceVar => {
     const dv = descendant(v, 'derived');
     const iv = child(v, 'initialValue');
     const sv = iv ? descendant(iv, 'simpleValue') : undefined;
-    const ty = attr(v, 'type') ?? attr(dv, 'name') ?? 'BOOL';
+    const typeEl = child(v, 'type');
+    const nested = typeEl ? xmlType(typeEl) : '';
+    const ty = attr(v, 'type') ?? (nested || undefined) ?? attr(dv, 'name') ?? 'BOOL';
     return {
       name: attr(v, 'name') ?? '',
       kind,
