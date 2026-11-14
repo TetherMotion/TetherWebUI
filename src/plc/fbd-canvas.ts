@@ -27,6 +27,15 @@ import {
   type PaletteItem,
 } from './palette';
 import { inferNetwork, tyName, type Inference, type TypeIssue } from './types';
+import {
+  deviceStDecls,
+  nextFreeBaseFor,
+  suggestEndpoint,
+  terminalSpec,
+  TERMINALS,
+  typeSize,
+} from './deploymap';
+import type { ProjectBinding } from './plc-ide';
 
 /** Compact live-value formatting for pin labels. */
 function fmtLive(v: unknown): string {
@@ -81,7 +90,13 @@ interface DeviceForm {
   channel: 'DI' | 'DO' | 'AI' | 'AO';
   count: number;
   ty: string;
+  /** bytes per analog channel (EL int16 PDOs = 2, virtual REAL = 4). */
+  pitch: number;
   base: number;
+  /** EtherCAT PDO endpoint key (e.g. `el1014.c1`); '' = file transport. */
+  endpoint: string;
+  /** catalog part the form was seeded from (drives PDO validation). */
+  part?: string;
 }
 
 export class FbdCanvas extends LitElement {
@@ -98,6 +113,7 @@ export class FbdCanvas extends LitElement {
     libSources: { attribute: false },
     devDlg: { state: true },
     devForm: { state: true },
+    ioBindings: { attribute: false },
     catalog: { attribute: false },
     paletteQ: { state: true },
     selIds: { state: true },
@@ -117,6 +133,9 @@ export class FbdCanvas extends LitElement {
   declare devDlg?: { tpl?: DeviceTemplate };
   /** wizard form fields. */
   declare devForm?: DeviceForm;
+  /** every `at` binding in the project — address allocation + collision
+      checks in the device wizard (image space is project-wide). */
+  declare ioBindings?: ProjectBinding[];
   /** installed-library palette groups (from the proxy /blocks catalog). */
   declare catalog?: PaletteGroup[];
   /** palette search filter. */
@@ -802,14 +821,17 @@ export class FbdCanvas extends LitElement {
     `;
   }
 
-  /** "Add device" wizard — terminal name, channel kind/count/type, base address. */
+  /** "Add device" wizard — terminal catalog, channel kind/count/type,
+      base address, PDO endpoint. */
   private deviceWizard(): TemplateResult {
     const f = this.devForm ?? {
       name: 'EK1108',
       channel: 'DI' as const,
       count: 8,
       ty: 'BOOL',
+      pitch: 0,
       base: 0,
+      endpoint: '',
     };
     const setF = (patch: Partial<DeviceForm>) => {
       this.devForm = { ...f, ...patch };
@@ -819,17 +841,60 @@ export class FbdCanvas extends LitElement {
     const region = f.channel === 'DO' || f.channel === 'AO' ? '%Q' : '%I';
     const width = digital ? 'X' : 'D';
     const preview = this.devicePins(f).slice(0, 4);
+    /* bytes the channel group occupies in the image */
+    const need = digital ? Math.ceil(f.count / 8) : f.count * Math.max(1, f.pitch || 4);
+    const bindings = this.ioBindings ?? [];
+    const autoBase = nextFreeBaseFor(bindings, region === '%I' ? 'I' : 'Q', need);
+    const spec = terminalSpec(f.part ?? f.name);
+    const usedEndpoints = new Set(
+      (this.pous ?? []).flatMap((p) =>
+        p.networks.flatMap((n) => n.blocks.filter((b) => b.kind === 'device' && b.endpoint).map((b) => b.endpoint!)),
+      ),
+    );
+    const collision =
+      bindings.some((b) => {
+        const m = /^%([IQM])([XBWDL])(\d+)/.exec(b.at);
+        if (!m || m[1] !== (region === '%I' ? 'I' : 'Q')) return false;
+        const byte = parseInt(m[3]!, 10);
+        const sz = Math.max(1, typeSize(b.type));
+        return byte < f.base + need && f.base < byte + sz;
+      });
     return html`
       <div class="fbd-devdlg" @pointerdown=${(e: Event) => e.stopPropagation()}>
         <div class="fbd-devdlg-box">
           <b>Add device / terminal</b>
+          <label>terminal
+            <select class="fbd-in" .value=${f.part ?? ''}
+              @change=${(e: Event) => {
+                const part = (e.target as HTMLSelectElement).value;
+                const t = part ? terminalSpec(part) : undefined;
+                if (!t) { setF({ part: undefined }); return; }
+                const g = t.groups[0]!;
+                setF({
+                  part: t.part,
+                  name: t.part,
+                  channel: g.channel,
+                  count: g.count,
+                  ty: g.ty,
+                  pitch: g.pitch || (g.channel === 'AI' || g.channel === 'AO' ? 4 : 0),
+                  endpoint: t.pdoKey ? suggestEndpoint(t.pdoKey, usedEndpoints) : '',
+                });
+              }}>
+              <option value="">custom…</option>
+              ${TERMINALS.map((t) => html`<option value=${t.part}>${t.label}</option>`)}
+            </select></label>
           <label>name <input class="fbd-in" .value=${f.name}
             @change=${(e: Event) => setF({ name: (e.target as HTMLInputElement).value })} /></label>
           <label>channels
             <select class="fbd-in" .value=${f.channel}
               @change=${(e: Event) => {
                 const c = (e.target as HTMLSelectElement).value as DeviceForm['channel'];
-                setF({ channel: c, ty: c === 'DI' || c === 'DO' ? 'BOOL' : 'REAL' });
+                const digital2 = c === 'DI' || c === 'DO';
+                setF({
+                  channel: c,
+                  ty: digital2 ? 'BOOL' : (spec && (c === 'AI' || c === 'AO') ? 'INT' : 'REAL'),
+                  pitch: digital2 ? 0 : (spec && (c === 'AI' || c === 'AO') ? 2 : 4),
+                });
               }}>
               <option value="DI">digital in (device → logic, %I)</option>
               <option value="DO">digital out (logic → device, %Q)</option>
@@ -845,14 +910,38 @@ export class FbdCanvas extends LitElement {
                 (t) => html`<option value=${t}>${t}</option>`,
               )}
             </select></label>
-          <label>base byte <input class="fbd-in num" type="number" min="0" .value=${f.base}
-            @change=${(e: Event) => setF({ base: Math.max(0, Number((e.target as HTMLInputElement).value) || 0) })} /></label>
+          ${digital
+            ? nothing
+            : html`<label>pitch (B/ch) <input class="fbd-in num" type="number" min="1" max="8" .value=${f.pitch || 4}
+                @change=${(e: Event) => setF({ pitch: Math.max(1, Number((e.target as HTMLInputElement).value) || 4) })} /></label>`}
+          <label>base byte
+            <span class="fbd-devbase">
+              <input class="fbd-in num" type="number" min="0" .value=${f.base}
+                @change=${(e: Event) => setF({ base: Math.max(0, Number((e.target as HTMLInputElement).value) || 0) })} />
+              <button class="chip-btn" title="allocate lowest free base"
+                @click=${() => setF({ base: autoBase })}>auto</button>
+            </span></label>
+          <label>PDO endpoint
+            <input class="fbd-in" .value=${f.endpoint} placeholder="el1014.c1 — empty = file channel"
+              @change=${(e: Event) => setF({ endpoint: (e.target as HTMLInputElement).value.trim() })} /></label>
           <div class="plc-dim">
             e.g. ${preview.map((p) => p.at ?? '?').join(', ')}${f.count > 4 ? ' …' : ''}
             <br />${region}${width}${f.base}.0 … — channels become block pins
             ${this.devDlg?.tpl?.channel2
               ? html`<br />+ ${this.devDlg.tpl.count2 ?? 8}× ${this.devDlg.tpl.channel2} (${this.devDlg.tpl.ty2 ?? 'BOOL'})`
               : ''}
+            ${collision
+              ? html`<br /><b class="plc-warn">⚠ base ${f.base} overlaps an existing ${region} binding</b>`
+              : html`<br />next free base: ${autoBase}`}
+            ${f.endpoint && spec
+              ? (() => {
+                  const want = f.channel === 'DO' || f.channel === 'AO' ? spec.rxSize : spec.txSize;
+                  const span = this.deviceSpan(f);
+                  return want > 0 && span !== want
+                    ? html`<br /><b class="plc-warn">⚠ ${spec.part} PDO is ${want}B but pins span ${span}B</b>`
+                    : nothing;
+                })()
+              : nothing}
           </div>
           <div class="fbd-devdlg-btns">
             <button class="chip-btn primary" @click=${() => this.addDevice()}>Add</button>
@@ -976,22 +1065,38 @@ export class FbdCanvas extends LitElement {
     });
   }
 
+  /** image bytes the form's pins cover (for allocation + PDO check). */
+  private deviceSpan(f: { channel: 'DI' | 'DO' | 'AI' | 'AO'; count: number; ty: string; pitch: number }): number {
+    const digital = f.channel === 'DI' || f.channel === 'DO';
+    if (digital) return Math.ceil(f.count / 8);
+    const pitch = Math.max(1, f.pitch || 4);
+    return (f.count - 1) * pitch + Math.max(1, typeSize(f.ty));
+  }
+
   /** Open the "add device" wizard (optionally prefilled by a template). */
   private openDeviceWizard(tpl?: DeviceTemplate): void {
     const digital = tpl?.channel === 'DI' || tpl?.channel === 'DO';
+    const usedEndpoints = new Set(
+      (this.pous ?? []).flatMap((p) =>
+        p.networks.flatMap((n) => n.blocks.filter((b) => b.kind === 'device' && b.endpoint).map((b) => b.endpoint!)),
+      ),
+    );
     this.devForm = {
       name: tpl?.name ?? 'EK1108',
       channel: tpl?.channel ?? 'DI',
       count: Math.max(1, Math.min(64, tpl?.count ?? 8)),
       ty: tpl?.ty ?? (digital ? 'BOOL' : 'REAL'),
+      pitch: tpl?.pitch ?? (digital ? 0 : 4),
       base: 0,
+      endpoint: tpl?.endpointPrefix ? suggestEndpoint(tpl.endpointPrefix, usedEndpoints) : '',
+      part: tpl?.endpointPrefix ? tpl.name : undefined,
     };
     this.devDlg = { tpl };
   }
 
   /** Generate channel pins for a channel spec (wizard or template group). */
   private devicePins(
-    f: { channel: 'DI' | 'DO' | 'AI' | 'AO'; count: number; ty: string; base: number },
+    f: { channel: 'DI' | 'DO' | 'AI' | 'AO'; count: number; ty: string; base: number; pitch?: number },
     prefix?: string,
   ): IfaceVar[] {
     const p = prefix ?? '';
@@ -1000,6 +1105,7 @@ export class FbdCanvas extends LitElement {
     const dir = f.channel === 'DI' || f.channel === 'AI' ? 'var_output' : 'var_input';
     const region = f.channel === 'DO' || f.channel === 'AO' ? 'Q' : 'I';
     const width = digital ? 'X' : 'D';
+    const pitch = Math.max(1, f.pitch ?? 4);
     for (let i = 0; i < f.count; i++) {
       const name = `${p}${f.channel}${i}`;
       if (digital) {
@@ -1007,8 +1113,9 @@ export class FbdCanvas extends LitElement {
         const bit = i & 7;
         out.push({ name, kind: dir, type: f.ty, at: `%${region}${width}${byte}.${bit}` });
       } else {
-        /* analog: 4-byte channels at byte offsets (REAL-sized steps) */
-        const byte = f.base + i * 4;
+        /* analog: pitch-byte channels at byte offsets (EL int16 = 2,
+           virtual REAL terminals = 4) */
+        const byte = f.base + i * pitch;
         out.push({ name, kind: dir, type: f.ty, at: `%${region}${width}${byte}.0` });
       }
     }
@@ -1034,6 +1141,7 @@ export class FbdCanvas extends LitElement {
           count: Math.max(1, Math.min(64, tpl.count2 ?? 8)),
           ty: tpl.ty2 ?? (d2 ? 'BOOL' : 'REAL'),
           base: 0,
+          pitch: d2 ? 0 : 4,
         }),
       );
     }
@@ -1049,6 +1157,7 @@ export class FbdCanvas extends LitElement {
         comment: tpl?.channel2
           ? `${f.name} — ${f.channel}${f.count} + ${tpl.channel2}${tpl.count2 ?? ''}`
           : `${f.channel} terminal — ${f.count}ch ${f.ty}`,
+        endpoint: f.endpoint || undefined,
         pins,
       });
       const nb = net.blocks[net.blocks.length - 1]!;
@@ -1071,6 +1180,10 @@ export class FbdCanvas extends LitElement {
     return html`
       <div class="fbd-devedit">
         <b>channels</b>
+        <label class="fbd-devep">PDO endpoint
+          <input class="fbd-in" .value=${b.endpoint ?? ''} placeholder="el1014.c1 — empty = file channel"
+            @change=${(e: Event) =>
+              set((x) => { x.endpoint = (e.target as HTMLInputElement).value.trim() || undefined; })} /></label>
         <table class="fbd-devtbl">
           <tr><th>name</th><th>dir</th><th>type</th><th>at</th><th></th></tr>
           ${pins.map(
@@ -1098,6 +1211,11 @@ export class FbdCanvas extends LitElement {
             const kind = last?.kind === 'var_input' ? 'var_input' : 'var_output';
             x.pins = [...cur, { name: `CH${cur.length}`, kind, type: last?.type ?? 'BOOL', at: '' }];
           })}>+ channel</button>
+        <button class="chip-btn" title="copy IEC located-var declarations for an ST POU"
+          @click=${() => {
+            const text = deviceStDecls(this.pou!, b);
+            void navigator.clipboard?.writeText(text).catch(() => {});
+          }}>copy ST decls</button>
       </div>
     `;
   }

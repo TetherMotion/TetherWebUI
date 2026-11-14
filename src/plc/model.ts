@@ -98,8 +98,11 @@ export interface Block {
    * Beckhoff EK module). `type_ref` is the device/terminal name,
    * `pins` are the channel declarations — each pin is a located var
    * (`at` = process-image address); var_output = device→logic,
-   * var_input = logic→device, var_in_out = both.
+   * var_input = logic→device, var_in_out = both. `endpoint` is the
+   * bus PDO endpoint key (e.g. `el1014.c1`) the deploy map binds to;
+   * empty/absent = file-transport channel.
    */
+  endpoint?: string;
 }
 
 export interface IfaceVar {

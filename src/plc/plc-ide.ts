@@ -15,7 +15,16 @@ import './st-editor';
 import './tempcurve';
 import './temp-tune';
 import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgStateDiff, DbgSym, DbgTraceFrame, DbgTraceStatus, DbgWatchEntry, EV, OdEntry, OdValue, PlcCtl, ProgStatus, RetainStatus, RtStatus, ShadowDiff, ShadowStatus } from './ctl';
-import { byteToOffset, compileProject, CompileDiag, diagsForFile } from './build';
+import { byteToOffset, compileProject, CompileDiag, diagsForFile, injectDeployMap } from './build';
+import {
+  atCollisions,
+  endpointCollisions,
+  generateDeployMap,
+  projectIoBindingsEx,
+  stIoBindings,
+  validateDeployMapText,
+  type MapViolation,
+} from './deploymap';
 import type { StEditor } from './st-editor';
 import { FbdProject, IfaceKind, IfaceVar, Pou, Task } from './model';
 import { entryWritable, writeScalar } from './mon';
@@ -352,6 +361,12 @@ export class TetherPlcIde extends LitElement {
   declare odTypes?: Record<string, number>;
   declare ioMap?: DeployMap;
   declare odRaw?: Record<string, Uint8Array>;
+  /** generated deploy-map draft (io-map card). */
+  declare genMap?: { text: string; warnings: string[] };
+  /** editable deploy-map text in the io-map card. */
+  declare mapEdit?: string;
+  /** client-side validation of mapEdit. */
+  declare mapViolations?: MapViolation[];
 
   private ctl = new PlcCtl();
   private dbgSymName = '';
@@ -575,6 +590,56 @@ export class TetherPlcIde extends LitElement {
   private onStEdit(pou: Pou, text: string): void {
     this.project.stSources[pou.name] = text;
     this.save();
+  }
+
+  /**
+   * Stimulate an image channel (`plc.image.<R>.ch.<name>`): resolve the
+   * channel's qualified var name through the debug symmap and arm a
+   * DBG_FORCE on the program var. The runtime translates the force
+   * through the io bindings — %I forces patch the latched input image
+   * every scan, %Q forces stamp the output image before commit. Only
+   * BOOL bindings are forceable; other widths are denied (414).
+   */
+  private async onImageStim(entry: CatalogEntry, input: HTMLInputElement): Promise<void> {
+    const hub = this.hub;
+    if (!hub) return;
+    const m = /^plc\.image\.[IQM]\.ch\.(.+)$/.exec(entry.name);
+    if (!m) return;
+    const name = m[1]!;
+    const text = input.value.trim();
+    if (!text) return;
+    let sym: DbgSym;
+    try {
+      sym = await this.ctl.dbgResolve(name);
+    } catch (e) {
+      this.flash(`stim ${name}: ${e instanceof Error ? e.message : e}`);
+      return;
+    }
+    /* SMAP kind 10 = the image-channel entry itself — its "offset" is
+       an image byte, not a blob offset; only the var entry is forceable */
+    if (sym.kind === 10) {
+      this.flash(`stim ${name}: channel has no program var`);
+      return;
+    }
+    const codec = codecForSym(sym);
+    let bytes: Uint8Array;
+    try {
+      bytes = codec.encode(text);
+    } catch (e) {
+      this.flash(`stim ${name}: ${e instanceof Error ? e.message : e}`);
+      return;
+    }
+    if (bytes.length !== sym.size) {
+      this.flash(`stim ${name}: ${codec.label} is ${bytes.length}B, var is ${sym.size}B`);
+      return;
+    }
+    try {
+      await this.ctl.dbgForce(sym.offset, bytes);
+      input.value = '';
+      this.flash(`stim ${name} := ${text} (forced until cleared)`);
+    } catch (e) {
+      this.flash(`stim ${name}: ${e instanceof Error ? e.message : e}`);
+    }
   }
 
   /** Write a scalar value to a writable catalog param (the force path). */
@@ -1154,6 +1219,7 @@ export class TetherPlcIde extends LitElement {
                 .diags=${this.diags}
                 .libSources=${Object.values(this.project.stSources)}
                 .catalog=${this.catGroups}
+                .ioBindings=${projectIoBindingsEx(this.project)}
                 @change=${() => this.save()}
                 @need-libsrc=${(e: CustomEvent<{ lib: string; file: string }>) => this.onNeedLibSrc(e)}
               ></fbd-canvas>`
@@ -1563,7 +1629,32 @@ export class TetherPlcIde extends LitElement {
                                       >
                                         set
                                       </button>`
-                                  : nothing
+                                  : /^plc\.image\.[IQM]\.ch\./.test(e.name)
+                                    ? html`<input
+                                          class="fbd-in plc-force-in"
+                                          placeholder="stim"
+                                          title="force this channel (BOOL channels only; persists until force-clear)"
+                                          @keydown=${(ev: KeyboardEvent) => {
+                                            if (ev.key === 'Enter') {
+                                              void this.onImageStim(
+                                                e,
+                                                ev.target as HTMLInputElement,
+                                              );
+                                            }
+                                          }}
+                                        />
+                                        <button
+                                          class="chip-btn"
+                                          @click=${(ev: Event) =>
+                                            void this.onImageStim(
+                                              e,
+                                              (ev.target as HTMLElement)
+                                                .previousElementSibling as HTMLInputElement,
+                                            )}
+                                        >
+                                          stim
+                                        </button>`
+                                    : nothing
                               }
                             </td>
                           </tr>
@@ -2756,15 +2847,49 @@ export class TetherPlcIde extends LitElement {
         <td>${c.safe ?? ''}${m.safety.includes(c.key) ? ' 🔒' : ''}</td>
       </tr>`;
     };
+    /* authoring state: saved override, generated draft, live edit */
+    const saved = this.project.deployMap;
+    const draft = this.mapEdit ?? this.genMap?.text ?? saved ?? '';
+    const bindingsEx = projectIoBindingsEx(this.project);
+    const atColl = atCollisions(this.project.fbd);
+    const epColl = endpointCollisions(this.project.fbd);
+    const stBinds = stIoBindings(this.project.stSources);
     return html`
       <h4>
         io map
         <span class="plc-dim">${chans.length ? `${chans.length} channels` : ''}</span>
         ${overlaps.length ? html`<span class="plc-warn"> ⚠ ${overlaps.length} overlap${overlaps.length > 1 ? 's' : ''}</span>` : nothing}
+        ${saved ? html`<span class="plc-dim"> · saved for deploy</span>` : nothing}
       </h4>
       <div class="plc-ops">
         <button class="chip-btn" @click=${() => void this.onIoMap()}>load</button>
+        <button class="chip-btn" @click=${() => void this.onGenMap()}>generate</button>
+        <button class="chip-btn" ?disabled=${!draft.trim()} @click=${() => this.onValidateMap()}>validate</button>
+        <button class="chip-btn primary" ?disabled=${!draft.trim()} @click=${() => this.onSaveMap()}>save for deploy</button>
+        ${saved ? html`<button class="chip-btn" @click=${() => { this.project.deployMap = undefined; this.mapEdit = undefined; this.genMap = undefined; this.save(); }}>clear</button>` : nothing}
       </div>
+      ${
+        this.genMap?.warnings.length
+          ? html`<ul class="plc-od-warn">${this.genMap.warnings.map((w) => html`<li>${w}</li>`)}</ul>`
+          : nothing
+      }
+      ${
+        this.mapViolations?.length
+          ? html`<ul class="plc-od-warn">${this.mapViolations.map((x) => html`<li>[${x.rule}] ${x.detail}</li>`)}</ul>`
+          : nothing
+      }
+      ${
+        atColl.length || epColl.length
+          ? html`<ul class="plc-od-warn">
+              ${atColl.map((c) => html`<li>AT ${c.at} claimed by ${c.claimants.join(', ')}</li>`)}
+              ${epColl.map((c) => html`<li>PDO ${c.endpoint} claimed by ${c.claimants.join(', ')}</li>`)}
+            </ul>`
+          : nothing
+      }
+      <textarea class="plc-mapedit" rows="10" spellcheck="false"
+        placeholder="deploy map (bridge format) — generate drafts channels + binds from project AT bindings; pdo= endpoints come from device blocks"
+        .value=${draft}
+        @input=${(e: Event) => { this.mapEdit = (e.target as HTMLTextAreaElement).value; this.mapViolations = undefined; }}></textarea>
       ${
         chans.length
           ? html`
@@ -2810,13 +2935,12 @@ export class TetherPlcIde extends LitElement {
           : html`<p class="plc-dim">Deploy map (bridge format) of the running package — channel image ranges, PDO endpoints, safe-state policy, safety keys.</p>`
       }
       ${(() => {
-        const binds = projectIoBindings(this.project.fbd);
-        return binds.length
+        return bindingsEx.length
           ? html`<details class="plc-raw">
-              <summary>project bindings (${binds.length})</summary>
+              <summary>project bindings (${bindingsEx.length}${stBinds.length ? `, incl. ${stBinds.length} ST AT` : ''})</summary>
               <table class="plc-table">
                 <tbody>
-                  ${binds.map(
+                  ${bindingsEx.map(
                     (b) => html`<tr>
                       <td>${b.name}</td>
                       <td class="plc-dim">${b.at}</td>
@@ -2829,6 +2953,35 @@ export class TetherPlcIde extends LitElement {
           : nothing;
       })()}
     `;
+  }
+
+  /** draft a deploy map from the project's AT bindings + device
+      endpoints; lands in the editable textarea. */
+  private async onGenMap(): Promise<void> {
+    this.ctlErr = '';
+    try {
+      const r = await generateDeployMap(this.project);
+      this.genMap = { text: r.text, warnings: r.warnings };
+      this.mapEdit = r.text;
+      this.mapViolations = validateDeployMapText(r.text);
+    } catch (e) {
+      this.ctlErr = `gen-map: ${e instanceof Error ? e.message : e}`;
+    }
+    this.requestUpdate();
+  }
+
+  private onValidateMap(): void {
+    this.mapViolations = validateDeployMapText(this.mapEdit ?? '');
+    this.requestUpdate();
+  }
+
+  /** persist the edited map — injected as DEPLOY_MAP at build+deploy. */
+  private onSaveMap(): void {
+    const text = (this.mapEdit ?? '').trim();
+    if (!text) return;
+    this.project.deployMap = text.endsWith('\n') ? text : text + '\n';
+    this.save();
+    this.flash('deploy map saved — injected on build+deploy');
   }
 
   private async onIoMap(): Promise<void> {
@@ -2903,9 +3056,15 @@ export class TetherPlcIde extends LitElement {
         this.flash(r.ok ? 'build ok (no package)' : `build failed: ${r.errors} error(s)`);
         return;
       }
+      /* saved deploy map → DEPLOY_MAP section (0x31) via /pkgmap */
+      let pkg = r.package;
+      if (this.project.deployMap?.trim()) {
+        this.flash('injecting deploy map…');
+        pkg = await injectDeployMap(this.ctl.url, pkg, this.project.deployMap);
+      }
       this.flash('deploying…');
       this.deployFrac = 0;
-      const uuid = await this.ctl.deploy(r.package, 0, (f) => {
+      const uuid = await this.ctl.deploy(pkg, 0, (f) => {
         this.deployFrac = f;
       });
       this.deployFrac = undefined;

@@ -23,6 +23,18 @@ export interface CurveSeg {
   ev: number;
 }
 
+/** Heater PWM stage: controller duty -> FB_AtcPwm -> BOOL pulse train. */
+export interface CurvePwm {
+  /** FB_AtcPwm instance name. */
+  instance: string;
+  /** PWM period s — 1.0 = 1 Hz base frequency (EL2004 PWM). */
+  period: number;
+  /** minimum on-time s (shorter pulses are suppressed). */
+  minOn: number;
+  /** BOOL interface var driven by pwm.Q — wire to a DO channel. */
+  outVar: string;
+}
+
 export interface CurveProfile {
   /** instance name for the FB_AtcProfile var in the target POU. */
   instance: string;
@@ -44,6 +56,12 @@ export interface CurveProfile {
   resetVar?: string;
   /** interface var wired from the controller output; '' = skip. */
   outVar?: string;
+  /** interface BOOL driven by prof.Busy (process running); '' = skip. */
+  busyVar?: string;
+  /** interface BOOL driven by prof.Done (profile finished); '' = skip. */
+  doneVar?: string;
+  /** heater PWM stage on the controller output; undefined = off. */
+  pwm?: CurvePwm;
   segs: CurveSeg[];
 }
 
@@ -404,11 +422,90 @@ function wireController(pou: Pou, net: Network, p: CurveProfile): void {
     wire({ block: b.id, port: 0 }, [{ block: prof.id, port }]);
   }
   wire({ block: prof.id, port: 'SP' }, [{ block: ctl.id, port: cd.sp }]);
-  if (p.outVar) {
+  // status taps: Busy = process running, Done = profile finished —
+  // the typical DO pair a downstream system watches
+  for (const [name, port] of [
+    [p.busyVar, 'Busy'],
+    [p.doneVar, 'Done'],
+  ] as const) {
+    if (!name) continue;
+    ensureIface(name, 'var_output', 'BOOL');
+    const b = varBlock(name, 'out');
+    wire({ block: prof.id, port }, [{ block: b.id, port: 0 }]);
+  }
+  if (p.pwm) wirePwm(pou, net, p, ctl, cd, wire, ensureIface, varBlock);
+  else if (p.outVar) {
     ensureIface(p.outVar, 'var_output', 'LREAL');
     const b = varBlock(p.outVar, 'out');
     wire({ block: ctl.id, port: cd.out }, [{ block: b.id, port: 0 }]);
   }
+}
+
+/**
+ * Heater PWM stage: ctl output (0..100 %) -> FB_AtcPwm.Duty -> Q pulse
+ * train -> BOOL output var (EL2004 channel). Execute mirrors whatever
+ * drives the controller's enable; Period/MinOn/CycleTime are params.
+ * Duty resolution note: at CycleTime 0.1 s and Period 1 s the duty
+ * quantum is 10 % — shorten the task or the period for finer control.
+ */
+function wirePwm(
+  pou: Pou,
+  net: Network,
+  p: CurveProfile,
+  ctl: Block,
+  cd: ControllerDef,
+  wire: (
+    src: { block: number; port: PortSel },
+    dsts: { block: number; port: PortSel }[],
+  ) => void,
+  ensureIface: (name: string, kind: IfaceVar['kind'], type: string) => void,
+  varBlock: (name: string, role: 'in' | 'out') => Block,
+): void {
+  const pwm = p.pwm!;
+  if (!pwm.outVar) return;
+  let blk = net.blocks.find(
+    (b) => b.kind === 'fb' && b.type_ref === 'FB_AtcPwm' && b.instance === pwm.instance,
+  );
+  if (!blk) {
+    blk = {
+      id: nextNodeId(pou),
+      kind: 'fb',
+      type_ref: 'FB_AtcPwm',
+      instance: pwm.instance,
+      pos: { x: 42, y: 2 },
+      params: {
+        Period: num(pwm.period),
+        MinOn: num(pwm.minOn),
+        CycleTime: num(p.cycleTime),
+      },
+      exec_order: 0,
+      negated: [],
+      comment: `heater PWM ${num(pwm.period)} s period`,
+    };
+    net.blocks.push(blk);
+  } else {
+    blk.params = {
+      ...blk.params,
+      Period: num(pwm.period),
+      MinOn: num(pwm.minOn),
+      CycleTime: num(p.cycleTime),
+    };
+  }
+  // controller duty -> PWM; Execute mirrors the controller's enable
+  // sources (e.g. the run var block); Q -> BOOL output var
+  wire({ block: ctl.id, port: cd.out }, [{ block: blk.id, port: 'Duty' }]);
+  for (const w of net.wires) {
+    for (const d of w.dsts) {
+      if (d.block === ctl.id && d.port === cd.exec) {
+        wire({ block: w.src.block, port: w.src.port }, [
+          { block: blk.id, port: 'Execute' },
+        ]);
+      }
+    }
+  }
+  ensureIface(pwm.outVar, 'var_output', 'BOOL');
+  const out = varBlock(pwm.outVar, 'out');
+  wire({ block: blk.id, port: 'Q' }, [{ block: out.id, port: 0 }]);
 }
 
 /**
@@ -443,15 +540,35 @@ export function profileFromPou(pou: Pou): CurveProfile | undefined {
     const srcOf = (block: number, port: string) =>
       net.wires.find((w) => w.dsts.some((d) => d.block === block && d.port === port))?.src.block;
     const nameOf = (id?: number) => net.blocks.find((b) => b.id === id)?.name ?? '';
+    const dstNameOf = (block: number, port: string) => {
+      const w = net.wires.find((w) => w.src.block === block && w.src.port === port);
+      return nameOf(w?.dsts.find((d) => net.blocks.some((b) => b.id === d.block && b.kind === 'variable'))?.block);
+    };
     prof.runVar = nameOf(srcOf(fb.id, 'RUN'));
     prof.pvVar = nameOf(srcOf(fb.id, 'PV'));
     prof.holdVar = nameOf(srcOf(fb.id, 'HOLD'));
     prof.resetVar = nameOf(srcOf(fb.id, 'RESET'));
+    prof.busyVar = dstNameOf(fb.id, 'Busy') || undefined;
+    prof.doneVar = dstNameOf(fb.id, 'Done') || undefined;
+    const pwmBlk = net.blocks.find((b) => b.kind === 'fb' && b.type_ref === 'FB_AtcPwm');
+    if (pwmBlk) {
+      prof.pwm = {
+        instance: pwmBlk.instance ?? 'pwm',
+        period: Number(pwmBlk.params.Period ?? 1.0) || 1.0,
+        minOn: Number(pwmBlk.params.MinOn ?? 0.0) || 0.0,
+        outVar: dstNameOf(pwmBlk.id, 'Q'),
+      };
+    }
     if (ctl) {
       // the controller output is a source pin: its consumer names outVar
+      // (skipped when the duty feeds a PWM block instead)
       const outPort = controllerDef(ctl.type_ref)!.out;
       const w = net.wires.find((w) => w.src.block === ctl.id && w.src.port === outPort);
-      prof.outVar = nameOf(w?.dsts[0]?.block);
+      const dst = w?.dsts.find((d) => {
+        const b = net.blocks.find((x) => x.id === d.block);
+        return b?.kind === 'variable';
+      });
+      prof.outVar = nameOf(dst?.block) || undefined;
     }
     break;
   }

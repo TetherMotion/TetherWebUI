@@ -177,6 +177,100 @@ describe('curve codegen', () => {
     expect(back.outVar).toBe('Q');
   });
 
+  it('wires busy/done status taps to BOOL outputs', () => {
+    const p = pou();
+    const prof = {
+      ...defaultProfile(),
+      runVar: 'Run',
+      pvVar: 'Pv',
+      busyVar: 'Running',
+      doneVar: 'Finished',
+    };
+    applyToPou(p, prof);
+    const net = p.networks[0]!;
+    expect(p.interface).toEqual(
+      expect.arrayContaining([
+        { name: 'Running', kind: 'var_output', type: 'BOOL' },
+        { name: 'Finished', kind: 'var_output', type: 'BOOL' },
+      ]),
+    );
+    const profId = net.blocks.find((b) => b.type_ref === 'FB_AtcProfile')!.id;
+    const dsts = net.wires.flatMap((w) =>
+      w.src.block === profId ? w.dsts.map((d) => `${w.src.port}->${d.port}`) : [],
+    );
+    expect(dsts).toEqual(
+      expect.arrayContaining(['Busy->0', 'Done->0', 'SP->Setpoint']),
+    );
+  });
+
+  it('inserts a 1 Hz heater PWM stage on the controller output', () => {
+    const p = pou();
+    const prof = {
+      ...defaultProfile(),
+      runVar: 'Run',
+      pvVar: 'Pv',
+      busyVar: 'Running',
+      doneVar: 'Finished',
+      pwm: { instance: 'pwm', period: 1.0, minOn: 0.05, outVar: 'Heater' },
+    };
+    applyToPou(p, prof);
+    const net = p.networks[0]!;
+    const pwm = net.blocks.find((b) => b.type_ref === 'FB_AtcPwm')!;
+    expect(pwm.instance).toBe('pwm');
+    expect(pwm.params.Period).toBe('1.0');
+    expect(pwm.params.MinOn).toBe('0.05');
+    expect(p.interface).toEqual(
+      expect.arrayContaining([{ name: 'Heater', kind: 'var_output', type: 'BOOL' }]),
+    );
+    const ctlId = net.blocks.find((b) => b.type_ref === 'FB_AtcPid')!.id;
+    const profId = net.blocks.find((b) => b.type_ref === 'FB_AtcProfile')!.id;
+    const runId = net.blocks.find((b) => b.name === 'Run' && b.role === 'in')!.id;
+    // duty chain: ctl.Out -> pwm.Duty -> Q -> Heater var; Execute mirrors Run
+    const has = (srcB: number, srcP: string, dstB: number, dstP: string) =>
+      net.wires.some(
+        (w) =>
+          w.src.block === srcB &&
+          w.src.port === srcP &&
+          w.dsts.some((d) => d.block === dstB && d.port === dstP),
+      );
+    expect(has(ctlId, 'Out', pwm.id, 'Duty')).toBe(true);
+    expect(has(runId, 0, pwm.id, 'Execute')).toBe(true);
+    const heaterId = net.blocks.find((b) => b.name === 'Heater')!.id;
+    expect(has(pwm.id, 'Q', heaterId, 0)).toBe(true);
+    // status taps still wired
+    expect(has(profId, 'Busy', net.blocks.find((b) => b.name === 'Running')!.id, 0)).toBe(true);
+    expect(has(profId, 'Done', net.blocks.find((b) => b.name === 'Finished')!.id, 0)).toBe(true);
+    // idempotent re-apply: no duplicate pwm block or wires
+    const wires = net.wires.length;
+    applyToPou(p, prof);
+    expect(net.blocks.filter((b) => b.type_ref === 'FB_AtcPwm').length).toBe(1);
+    expect(net.wires.length).toBe(wires);
+  });
+
+  it('round-trips busy/done/pwm through profileFromPou', () => {
+    const p = pou();
+    const prof = {
+      ...defaultProfile(),
+      runVar: 'Run',
+      pvVar: 'Pv',
+      busyVar: 'Running',
+      doneVar: 'Finished',
+      pwm: { instance: 'heaterPwm', period: 0.5, minOn: 0.02, outVar: 'Heater' },
+    };
+    applyToPou(p, prof);
+    const back = profileFromPou(p)!;
+    expect(back.busyVar).toBe('Running');
+    expect(back.doneVar).toBe('Finished');
+    expect(back.pwm).toEqual({
+      instance: 'heaterPwm',
+      period: 0.5,
+      minOn: 0.02,
+      outVar: 'Heater',
+    });
+    // duty feeds the PWM, so no LREAL outVar is recovered
+    expect(back.outVar).toBeUndefined();
+  });
+
   it('detects whether the profile library is present', () => {
     const lib = 'TYPE ST_AtcSeg : STRUCT\n    KIND : DINT;\nEND_STRUCT\nEND_TYPE\nFUNCTION_BLOCK FB_AtcProfile\nEND_FUNCTION_BLOCK\n';
     expect(hasProfileLibrary([lib])).toBe(true);

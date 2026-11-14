@@ -152,3 +152,27 @@ export async function compileProject(
     package: raw.package ? Uint8Array.from(atob(raw.package), (ch) => ch.charCodeAt(0)) : undefined,
   };
 }
+
+/** Inject a DEPLOY_MAP section (0x31) into a compiled .tplc package via
+    the proxy's /pkgmap route (runs `tplcc pkg add-section`). */
+export async function injectDeployMap(
+  base: string,
+  pkg: Uint8Array,
+  mapText: string,
+): Promise<Uint8Array> {
+  const b64 = (bytes: Uint8Array) => {
+    let s = '';
+    for (let i = 0; i < bytes.length; i += 0x8000)
+      s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return btoa(s);
+  };
+  const res = await fetch(`${base}/pkgmap`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ package: b64(pkg), map: mapText }),
+  });
+  if (!res.ok) throw new Error(`pkgmap: HTTP ${res.status} ${await res.text()}`);
+  const raw = (await res.json()) as { package?: string; error?: string };
+  if (!raw.package) throw new Error(`pkgmap: ${raw.error ?? 'no package returned'}`);
+  return Uint8Array.from(atob(raw.package), (ch) => ch.charCodeAt(0));
+}

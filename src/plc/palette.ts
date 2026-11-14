@@ -27,7 +27,7 @@ export interface PaletteItem {
 
 /** Channel template used by the "add device" wizard. */
 export interface DeviceTemplate {
-  /** suggested terminal/device name (EK1108, EK1122, …). */
+  /** suggested terminal/device name (EK1108, EK1122, EL1014, …). */
   name: string;
   /** channel kind: digital in (device→logic), digital out, analog. */
   channel: 'DI' | 'DO' | 'AI' | 'AO';
@@ -35,6 +35,12 @@ export interface DeviceTemplate {
   count: number;
   /** IEC type for the channels. */
   ty: string;
+  /** bytes per analog channel in the image (EL int16 PDOs = 2, the
+      virtual REAL terminals = 4). Digital packs bits — ignored. */
+  pitch?: number;
+  /** EtherCAT PDO endpoint prefix (e.g. 'el1014') — the wizard
+      suggests `<prefix>.c<occ>` and the deploy map binds `pdo=`. */
+  endpointPrefix?: string;
   /** optional second channel group for mixed terminals
       (EK1110 = DI+DO, EK1122 = AI+AO). Lands in the other %I/%Q
       region or a different pin prefix, so it shares base 0. */
@@ -179,6 +185,36 @@ export const PALETTE: PaletteGroup[] = [
           count2: 4,
           ty2: 'BOOL',
         },
+      },
+      /* EtherCAT EL bus terminals — PDO endpoints, int16 analog PDOs
+         (pitch 2, raw counts — scale in logic). */
+      {
+        kind: 'device',
+        type: 'EL1014',
+        label: 'EL1014 DI',
+        hint: 'EtherCAT 4-ch digital input — PDO endpoint, device → logic',
+        template: { name: 'EL1014', channel: 'DI', count: 4, ty: 'BOOL', endpointPrefix: 'el1014' },
+      },
+      {
+        kind: 'device',
+        type: 'EL2004',
+        label: 'EL2004 DO',
+        hint: 'EtherCAT 4-ch digital output — PDO endpoint, logic → device (PWM-capable)',
+        template: { name: 'EL2004', channel: 'DO', count: 4, ty: 'BOOL', endpointPrefix: 'el2004' },
+      },
+      {
+        kind: 'device',
+        type: 'EL3104',
+        label: 'EL3104 AI',
+        hint: 'EtherCAT 4-ch analog in ±10 V — int16 raw counts, scale in logic',
+        template: { name: 'EL3104', channel: 'AI', count: 4, ty: 'INT', pitch: 2, endpointPrefix: 'el3104' },
+      },
+      {
+        kind: 'device',
+        type: 'EL4104',
+        label: 'EL4104 AO',
+        hint: 'EtherCAT 4-ch analog out ±10 V — int16 raw counts',
+        template: { name: 'EL4104', channel: 'AO', count: 4, ty: 'INT', pitch: 2, endpointPrefix: 'el4104' },
       },
     ],
   },

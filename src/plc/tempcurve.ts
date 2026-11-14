@@ -298,11 +298,94 @@ export class TempCurve extends LitElement {
             <input
               class="fbd-in"
               placeholder="(none)"
-              title="interface LREAL driven by the controller output"
+              title="interface LREAL driven by the controller output (skipped when heater PWM is on)"
               .value=${p.outVar ?? ''}
               @change=${(e: Event) => this.set({ outVar: (e.target as HTMLInputElement).value.trim() })}
             />
           </label>
+          <label
+            >busy
+            <input
+              class="fbd-in"
+              placeholder="(none)"
+              title="interface BOOL driven by profile Busy — process running"
+              .value=${p.busyVar ?? ''}
+              @change=${(e: Event) => this.set({ busyVar: (e.target as HTMLInputElement).value.trim() })}
+            />
+          </label>
+          <label
+            >done
+            <input
+              class="fbd-in"
+              placeholder="(none)"
+              title="interface BOOL driven by profile Done — profile finished"
+              .value=${p.doneVar ?? ''}
+              @change=${(e: Event) => this.set({ doneVar: (e.target as HTMLInputElement).value.trim() })}
+            />
+          </label>
+          <label
+            ><input
+              type="checkbox"
+              .checked=${!!p.pwm}
+              @change=${(e: Event) =>
+                this.set({
+                  pwm: (e.target as HTMLInputElement).checked
+                    ? { instance: 'pwm', period: 1.0, minOn: 0.0, outVar: 'heater' }
+                    : undefined,
+                })}
+            }
+            />
+            heater pwm</label
+          >
+          ${p.pwm
+            ? html`
+                <label
+                  >pwm inst
+                  <input
+                    class="fbd-in"
+                    .value=${p.pwm.instance}
+                    @change=${(e: Event) =>
+                      this.set({ pwm: { ...p.pwm!, instance: (e.target as HTMLInputElement).value || 'pwm' } })}
+                  />
+                </label>
+                <label
+                  >period s
+                  <input
+                    class="fbd-in"
+                    type="number"
+                    step="0.1"
+                    min="0.01"
+                    .value=${String(p.pwm.period)}
+                    title="1.0 s = 1 Hz base frequency; duty quantum = cycle/period (0.1 s cycle -> 10 %)"
+                    @change=${(e: Event) =>
+                      this.set({ pwm: { ...p.pwm!, period: Number((e.target as HTMLInputElement).value) || 1.0 } })}
+                  />
+                </label>
+                <label
+                  >min on s
+                  <input
+                    class="fbd-in"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    .value=${String(p.pwm.minOn)}
+                    @change=${(e: Event) =>
+                      this.set({ pwm: { ...p.pwm!, minOn: Number((e.target as HTMLInputElement).value) || 0 } })}
+                  />
+                </label>
+                <label
+                  >pwm out
+                  <input
+                    class="fbd-in"
+                    placeholder="heater"
+                    title="BOOL interface var driven by the PWM pulse — wire to an EL2004 channel"
+                    .value=${p.pwm.outVar}
+                    @change=${(e: Event) =>
+                      this.set({ pwm: { ...p.pwm!, outVar: (e.target as HTMLInputElement).value.trim() } })}
+                  />
+                </label>
+              `
+            : nothing}
           <span class="spacer"></span>
           <button
             class="chip-btn"
