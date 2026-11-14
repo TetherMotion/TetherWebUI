@@ -168,6 +168,44 @@ export function importPlcopenXml(xml: string): PlcopenImport {
     };
   };
 
+  const setVarName = (b: Block, t: string): void => {
+    if (t.startsWith('%')) b.at ??= t;
+    else b.name ??= t;
+  };
+  const readCpi = (
+    cpi: Element,
+    b: Block,
+    pin: string | undefined,
+    bodyConns: Map<number, string>,
+  ): void => {
+    const negated = attr(cpi, 'negated') === 'true';
+    if (negated) {
+      const i = pin !== undefined ? pinIndex(pin) : pin === undefined ? 0 : undefined;
+      if (i !== undefined && !b.negated.includes(i)) b.negated.push(i);
+    }
+    let hasConn = false;
+    for (const c of children(cpi)) {
+      if (local(c) === 'connection' && attr(c, 'refLocalId') !== undefined) {
+        hasConn = true;
+        conns.push({
+          src: {
+            block: num(attr(c, 'refLocalId')),
+            port: attr(c, 'formalParameter') ?? 0,
+          },
+          dst: { block: b.id, port: pin ? (pinIndex(pin) ?? pin) : 0 },
+          probe: attr(c, 'probe') === 'true' || tetherAttr(c, 'probe') === 'true',
+          wireId: tetherAttr(c, 'wire') !== undefined ? num(tetherAttr(c, 'wire')) : undefined,
+          negated,
+          bodyConns,
+        });
+      } else if (local(c) === 'expression') {
+        const t = (c.textContent ?? '').trim();
+        if (t && pin) b.params[pin] = t;
+        else if (t && !hasConn && b.kind === 'variable') setVarName(b, t);
+      }
+    }
+  };
+
   // ---- FBD body -------------------------------------------------------
   const importFbd = (fbd: Element, pou: Pou): void => {
     const bodyConns = new Map<number, string>();
@@ -180,38 +218,8 @@ export function importPlcopenXml(xml: string): PlcopenImport {
       if (!netIsEmpty(net)) pou.networks.push(net);
       net = newNet(`net${pou.networks.length + 1}`);
     };
-    const setVarName = (b: Block, t: string): void => {
-      if (t.startsWith('%')) b.at ??= t;
-      else b.name ??= t;
-    };
-    const readCpi = (cpi: Element, b: Block, pin: string | undefined): void => {
-      const negated = attr(cpi, 'negated') === 'true';
-      if (negated) {
-        const i = pin !== undefined ? pinIndex(pin) : pin === undefined ? 0 : undefined;
-        if (i !== undefined && !b.negated.includes(i)) b.negated.push(i);
-      }
-      let hasConn = false;
-      for (const c of children(cpi)) {
-        if (local(c) === 'connection' && attr(c, 'refLocalId') !== undefined) {
-          hasConn = true;
-          conns.push({
-            src: {
-              block: num(attr(c, 'refLocalId')),
-              port: attr(c, 'formalParameter') ?? 0,
-            },
-            dst: { block: b.id, port: pin ? (pinIndex(pin) ?? pin) : 0 },
-            probe: attr(c, 'probe') === 'true' || tetherAttr(c, 'probe') === 'true',
-            wireId: tetherAttr(c, 'wire') !== undefined ? num(tetherAttr(c, 'wire')) : undefined,
-            negated,
-            bodyConns,
-          });
-        } else if (local(c) === 'expression') {
-          const t = (c.textContent ?? '').trim();
-          if (t && pin) b.params[pin] = t;
-          else if (t && !hasConn && b.kind === 'variable') setVarName(b, t);
-        }
-      }
-    };
+    const readBodyCpi = (cpi: Element, b: Block, pin: string | undefined): void =>
+      readCpi(cpi, b, pin, bodyConns);
 
     const handle = (el: Element): void => {
       const tag = local(el);
@@ -242,7 +250,7 @@ export function importPlcopenXml(xml: string): PlcopenImport {
         for (const c of descendants(el, 'variable')) {
           const pin = attr(c, 'formalParameter');
           const cpi = child(c, 'connectionPointIn');
-          if (cpi) readCpi(cpi, b, pin);
+          if (cpi) readBodyCpi(cpi, b, pin);
         }
         net.blocks.push(b);
       } else if (tag === 'inVariable' || tag === 'outVariable' || tag === 'inOutVariable') {
@@ -261,9 +269,9 @@ export function importPlcopenXml(xml: string): PlcopenImport {
         };
         const friendly = tetherAttr(el, 'name') ?? attr(el, 'name');
         if (friendly !== undefined) b.name = friendly;
-        if (role !== 'in' && attr(el, 'negated') === 'true') b.negated.push(0);
+        if (attr(el, 'negated') === 'true') b.negated.push(0);
         for (const c of children(el)) {
-          if (local(c) === 'connectionPointIn') readCpi(c, b, undefined);
+          if (local(c) === 'connectionPointIn') readBodyCpi(c, b, undefined);
           else if (local(c) === 'expression' || local(c) === 'connectionPointOut') {
             const holder = local(c) === 'connectionPointOut' ? descendant(c, 'expression') : c;
             const t = (holder?.textContent ?? '').trim();
@@ -318,6 +326,61 @@ export function importPlcopenXml(xml: string): PlcopenImport {
     pushNet();
   };
 
+  // ---- LD body ---------------------------------------------------------
+  // <contact>/<coil> become variable blocks; connectionPointIn links
+  // become conns exactly like FBD. Power rails emit no blocks —
+  // connections sourced at a rail localId are dropped before
+  // mergeWires so rail-fed elements evaluate rail-powered.
+  const ldRails = new Map<Network, Set<number>>();
+  const importLd = (ld: Element, pou: Pou): void => {
+    const net = newNet(`net${pou.networks.length + 1}`);
+    net.kind = 'ld';
+    net.label = 'LD';
+    const rails = new Set<number>();
+    ldRails.set(net, rails);
+    const noBodyConns = new Map<number, string>();
+    for (const el of children(ld)) {
+      const tag = local(el);
+      if (tag === 'leftPowerRail' || tag === 'rightPowerRail' || tag === 'powerRail') {
+        const id = num(attr(el, 'localId'), -1);
+        if (id >= 0) rails.add(id);
+      } else if (tag === 'contact' || tag === 'coil') {
+        const b: Block = {
+          id: nextId(el),
+          kind: 'variable',
+          type_ref: '',
+          pos: posOf(el),
+          params: {},
+          exec_order: 0,
+          negated: attr(el, 'negated') === 'true' ? [0] : [],
+          comment: '',
+          role: tag === 'contact' ? 'in' : 'out',
+        };
+        for (const a of ['storage', 'edge']) {
+          const v = attr(el, a);
+          if (v !== undefined && v !== 'none') {
+            notes.push(
+              `LD ${tag} ${a}="${v}" not imported (flow model supports none only)`,
+            );
+          }
+        }
+        for (const c of children(el)) {
+          const ct = local(c);
+          if (ct === 'connectionPointIn') {
+            readCpi(c, b, undefined, noBodyConns);
+          } else if (ct === 'variable' || ct === 'expression') {
+            const t = (c.textContent ?? '').trim();
+            if (t) setVarName(b, t);
+          }
+        }
+        net.blocks.push(b);
+      } else if (tag === 'block') {
+        notes.push('LD <block> element not imported (FBs in rungs unsupported)');
+      }
+    }
+    if (!netIsEmpty(net)) pou.networks.push(net);
+  };
+
   // ---- pous / globals / tasks ------------------------------------------
   for (const pouEl of descendants(root, 'pou')) {
     const pt = attr(pouEl, 'pouType');
@@ -346,8 +409,9 @@ export function importPlcopenXml(xml: string): PlcopenImport {
     if (body) {
       for (const b of children(body)) {
         if (local(b) === 'FBD') importFbd(b, pou);
-        else if (['SFC', 'LD', 'ST', 'IL'].includes(local(b))) {
-          notes.push(`${pou.name}: body language <${local(b)}> not imported (FBD only)`);
+        else if (local(b) === 'LD') importLd(b, pou);
+        else if (['SFC', 'ST', 'IL'].includes(local(b))) {
+          notes.push(`${pou.name}: body language <${local(b)}> not imported (FBD/LD only)`);
         }
       }
     }
@@ -376,7 +440,18 @@ export function importPlcopenXml(xml: string): PlcopenImport {
     if (task.name) project.tasks.push(task);
   }
 
-  mergeWires(project, conns, () => alloc++);
+  // drop conns sourced at an LD power rail — the fed element is
+  // rail-powered by having no input wire
+  const blockNet = new Map<number, Network>();
+  for (const p of project.pous)
+    for (const n of p.networks)
+      for (const b of n.blocks) blockNet.set(b.id, n);
+  const keptConns = conns.filter((c) => {
+    const net = blockNet.get(c.dst.block);
+    const rails = net ? ldRails.get(net) : undefined;
+    return !(rails !== undefined && rails.has(c.src.block));
+  });
+  mergeWires(project, keptConns, () => alloc++);
 
   if (!project.pous.length && !project.global_vars.length) {
     throw new Error('not a PLCopen project document');
@@ -769,13 +844,18 @@ function exportVarBlock(x: Xml, b: Block, byDst: Map<string, Wire[]>): void {
   const tag = role === 'in' ? 'inVariable' : role === 'out' ? 'outVariable' : 'inOutVariable';
   const nameExpr = b.at ?? b.name ?? '';
   const a: [string, string][] = [['localId', String(b.id)]];
+  if (b.negated.length) a.push(['negated', 'true']);
   if (b.at && b.name) a.push(['tether:name', b.name]);
   x.open(tag, a);
   x.empty('position', [
     ['x', String(b.pos.x)],
     ['y', String(b.pos.y)],
   ]);
-  if (role !== 'in') {
+  // connectionPointIn carries incoming wires for any role — LD
+  // contacts are role=in yet receive flow from upstream elements
+  const hasIn =
+    (byDst.get(`${b.id}|#0`)?.length ?? 0) > 0 || (byDst.get(`${b.id}|`)?.length ?? 0) > 0;
+  if (role !== 'in' || hasIn) {
     x.open('connectionPointIn');
     for (const key of ['#0', '']) {
       for (const w of byDst.get(`${b.id}|${key}`) ?? []) connElem(x, w.src, w);

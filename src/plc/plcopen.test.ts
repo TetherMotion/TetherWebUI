@@ -319,3 +319,100 @@ describe('exportPlcopenXml', () => {
     expect(doc.documentElement.localName).toBe('project');
   });
 });
+
+describe('LD body import', () => {
+  // (start OR hold) AND NOT stop -> run; rail-fed contacts have no
+  // incoming wire (rail-powered), the NC contact merges two sources.
+  const LD_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://www.plcopen.org/xml/tc6_0201">
+  <contentHeader name="ldtest"/>
+  <types/>
+  <pous>
+    <pou name="LdDemo" pouType="program">
+      <interface/>
+      <body>
+        <LD>
+          <leftPowerRail localId="1" height="60" width="10">
+            <position x="20" y="20"/>
+            <connectionPointOut formalParameter="none"><relPosition x="10" y="20"/></connectionPointOut>
+          </leftPowerRail>
+          <contact localId="3" negated="false" storage="none" edge="none" height="15" width="21">
+            <position x="60" y="30"/>
+            <connectionPointIn><relPosition x="0" y="10"/><connection refLocalId="1"/></connectionPointIn>
+            <connectionPointOut><relPosition x="21" y="10"/></connectionPointOut>
+            <variable>%IX0.0</variable>
+          </contact>
+          <contact localId="4" negated="false" storage="none" edge="none" height="15" width="21">
+            <position x="60" y="70"/>
+            <connectionPointIn><relPosition x="0" y="10"/><connection refLocalId="1"/></connectionPointIn>
+            <connectionPointOut><relPosition x="21" y="10"/></connectionPointOut>
+            <variable>%IX0.1</variable>
+          </contact>
+          <contact localId="5" negated="true" storage="none" edge="none" height="15" width="21">
+            <position x="120" y="30"/>
+            <connectionPointIn>
+              <relPosition x="0" y="10"/>
+              <connection refLocalId="3"/>
+              <connection refLocalId="4"/>
+            </connectionPointIn>
+            <connectionPointOut><relPosition x="21" y="10"/></connectionPointOut>
+            <variable>%IX0.2</variable>
+          </contact>
+          <coil localId="6" negated="false" storage="none" height="15" width="21">
+            <position x="180" y="30"/>
+            <connectionPointIn><relPosition x="0" y="10"/><connection refLocalId="5"/></connectionPointIn>
+            <connectionPointOut><relPosition x="21" y="10"/></connectionPointOut>
+            <variable>%QX0.0</variable>
+          </coil>
+        </LD>
+      </body>
+    </pou>
+  </pous>
+</project>`;
+
+  it('imports contacts/coils as variable blocks on a ladder network', () => {
+    const { project, notes } = importPlcopenXml(LD_XML);
+    expect(notes.filter((n) => n.includes('LD'))).toHaveLength(0);
+    const pou = project.pous[0]!;
+    expect(pou.networks).toHaveLength(1);
+    const net = pou.networks[0]!;
+    expect(net.kind).toBe('ld');
+    expect(net.blocks).toHaveLength(4);
+    const roles = net.blocks.map((b) => b.role);
+    expect(roles.filter((r) => r === 'in')).toHaveLength(3);
+    expect(roles.filter((r) => r === 'out')).toHaveLength(1);
+    const ats = net.blocks.map((b) => b.at);
+    for (const a of ['%IX0.0', '%IX0.1', '%IX0.2', '%QX0.0']) expect(ats).toContain(a);
+    const nc = net.blocks.find((b) => b.at === '%IX0.2')!;
+    expect(nc.negated).toContain(0);
+    // positions survive — rung rows drive band clustering
+    expect(net.blocks.map((b) => b.pos.y)).toContain(70);
+  });
+
+  it('drops rail-sourced connections and keeps the flow graph', () => {
+    const { project } = importPlcopenXml(LD_XML);
+    const net = project.pous[0]!.networks[0]!;
+    expect(net.wires).toHaveLength(3);
+    const edges = net.wires.map((w) => [w.src.block, w.dsts.map((d) => d.block)]);
+    expect(edges).toContainEqual([3, [5]]);
+    expect(edges).toContainEqual([4, [5]]);
+    expect(edges).toContainEqual([5, [6]]);
+  });
+
+  it('round-trips LD networks through export losslessly', () => {
+    const { project } = importPlcopenXml(LD_XML);
+    const xml = exportPlcopenXml(project);
+    const { project: back } = importPlcopenXml(xml);
+    const n1 = project.pous[0]!.networks[0]!;
+    const n2 = back.pous[0]!.networks[0]!;
+    expect(n2.kind).toBe('ld');
+    expect(n2.blocks).toHaveLength(n1.blocks.length);
+    expect(n2.wires).toHaveLength(n1.wires.length);
+    const nc1 = n1.blocks.find((b) => b.at === '%IX0.2')!;
+    const nc2 = n2.blocks.find((b) => b.at === '%IX0.2')!;
+    expect(nc2.negated).toContain(0);
+    const edges = (n: typeof n1) =>
+      n.wires.map((w) => `${w.src.block}->${w.dsts.map((d) => d.block).join(',')}`).sort();
+    expect(edges(n2)).toEqual(edges(n1));
+  });
+});
