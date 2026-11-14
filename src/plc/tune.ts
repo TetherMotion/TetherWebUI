@@ -23,6 +23,7 @@
  * `{P0}`/`{P1}` = first/second src pin inside gain writes.
  */
 import { Block, IfaceVar, PortSel, Pou, nextNodeId } from './model';
+import { controllerDef } from './curve';
 
 export type TuneKind = 'relay' | 'step' | 'lqr' | 'lqg';
 
@@ -534,6 +535,26 @@ export function applyTunerToPou(pou: Pou, cfg: TuneCfg): void {
     const cb = net.blocks.find((b) => b.kind === 'fb' && b.instance === cfg.ctlInstance);
     if (cb) {
       for (const [m] of c.gains) delete cb.params[m];
+      const cd = controllerDef(cb.type_ref);
+      if (cd) {
+        // seed run params (limits etc.) so the loop can run — minus the
+        // tuned gain members; existing block params win
+        const gainNames = new Set(c.gains.map(([m]) => m));
+        const merged: Record<string, string> = {};
+        for (const b of srcBlocks) Object.assign(merged, b.params);
+        // plant-model inputs the controller needs live (LQG re-runs the
+        // estimator; LQR takes Nref/FFwd) — propagate from tuner params
+        const PLANT: Record<string, string[]> = {
+          FB_AtcLqg: ['A11', 'A12', 'A21', 'A22', 'B1', 'B2', 'Nref', 'FFwd'],
+          FB_AtcLqr: ['Nref', 'FFwd'],
+        };
+        for (const [k, v] of Object.entries(cd.params ?? {})) {
+          if (!gainNames.has(k) && cb.params[k] === undefined) cb.params[k] = v;
+        }
+        for (const k of PLANT[cb.type_ref] ?? []) {
+          if (cb.params[k] === undefined && merged[k] !== undefined) cb.params[k] = merged[k];
+        }
+      }
     }
     wireTo(cv.id, 0, cfgId, 'CTL');
   }
@@ -586,6 +607,25 @@ export function applyTunerToPou(pou: Pou, cfg: TuneCfg): void {
     // tuner Out → plant input (relay/step only — LQR tuners don't drive)
     if (cfg.outVar && (def.fb === 'FB_AtcRelayTune' || def.fb === 'FB_AtcStepIdent')) {
       wireTo(b.id, 'Out', vb('out', cfg.outVar, 40)!.id, 0);
+    }
+  }
+
+  // ---- controller wiring --------------------------------------------------
+  // The same run/pv/sp/out bindings drive the controller block — for
+  // lqr/lqg the matrix tuners have no process pins, so without this the
+  // controller would sit unwired. wireTo is idempotent: pins already
+  // driven (e.g. by the profile editor) keep their source, and for
+  // relay/step the tuner Out already owns outVar.
+  if (cfg.ctlInstance) {
+    const cb = net.blocks.find(
+      (b) => b.kind === 'fb' && b.instance === cfg.ctlInstance,
+    );
+    const cd = cb?.type_ref ? controllerDef(cb.type_ref) : undefined;
+    if (cb && cd) {
+      if (cfg.runVar) wireTo(vb('in', cfg.runVar, 0).id, 0, cb.id, cd.exec);
+      if (cfg.pvVar) wireTo(vb('in', cfg.pvVar, 4).id, 0, cb.id, cd.pv);
+      if (cfg.spVar) wireTo(vb('in', cfg.spVar, 8).id, 0, cb.id, cd.sp);
+      if (cfg.outVar) wireTo(cb.id, cd.out, vb('out', cfg.outVar, 40)!.id, 0);
     }
   }
 }

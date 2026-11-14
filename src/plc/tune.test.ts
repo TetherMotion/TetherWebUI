@@ -150,6 +150,74 @@ describe('applyTunerToPou', () => {
     expect(fbs.map((b) => b.instance)).toContain('tune2');
   });
 
+  it('wires the controller block from the same run/pv/sp/out bindings', () => {
+    const ctlBlk = (fb: string): import('./model').Block => ({
+      id: 90,
+      kind: 'fb',
+      type_ref: fb,
+      instance: 'pid',
+      pos: { x: 30, y: 2 },
+      params: { CycleTime: '0.1' },
+      exec_order: 0,
+      negated: [],
+      comment: 'controller',
+    });
+    const p = pou();
+    p.networks.push({
+      id: 'n1', kind: 'fbd', label: '', comments: [], assocs: [],
+      labels: [], jumps: [], returns: [], blocks: [ctlBlk('FB_AtcPid')], wires: [],
+    });
+    const net = p.networks[0]!;
+    applyTunerToPou(p, RELAY);
+    const dsts = new Set(net.wires.flatMap((w) => w.dsts.map((d) => `${d.block}:${d.port}`)));
+    // pid.Execute/Actual/Setpoint driven; pid.Out loses to tuner Out on TuneOut
+    expect(dsts.has('90:Execute')).toBe(true);
+    expect(dsts.has('90:Actual')).toBe(true);
+    expect(dsts.has('90:Setpoint')).toBe(true);
+    expect(net.wires.some((w) => w.src.block === 90 && w.src.port === 'Out')).toBe(false);
+    // seeds: PID gets OutMin/OutMax but never the tuned gains as params
+    const pidBlk = net.blocks.find((b) => b.instance === 'pid')!;
+    expect(pidBlk.params.OutMin).toBe('0.0');
+    expect(pidBlk.params.OutMax).toBe('100.0');
+    expect(pidBlk.params.Kp).toBeUndefined();
+    // lqg: matrix tuners leave the controller fully wired incl. Out
+    const q = pou();
+    q.networks.push({
+      id: 'n1', kind: 'fbd', label: '', comments: [], assocs: [],
+      labels: [], jumps: [], returns: [], blocks: [ctlBlk('FB_AtcLqg')], wires: [],
+    });
+    applyTunerToPou(q, {
+      kind: 'lqg',
+      instance: 'kal',
+      instance2: 'lqr',
+      ctlInstance: 'pid',
+      runVar: 'Run2',
+      pvVar: 'Pv2',
+      spVar: 'Sp2',
+      outVar: 'Out2',
+    });
+    const qn = q.networks[0]!;
+    const qdsts = new Set(qn.wires.flatMap((w) => w.dsts.map((d) => `${d.block}:${d.port}`)));
+    expect(qdsts.has('90:Execute')).toBe(true);
+    expect(qdsts.has('90:Actual')).toBe(true);
+    expect(qdsts.has('90:Setpoint')).toBe(true);
+    const outDst = qn.wires.find((w) => w.src.block === 90 && w.src.port === 'Out');
+    expect(outDst).toBeTruthy();
+    // LQG controller re-runs the estimator — it needs the plant A/B
+    // matrices propagated from the tuner params, plus OutMin/OutMax
+    const lqgBlk = qn.blocks.find((b) => b.instance === 'pid')!;
+    expect(lqgBlk.params.A11).toBe('0.98');
+    expect(lqgBlk.params.B1).toBe('0.5');
+    expect(lqgBlk.params.B2).toBe('0.1');
+    expect(lqgBlk.params.OutMin).toBe('0.0');
+    expect(lqgBlk.params.OutMax).toBe('100.0');
+    expect(lqgBlk.params.K1).toBeUndefined();
+    expect(lqgBlk.params.L1).toBeUndefined();
+    // tuner-only weights must not leak onto the controller
+    expect(lqgBlk.params.Q1).toBeUndefined();
+    expect(lqgBlk.params.R).toBeUndefined();
+  });
+
   it('recovers a TuneCfg from an inserted POU', () => {
     const p = pou();
     applyTunerToPou(p, RELAY);
