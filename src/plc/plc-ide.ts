@@ -13,6 +13,7 @@ import './fbd-canvas';
 import './ld-canvas';
 import './st-editor';
 import './tempcurve';
+import './temp-tune';
 import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgStateDiff, DbgSym, DbgTraceFrame, DbgTraceStatus, DbgWatchEntry, EV, OdEntry, OdValue, PlcCtl, ProgStatus, RetainStatus, RtStatus, ShadowDiff, ShadowStatus } from './ctl';
 import { byteToOffset, compileProject, CompileDiag, diagsForFile } from './build';
 import type { StEditor } from './st-editor';
@@ -31,6 +32,7 @@ import {
   profileFromPou,
   sourceStem,
 } from './curve';
+import { TuneCfg, tunerFromPou } from './tune';
 
 type Pane = 'explorer' | 'st' | 'fbd' | 'curves' | 'tasks' | 'watch' | 'deploy';
 
@@ -1188,6 +1190,9 @@ export class TetherPlcIde extends LitElement {
       (pou ? profileFromPou(pou) : undefined) ??
       defaultProfile();
     const hasLib = hasProfileLibrary(Object.values(this.project.stSources));
+    const tune =
+      (key ? this.project.tunes?.[key] : undefined) ??
+      (pou ? tunerFromPou(pou) : undefined);
     return html`
       ${
         hasLib
@@ -1233,6 +1238,16 @@ export class TetherPlcIde extends LitElement {
           this.flash(`exported ${e.detail.name}.st`);
         }}
       ></temp-curve>
+      <temp-tune
+        .pou=${pou}
+        .tune=${tune}
+        .values=${this.hub ? new Map(this.hub.values) : undefined}
+        @change=${(e: CustomEvent<TuneCfg>) => {
+          if (key) (this.project.tunes ??= {})[key] = e.detail;
+          this.save();
+          this.requestUpdate();
+        }}
+      ></temp-tune>
     `;
   }
 

@@ -8,6 +8,7 @@
  */
 import { CurveProfile } from './curve';
 import { emptyProject, FbdProject, isFbdProject } from './model';
+import { TuneCfg } from './tune';
 
 const STORAGE_KEY = 'tether.plc.project.v1';
 
@@ -17,6 +18,8 @@ export interface PlcProject {
   stSources: Record<string, string>;
   /** POU name → temperature profile being edited for it (Curves pane). */
   curves?: Record<string, CurveProfile>;
+  /** POU name → autotune configuration being edited for it (Curves pane). */
+  tunes?: Record<string, TuneCfg>;
 }
 
 export function emptyPlcProject(): PlcProject {
@@ -33,6 +36,7 @@ export function loadProject(): PlcProject {
         fbd: parsed.fbd,
         stSources: parsed.stSources && typeof parsed.stSources === 'object' ? parsed.stSources : {},
         curves: parsed.curves && typeof parsed.curves === 'object' ? parsed.curves : {},
+        tunes: parsed.tunes && typeof parsed.tunes === 'object' ? parsed.tunes : {},
       };
     }
     // tolerate a bare fbd.v1 doc saved by an earlier version
