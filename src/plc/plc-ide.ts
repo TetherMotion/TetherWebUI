@@ -14,7 +14,7 @@ import './ld-canvas';
 import './st-editor';
 import './tempcurve';
 import './temp-tune';
-import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgStateDiff, DbgSym, DbgTraceFrame, DbgTraceStatus, DbgWatchEntry, EV, OdEntry, OdValue, PlcCtl, ProgStatus, RetainStatus, RtStatus, ShadowDiff, ShadowStatus } from './ctl';
+import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgStateDiff, DbgSym, DbgTraceFrame, DbgTraceStatus, DbgWatchEntry, EV, EvlogInfo, EvlogRecord, EvlogStats, HistChannel, OdEntry, OdValue, PlcCtl, ProgStatus, RetainStatus, RtStatus, ShadowDiff, ShadowStatus } from './ctl';
 import { byteToOffset, compileProject, CompileDiag, diagsForFile, injectDeployMap } from './build';
 import {
   atCollisions,
@@ -43,7 +43,7 @@ import {
 } from './curve';
 import { TuneCfg, tunerFromPou } from './tune';
 
-type Pane = 'explorer' | 'st' | 'fbd' | 'curves' | 'tasks' | 'watch' | 'deploy';
+type Pane = 'explorer' | 'st' | 'fbd' | 'curves' | 'tasks' | 'watch' | 'alarms' | 'deploy';
 
 /** migrate rule kinds shared with the runtime's MIGD encoding */
 const DBG_DIFF_KIND = ['copy', 'xform', 'init', 'drop', 'deny', 'alias'];
@@ -65,6 +65,7 @@ const PANES: { id: Pane; label: string }[] = [
   { id: 'curves', label: 'Curves' },
   { id: 'tasks', label: 'Tasks' },
   { id: 'watch', label: 'Watch' },
+  { id: 'alarms', label: 'Alarms' },
   { id: 'deploy', label: 'Deploy' },
 ];
 
@@ -389,6 +390,17 @@ export class TetherPlcIde extends LitElement {
   private traceNoFreeze = false;
   private watchChs: { name: string; off: bigint; len: number }[] = [];
   private watchVals = new Map<number, string[]>();
+  /* alarms pane: event journal + historian trend state */
+  private alarms?: EvlogInfo[];
+  private alarmStats?: EvlogStats;
+  private alarmHist?: EvlogRecord[];
+  private histChans?: HistChannel[];
+  private histNamesInput = '';
+  private trendCh = 0;
+  private trendCodecLabel?: string;
+  private trendSamples: number[] = [];
+  private trendLastSeq = 0n;
+  private trendTimer?: number;
   private stateDiff: DbgStateDiff | undefined;
   private odWriteHex: Record<string, string> = {};
   private evSrc?: EventSource;
@@ -457,6 +469,10 @@ export class TetherPlcIde extends LitElement {
     this.evSrc?.close();
     this.evSrc = undefined;
     if (this.evTimer !== undefined) clearTimeout(this.evTimer);
+    if (this.trendTimer !== undefined) {
+      clearInterval(this.trendTimer);
+      this.trendTimer = undefined;
+    }
     super.disconnectedCallback();
   }
 
@@ -808,6 +824,9 @@ export class TetherPlcIde extends LitElement {
         return this.tasksPane();
       case 'watch':
         return this.watchPane();
+      case 'alarms':
+        this.ensureTrendTimer();
+        return this.alarmsPane();
       case 'deploy':
         return this.deployPane();
     }
@@ -1667,6 +1686,305 @@ export class TetherPlcIde extends LitElement {
                   No plc.* entries in the connected catalog. Watch binds to the tether_io catalog
                   published by the PLC bridge.
                 </p>`
+        }
+      </div>
+    `;
+  }
+
+  // ---- alarms --------------------------------------------------------
+
+  private static readonly SEV_NAMES = ['verbose', 'info', 'warning', 'error', 'critical'];
+  private static readonly EV_STATE = ['?', 'raised', 'cleared', 'confirmed'];
+
+  private sevName(sev: number): string {
+    return TetherPlcIde.SEV_NAMES[sev] ?? `sev${sev}`;
+  }
+
+  private evStateName(st: number): string {
+    return TetherPlcIde.EV_STATE[st] ?? `st${st}`;
+  }
+
+  private fmtNs(ns: bigint): string {
+    const ms = Number(ns / 1000000n);
+    const s = Math.floor(ms / 1000);
+    const m = Math.floor(s / 60);
+    const h = Math.floor(m / 60);
+    const pad = (v: number) => String(v).padStart(2, '0');
+    return `${pad(h)}:${pad(m % 60)}:${pad(s % 60)}.${String(ms % 1000).padStart(3, '0')}`;
+  }
+
+  private confirmAlarm = async (id: number): Promise<void> => {
+    await this.ctlOp(`ack #${id}`, () => this.ctl.evlogConfirm(id));
+    void this.refreshCtl();
+  };
+
+  private armHist = async (): Promise<void> => {
+    const names = this.histNamesInput
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, 8);
+    if (!names.length) {
+      this.flash('hist: enter comma-separated symbol names');
+      return;
+    }
+    try {
+      const total = await this.ctl.histConf(names);
+      this.trendSamples = [];
+      this.trendLastSeq = 0n;
+      this.trendCh = 0;
+      await this.refreshCtl();
+      this.flash(`hist armed: ${names.length} ch, ${total} B frame`);
+    } catch (e) {
+      this.ctlErr = `hist: ${e instanceof CtlError ? e.message : e}`;
+      this.requestUpdate();
+    }
+  };
+
+  /** byte range of channel i inside a packed trace frame. */
+  private trendChanRange(): { off: number; len: number } | undefined {
+    const chs = this.histChans;
+    if (!chs?.length) return undefined;
+    const i = Math.min(this.trendCh, chs.length - 1);
+    let off = 0;
+    for (let k = 0; k < i; k++) off += chs[k]!.len;
+    return { off, len: chs[i]!.len };
+  }
+
+  private trendCodecFor(ch: HistChannel | undefined): ScalarCodec {
+    if (!ch) return defaultCodec(4);
+    const opts = codecsForSize(ch.len);
+    if (this.trendCodecLabel) {
+      const pick = opts.find((c) => c.label === this.trendCodecLabel);
+      if (pick) return pick;
+    }
+    /* prefer a float codec for 4/8-byte channels — historian feeds
+       are usually REAL/LREAL process values */
+    const flt = opts.find((c) => c.label === 'REAL' || c.label === 'LREAL');
+    return flt ?? defaultCodec(ch.len);
+  }
+
+  /** poll TRACE_READ for new frames; decode the selected channel. */
+  private trendTick = async (): Promise<void> => {
+    if (this.pane !== 'alarms' || !this.histChans?.length || !this.ctlOk) {
+      if (this.trendTimer !== undefined) {
+        clearInterval(this.trendTimer);
+        this.trendTimer = undefined;
+      }
+      return;
+    }
+    const range = this.trendChanRange();
+    if (!range) return;
+    try {
+      const r = await this.ctl.dbgTraceRead(this.trendLastSeq, 256);
+      if (!r.frames.length) {
+        this.requestUpdate();
+        return;
+      }
+      const codec = this.trendCodecFor(this.histChans[this.trendCh]);
+      for (const f of r.frames) {
+        this.trendLastSeq = f.seq + 1n;
+        if (f.data.length < range.off + range.len) continue;
+        const bytes = f.data.slice(range.off, range.off + range.len);
+        const v = Number(codec.decode(bytes));
+        if (Number.isFinite(v)) {
+          this.trendSamples.push(v);
+          if (this.trendSamples.length > 240) this.trendSamples.shift();
+        }
+      }
+      this.requestUpdate();
+    } catch {
+      /* transient ctl error — next tick retries */
+    }
+  };
+
+  private ensureTrendTimer(): void {
+    if (this.trendTimer !== undefined) return;
+    this.trendTimer = window.setInterval(() => void this.trendTick(), 700);
+  }
+
+  private alarmsPane(): TemplateResult {
+    const st = this.alarmStats;
+    const live = this.alarms ?? [];
+    const hist = this.alarmHist ?? [];
+    const chans = this.histChans ?? [];
+    return html`
+      <div class="tile-scroll">
+        <h3>
+          Alarms
+          ${
+            st
+              ? html`<span class="plc-dim">
+                  live ${st.live} · raised ${st.raised} · cleared ${st.cleared}
+                  · confirmed ${st.confirmed}${st.dropped ? ` · dropped ${st.dropped}` : ''}
+                </span>`
+              : nothing
+          }
+        </h3>
+        ${
+          this.ctlOk === false
+            ? html`<p class="plc-dim">ctl unreachable — connect on the Deploy pane.</p>`
+            : nothing
+        }
+        <h4>Live events</h4>
+        ${
+          live.length
+            ? html`
+                <table class="plc-table">
+                  <thead>
+                    <tr>
+                      <th>id</th><th>sev</th><th>state</th><th>event</th>
+                      <th>text</th><th>raised</th><th>ack</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${live.map(
+                      (e) => html`
+                        <tr>
+                          <td>#${e.id}</td>
+                          <td>${this.sevName(e.severity)}</td>
+                          <td>${this.evStateName(e.state)}</td>
+                          <td>cls${e.cls}/evt${e.eventId}</td>
+                          <td>${e.text}</td>
+                          <td>${this.fmtNs(e.raisedNs)}</td>
+                          <td>
+                            ${
+                              e.state === 1
+                                ? html`<button
+                                      class="chip-btn"
+                                      @click=${() => void this.confirmAlarm(e.id)}
+                                    >
+                                      ack
+                                    </button>`
+                                : '—'
+                            }
+                          </td>
+                        </tr>
+                      `,
+                    )}
+                  </tbody>
+                </table>
+              `
+            : html`<p class="plc-dim">no live events</p>`
+        }
+        <h4>History <span class="plc-dim">last transitions</span></h4>
+        ${
+          hist.length
+            ? html`
+                <table class="plc-table">
+                  <thead>
+                    <tr>
+                      <th>time</th><th>id</th><th>state</th><th>sev</th>
+                      <th>text</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${[...hist].reverse().map(
+                      (r) => html`
+                        <tr>
+                          <td>${this.fmtNs(r.tsNs)}</td>
+                          <td>#${r.journalId}</td>
+                          <td>${this.evStateName(r.state)}</td>
+                          <td>${this.sevName(r.severity)}</td>
+                          <td>${r.text}</td>
+                        </tr>
+                      `,
+                    )}
+                  </tbody>
+                </table>
+              `
+            : html`<p class="plc-dim">no transitions recorded</p>`
+        }
+        <h4>
+          Historian
+          <span class="plc-dim">named channels → flight-recorder ring</span>
+        </h4>
+        <div class="plc-ops">
+          <input
+            class="fbd-in wide"
+            placeholder="symbols e.g. temp.sp, pv, cnt"
+            .value=${this.histNamesInput}
+            @input=${(e: Event) =>
+              (this.histNamesInput = (e.target as HTMLInputElement).value)}
+            @keydown=${(e: KeyboardEvent) => {
+              if (e.key === 'Enter') void this.armHist();
+            }}
+          />
+          <button class="chip-btn" @click=${() => void this.armHist()}>arm</button>
+          <button
+            class="chip-btn"
+            ?disabled=${!chans.length}
+            @click=${() => void this.ctl.dbgTraceClear().then(() => this.refreshCtl())}
+          >
+            clear ring
+          </button>
+        </div>
+        ${
+          chans.length
+            ? html`
+                <table class="plc-table">
+                  <thead>
+                    <tr><th>channel</th><th>off</th><th>len</th></tr>
+                  </thead>
+                  <tbody>
+                    ${chans.map(
+                      (c, i) => html`
+                        <tr>
+                          <td>${c.name}</td>
+                          <td>${c.off.toString()}</td>
+                          <td>${c.len}</td>
+                          <td>
+                            <input
+                              type="radio"
+                              name="trendch"
+                              .checked=${this.trendCh === i}
+                              @change=${() => {
+                                this.trendCh = i;
+                                this.trendSamples = [];
+                                this.trendLastSeq = 0n;
+                              }}
+                            />
+                          </td>
+                        </tr>
+                      `,
+                    )}
+                  </tbody>
+                </table>
+                <div class="plc-ops">
+                  <span class="plc-dim">decode</span>
+                  ${codecsForSize(chans[this.trendCh]?.len ?? 0).map(
+                    (c) => html`
+                      <button
+                        class="chip-btn ${
+                          this.trendCodecFor(chans[this.trendCh])
+                            .label === c.label
+                            ? 'active'
+                            : ''
+                        }"
+                        @click=${() => {
+                          this.trendCodecLabel = c.label;
+                          this.trendSamples = [];
+                          this.trendLastSeq = 0n;
+                          this.requestUpdate();
+                        }}
+                      >
+                        ${c.label}
+                      </button>
+                    `,
+                  )}
+                </div>
+                <div class="plc-trend">
+                  ${sparkline(this.trendSamples, 320, 48)}
+                  <span class="plc-dim">
+                    ${chans[this.trendCh]?.name ?? ''}
+                    ${this.trendSamples.length
+                      ? `= ${this.trendSamples[this.trendSamples.length - 1]}`
+                      : '—'}
+                    (${this.trendSamples.length} samples)
+                  </span>
+                </div>
+              `
+            : html`<p class="plc-dim">no historian channels armed</p>`
         }
       </div>
     `;
@@ -3129,10 +3447,17 @@ export class TetherPlcIde extends LitElement {
         this.watchVals.set(h, vals);
         this.requestUpdate();
       }
+      if (e.type === EV.USER && e.payload.length >= 20) {
+        const d = new DataView(e.payload.buffer, e.payload.byteOffset);
+        this.flash(
+          `event #${d.getUint32(0, true)} state=${d.getUint32(4, true)} ` +
+          `sev=${d.getUint32(16, true)}`);
+      }
       if (
         e.type === EV.PROG_TRANSITION ||
         e.type === EV.FAULT ||
-        e.type === EV.DBG_BREAK
+        e.type === EV.DBG_BREAK ||
+        e.type === EV.USER
       ) {
         if (this.evTimer === undefined)
           this.evTimer = window.setTimeout(() => {
@@ -3154,7 +3479,9 @@ export class TetherPlcIde extends LitElement {
       this.openEvents();
       try {
         [this.prog, this.rt, this.retain, this.dbg, this.forces,
-          this.breaks, this.trace, this.watches, this.shadow] =
+          this.breaks, this.trace, this.watches, this.shadow,
+          this.alarms, this.alarmStats, this.alarmHist,
+          this.histChans] =
           await Promise.all([
             this.ctl.progStatus().catch(() => undefined),
             this.ctl.rtStatus().catch(() => undefined),
@@ -3165,6 +3492,10 @@ export class TetherPlcIde extends LitElement {
             this.ctl.dbgTraceStatus().catch(() => undefined),
             this.ctl.dbgWatchList().catch(() => undefined),
             this.ctl.shadowStatus().catch(() => undefined),
+            this.ctl.evlogList().catch(() => undefined),
+            this.ctl.evlogStats().catch(() => undefined),
+            this.ctl.evlogHistory(24).catch(() => undefined),
+            this.ctl.histList().catch(() => undefined),
           ]);
         this.shadowDiffs = this.shadow?.loaded
           ? await this.ctl.shadowCompare().catch(() => undefined)

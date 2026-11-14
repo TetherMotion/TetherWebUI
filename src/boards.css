@@ -1780,3 +1780,12 @@ tile-frame {
   font-size: 11px;
   color: var(--text-muted);
 }
+
+.plc-trend {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+}

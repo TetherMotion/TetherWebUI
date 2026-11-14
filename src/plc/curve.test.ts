@@ -226,7 +226,7 @@ describe('curve codegen', () => {
     const profId = net.blocks.find((b) => b.type_ref === 'FB_AtcProfile')!.id;
     const runId = net.blocks.find((b) => b.name === 'Run' && b.role === 'in')!.id;
     // duty chain: ctl.Out -> pwm.Duty -> Q -> Heater var; Execute mirrors Run
-    const has = (srcB: number, srcP: string, dstB: number, dstP: string) =>
+    const has = (srcB: number, srcP: string | number, dstB: number, dstP: string | number) =>
       net.wires.some(
         (w) =>
           w.src.block === srcB &&

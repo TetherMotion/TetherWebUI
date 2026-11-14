@@ -71,6 +71,13 @@ export const CTL = {
   RETAIN_FLUSH: 0x0602,
   RETAIN_CLEAR: 0x0603,
   RETAIN_DUMP: 0x0604,
+  EVTLOG_LIST: 0x0f01,
+  EVTLOG_QUERY: 0x0f02,
+  EVTLOG_STATS: 0x0f03,
+  EVTLOG_HISTORY: 0x0f04,
+  EVTLOG_CONFIRM: 0x0f05,
+  HIST_CONF: 0x0f10,
+  HIST_LIST: 0x0f11,
 } as const;
 
 const F_ERROR = 1 << 15;
@@ -81,6 +88,7 @@ export const EV = {
   FAULT: 0x0e02,
   DBG_BREAK: 0x0e03,
   DBG_WATCH: 0x0e04,
+  USER: 0x0e05,
 } as const;
 
 export interface CtlEvent {
@@ -183,6 +191,47 @@ export interface DbgTraceFrame {
   seq: bigint;
   ts: bigint;
   data: Uint8Array;
+}
+
+/** live alarm/event journal entry (EVTLOG_LIST/QUERY record) */
+export interface EvlogInfo {
+  id: number;
+  cls: number;
+  eventId: number;
+  severity: number;   // 0 verbose .. 4 critical
+  state: number;      // 1 raised, 2 cleared, 3 confirmed
+  args: number;
+  raisedNs: bigint;
+  clearedNs: bigint;
+  confirmedNs: bigint;
+  text: string;
+}
+
+/** append-only transition record (EVTLOG_HISTORY) */
+export interface EvlogRecord {
+  tsNs: bigint;
+  journalId: number;
+  cls: number;
+  eventId: number;
+  severity: number;
+  state: number;
+  text: string;
+}
+
+/** journal counters (EVTLOG_STATS) */
+export interface EvlogStats {
+  live: number;
+  raised: number;
+  cleared: number;
+  confirmed: number;
+  dropped: number;
+}
+
+/** named historian channel (HIST_LIST) */
+export interface HistChannel {
+  name: string;
+  off: bigint;
+  len: number;
 }
 
 /** one object-dictionary row (OD_LIST) — access 0 ro, 1 rw, 2 wo */
@@ -1060,5 +1109,145 @@ export class PlcCtl {
     }
     const r3 = await this.call(CTL.DEPLOY_COMMIT, u64(upid));
     return [...r3.payload.subarray(1, 17)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // ---- event log (0x0F0x) --------------------------------------------
+
+  /** live alarm journal entries, oldest slot order. cap ≤ 128. */
+  evlogList(cap = 128): Promise<EvlogInfo[]> {
+    const p = u32(cap);
+    return this.call(CTL.EVTLOG_LIST, p).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      const n = d.getUint32(4, true);   // second u32 = entries shown
+      const out: EvlogInfo[] = [];
+      let o = 8;
+      for (let i = 0; i < n && o + 49 <= r.payload.length; i++) {
+        const tl = r.payload[o + 48] ?? 0;
+        out.push({
+          id: d.getUint32(o, true),
+          cls: d.getUint32(o + 4, true),
+          eventId: d.getUint32(o + 8, true),
+          severity: d.getUint32(o + 12, true),
+          state: d.getUint32(o + 16, true),
+          args: d.getUint32(o + 20, true),
+          raisedNs: d.getBigUint64(o + 28, true),
+          clearedNs: d.getBigUint64(o + 36, true),
+          confirmedNs: d.getBigUint64(o + 44, true),
+          text: new TextDecoder().decode(
+            r.payload.subarray(o + 49, o + 49 + tl)),
+        });
+        o += 49 + tl;
+      }
+      return out;
+    });
+  }
+
+  /** single journal entry by id; throws CtlError when unknown. */
+  evlogQuery(id: number): Promise<EvlogInfo> {
+    return this.call(CTL.EVTLOG_QUERY, u32(id)).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      const tl = r.payload[48] ?? 0;
+      return {
+        id: d.getUint32(0, true),
+        cls: d.getUint32(4, true),
+        eventId: d.getUint32(8, true),
+        severity: d.getUint32(12, true),
+        state: d.getUint32(16, true),
+        args: d.getUint32(20, true),
+        raisedNs: d.getBigUint64(28, true),
+        clearedNs: d.getBigUint64(36, true),
+        confirmedNs: d.getBigUint64(44, true),
+        text: new TextDecoder().decode(
+          r.payload.subarray(49, 49 + tl)),
+      };
+    });
+  }
+
+  evlogStats(): Promise<EvlogStats> {
+    return this.call(CTL.EVTLOG_STATS).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      return {
+        live: d.getUint32(0, true),
+        raised: d.getUint32(4, true),
+        cleared: d.getUint32(8, true),
+        confirmed: d.getUint32(12, true),
+        dropped: d.getUint32(16, true),
+      };
+    });
+  }
+
+  /** append-only transition history, oldest→newest, ≤512 records. */
+  evlogHistory(cap = 64): Promise<EvlogRecord[]> {
+    return this.call(CTL.EVTLOG_HISTORY, u32(cap)).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      const n = d.getUint32(0, true);
+      const out: EvlogRecord[] = [];
+      let o = 4;
+      for (let i = 0; i < n && o + 29 <= r.payload.length; i++) {
+        const tl = r.payload[o + 28] ?? 0;
+        out.push({
+          tsNs: d.getBigUint64(o, true),
+          journalId: d.getUint32(o + 8, true),
+          cls: d.getUint32(o + 12, true),
+          eventId: d.getUint32(o + 16, true),
+          severity: d.getUint32(o + 20, true),
+          state: d.getUint32(o + 24, true),
+          text: new TextDecoder().decode(
+            r.payload.subarray(o + 29, o + 29 + tl)),
+        });
+        o += 29 + tl;
+      }
+      return out;
+    });
+  }
+
+  /** acknowledge/confirm a live alarm (engineer role). */
+  evlogConfirm(id: number): Promise<CtlReply> {
+    return this.call(CTL.EVTLOG_CONFIRM, u32(id));
+  }
+
+  // ---- historian (0x0F1x) --------------------------------------------
+
+  /** arm the flight-recorder ring with named symmap channels.
+      ≤8 names, each resolved via the package symbol map; a zero
+      width takes the symbol's natural size (≤8 B, frame ≤64 B). */
+  histConf(names: string[]): Promise<number> {
+    let total = 4;
+    for (const nm of names) total += 2 + nm.length + 8;
+    const p = new Uint8Array(total);
+    const d = new DataView(p.buffer);
+    d.setUint32(0, names.length, true);
+    let o = 4;
+    for (const nm of names) {
+      const nb = new TextEncoder().encode(nm);
+      d.setUint16(o, nb.length, true); o += 2;
+      p.set(nb, o); o += nb.length;
+      d.setUint32(o, 0, true); o += 4;   // len 0 = natural width
+      d.setUint32(o, 0, true); o += 4;   // pad
+    }
+    return this.call(CTL.HIST_CONF, p).then((r) =>
+      new DataView(r.payload.buffer, r.payload.byteOffset)
+        .getUint32(0, true));
+  }
+
+  histList(): Promise<HistChannel[]> {
+    return this.call(CTL.HIST_LIST).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      const n = d.getUint32(0, true);
+      const out: HistChannel[] = [];
+      let o = 4;
+      for (let i = 0; i < n && o + 2 <= r.payload.length; i++) {
+        const nl = d.getUint16(o, true); o += 2;
+        if (o + nl + 12 > r.payload.length) break;
+        out.push({
+          name: new TextDecoder().decode(
+            r.payload.subarray(o, o + nl)),
+          off: d.getBigUint64(o + nl, true),
+          len: d.getUint32(o + nl + 8, true),
+        });
+        o += nl + 12;
+      }
+      return out;
+    });
   }
 }
