@@ -487,7 +487,8 @@ describe('LD body import', () => {
     expect(w.src.port).toBe('OUT');
     // mergeWires groups by source — find the dst entry for block 7
     const d7 = net.wires.flatMap((w) => w.dsts).find((d) => d.block === 7)!;
-    expect(d7.port).toBe(1); // formalParameter IN1 → pin index 1
+    // IEC operand names: ADD IN1 is the first operand → pin index 0
+    expect(d7.port).toBe(0);
   });
 
   it('extracts nested <type> elements on interface vars', () => {

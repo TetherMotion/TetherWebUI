@@ -107,6 +107,64 @@ function pinIndex(pin: string): number | undefined {
   return Number.isInteger(i) && pin.slice(2) !== '' ? i : undefined;
 }
 
+/**
+ * TC6 `formalParameter` operand name → positional in-index for
+ * operator blocks (mirrors plcopen-io/src/opname.rs). IEC/Beremiz
+ * conventions: arith ops are 1-based (`IN1`, `IN2`, …), `SEL` is `G`
+ * plus 0-based `IN0`/`IN1`, `MUX` is `K` plus `IN0`…, `LIMIT` is
+ * `MN`/`IN`/`MX`, unary ops and `X_TO_Y` casts take `IN`.
+ */
+function opDstIndex(typeRef: string, formal: string): number | undefined {
+  const t = typeRef.toUpperCase();
+  const n = formal.toUpperCase();
+  const arith =
+    OPERATORS.has(t) &&
+    !['SEL', 'MUX', 'LIMIT', 'NOT', 'MOVE', 'ABS'].includes(t) &&
+    !t.includes('_TO_');
+  if (arith) {
+    // tolerate a stray IN0 (older positional exports) as pin 0
+    const k = pinIndex(n);
+    return k === undefined ? undefined : Math.max(0, k - 1);
+  }
+  if (t === 'SEL' || t === 'MUX') {
+    if (n === (t === 'SEL' ? 'G' : 'K')) return 0;
+    const k = pinIndex(n);
+    return k === undefined ? undefined : k + 1;
+  }
+  if (t === 'LIMIT') return { MN: 0, IN: 1, MX: 2 }[n];
+  if (t === 'NOT' || t === 'MOVE' || t === 'ABS' || t.includes('_TO_')) {
+    return n === 'IN' || n === 'IN0' ? 0 : undefined;
+  }
+  return undefined;
+}
+
+/** Positional in-index → IEC `formalParameter` name for export. */
+function opInName(typeRef: string, index: number): string | undefined {
+  const t = typeRef.toUpperCase();
+  const arith =
+    OPERATORS.has(t) &&
+    !['SEL', 'MUX', 'LIMIT', 'NOT', 'MOVE', 'ABS'].includes(t) &&
+    !t.includes('_TO_');
+  if (arith) return `IN${index + 1}`;
+  if (t === 'SEL') return index === 0 ? 'G' : `IN${index - 1}`;
+  if (t === 'MUX') return index === 0 ? 'K' : `IN${index - 1}`;
+  if (t === 'LIMIT') return ['MN', 'IN', 'MX'][index];
+  if (t === 'NOT' || t === 'MOVE' || t === 'ABS' || t.includes('_TO_')) {
+    return index === 0 ? 'IN' : undefined;
+  }
+  return undefined;
+}
+
+/** Dst pin for a `<variable formalParameter>` on block `b`. */
+function dstPort(b: Block, pin: string | undefined): number | string {
+  if (pin === undefined || pin === '') return 0;
+  if (b.kind === 'operator') {
+    const i = opDstIndex(b.type_ref, pin);
+    if (i !== undefined) return i;
+  }
+  return pinIndex(pin) ?? pin;
+}
+
 export function importPlcopenXml(xml: string): PlcopenImport {
   const doc = new DOMParser().parseFromString(xml, 'application/xml');
   const root = doc.documentElement;
@@ -228,8 +286,9 @@ export function importPlcopenXml(xml: string): PlcopenImport {
     bodyConns: Map<number, string>,
   ): void => {
     const negated = attr(cpi, 'negated') === 'true';
+    const dp = dstPort(b, pin);
     if (negated) {
-      const i = pin !== undefined ? pinIndex(pin) : pin === undefined ? 0 : undefined;
+      const i = typeof dp === 'number' ? dp : pin !== undefined ? pinIndex(pin) : 0;
       if (i !== undefined && !b.negated.includes(i)) b.negated.push(i);
     }
     let hasConn = false;
@@ -241,7 +300,7 @@ export function importPlcopenXml(xml: string): PlcopenImport {
             block: num(attr(c, 'refLocalId')),
             port: attr(c, 'formalParameter') ?? 0,
           },
-          dst: { block: b.id, port: pin ? (pinIndex(pin) ?? pin) : 0 },
+          dst: { block: b.id, port: dp },
           probe: attr(c, 'probe') === 'true' || tetherAttr(c, 'probe') === 'true',
           wireId: tetherAttr(c, 'wire') !== undefined ? num(tetherAttr(c, 'wire')) : undefined,
           negated,
@@ -937,7 +996,15 @@ function exportBlock(x: Xml, net: Network, b: Block, byDst: Map<string, Wire[]>)
     x.open('inputVariables');
     for (const pin of [...ins].sort()) {
       const idx = pin.startsWith('#') ? pin.slice(1) : undefined;
-      x.open('variable', [['formalParameter', idx !== undefined ? `IN${idx}` : pin]]);
+      // operator blocks emit IEC operand names (IN1/IN2 arith,
+      // G/IN0/IN1 SEL, …); other kinds keep the IN{idx} convention
+      const formal =
+        idx !== undefined && b.kind === 'operator'
+          ? (opInName(b.type_ref, Number(idx)) ?? `IN${idx}`)
+          : idx !== undefined
+            ? `IN${idx}`
+            : pin;
+      x.open('variable', [['formalParameter', formal]]);
       const neg = idx !== undefined && b.negated.includes(Number(idx));
       x.open('connectionPointIn', neg ? [['negated', 'true']] : []);
       const ws = byDst.get(`${b.id}|${pin}`);
