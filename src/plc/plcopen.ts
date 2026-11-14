@@ -266,15 +266,53 @@ export function importPlcopenXml(xml: string): PlcopenImport {
           negated: [],
           comment: '',
           role,
+          // in/out/inOutVariable elements are data taps — in ladder
+          // bodies wires carry values, not gated power flow
+          flow: 'data',
         };
         const friendly = tetherAttr(el, 'name') ?? attr(el, 'name');
         if (friendly !== undefined) b.name = friendly;
-        if (attr(el, 'negated') === 'true') b.negated.push(0);
+        if (attr(el, 'negated') === 'true' || attr(el, 'negatedIn') === 'true') b.negated.push(0);
         for (const c of children(el)) {
           if (local(c) === 'connectionPointIn') readBodyCpi(c, b, undefined);
           else if (local(c) === 'expression' || local(c) === 'connectionPointOut') {
             const holder = local(c) === 'connectionPointOut' ? descendant(c, 'expression') : c;
             const t = (holder?.textContent ?? '').trim();
+            if (t) setVarName(b, t);
+          }
+        }
+        net.blocks.push(b);
+      } else if (tag === 'contact' || tag === 'coil') {
+        // roundtrip ladder nets (tether:network kind=ladder inside
+        // <FBD>) carry IEC LD power elements — same shape as importLd
+        if (net.kind !== 'ld') {
+          notes.push(`<${tag}> outside LD body not imported`);
+          return;
+        }
+        const b: Block = {
+          id: nextId(el),
+          kind: 'variable',
+          type_ref: '',
+          pos: posOf(el),
+          params: {},
+          exec_order: 0,
+          negated: attr(el, 'negated') === 'true' ? [0] : [],
+          comment: '',
+          role: tag === 'contact' ? 'in' : 'out',
+        };
+        for (const a of ['storage', 'edge']) {
+          const v = attr(el, a);
+          if (v !== undefined && v !== 'none') {
+            notes.push(
+              `LD ${tag} ${a}="${v}" not imported (flow model supports none only)`,
+            );
+          }
+        }
+        for (const c of children(el)) {
+          const ct = local(c);
+          if (ct === 'connectionPointIn') readBodyCpi(c, b, undefined);
+          else if (ct === 'variable' || ct === 'expression') {
+            const t = (c.textContent ?? '').trim();
             if (t) setVarName(b, t);
           }
         }
@@ -344,7 +382,25 @@ export function importPlcopenXml(xml: string): PlcopenImport {
       if (tag === 'leftPowerRail' || tag === 'rightPowerRail' || tag === 'powerRail') {
         const id = num(attr(el, 'localId'), -1);
         if (id >= 0) rails.add(id);
-      } else if (tag === 'contact' || tag === 'coil') {
+      } else if (
+        tag === 'contact' ||
+        tag === 'coil' ||
+        tag === 'inVariable' ||
+        tag === 'outVariable' ||
+        tag === 'inOutVariable'
+      ) {
+        // contact/coil are power-flow elements; in/out/inOutVariable
+        // are data taps (flow:'data') lowered like FBD vars
+        const data = tag === 'inVariable' || tag === 'outVariable' || tag === 'inOutVariable';
+        const role: VarRole = data
+          ? tag === 'inVariable'
+            ? 'in'
+            : tag === 'outVariable'
+              ? 'out'
+              : 'in_out'
+          : tag === 'contact'
+            ? 'in'
+            : 'out';
         const b: Block = {
           id: nextId(el),
           kind: 'variable',
@@ -352,16 +408,20 @@ export function importPlcopenXml(xml: string): PlcopenImport {
           pos: posOf(el),
           params: {},
           exec_order: 0,
-          negated: attr(el, 'negated') === 'true' ? [0] : [],
+          negated:
+            attr(el, 'negated') === 'true' || attr(el, 'negatedIn') === 'true' ? [0] : [],
           comment: '',
-          role: tag === 'contact' ? 'in' : 'out',
+          role,
+          ...(data ? { flow: 'data' as const } : {}),
         };
-        for (const a of ['storage', 'edge']) {
-          const v = attr(el, a);
-          if (v !== undefined && v !== 'none') {
-            notes.push(
-              `LD ${tag} ${a}="${v}" not imported (flow model supports none only)`,
-            );
+        if (!data) {
+          for (const a of ['storage', 'edge']) {
+            const v = attr(el, a);
+            if (v !== undefined && v !== 'none') {
+              notes.push(
+                `LD ${tag} ${a}="${v}" not imported (flow model supports none only)`,
+              );
+            }
           }
         }
         for (const c of children(el)) {
@@ -375,7 +435,28 @@ export function importPlcopenXml(xml: string): PlcopenImport {
         }
         net.blocks.push(b);
       } else if (tag === 'block') {
-        notes.push('LD <block> element not imported (FBs in rungs unsupported)');
+        // Beremiz LD embeds FBD-style blocks (ADD/SEL/FBs) — same
+        // import as the FBD path, conns land in noBodyConns
+        const tn = attr(el, 'typeName') ?? '';
+        const inst = attr(el, 'instanceName');
+        const isOp = OPERATORS.has(tn.toUpperCase()) || tn.toUpperCase().includes('_TO_');
+        const b: Block = {
+          id: nextId(el),
+          kind: inst ? 'fb' : isOp ? 'operator' : 'function',
+          type_ref: tn,
+          ...(inst !== undefined ? { instance: inst } : {}),
+          pos: posOf(el),
+          params: {},
+          exec_order: num(attr(el, 'executionOrderId')),
+          negated: [],
+          comment: '',
+        };
+        for (const c of descendants(el, 'variable')) {
+          const pin = attr(c, 'formalParameter');
+          const cpi = child(c, 'connectionPointIn');
+          if (cpi) readCpi(cpi, b, pin, noBodyConns);
+        }
+        net.blocks.push(b);
       }
     }
     if (!netIsEmpty(net)) pou.networks.push(net);
@@ -767,7 +848,7 @@ function exportNetwork(x: Xml, net: Network): void {
 
 function exportBlock(x: Xml, net: Network, b: Block, byDst: Map<string, Wire[]>): void {
   if (b.kind === 'variable') {
-    exportVarBlock(x, b, byDst);
+    exportVarBlock(x, net, b, byDst);
     return;
   }
   if (b.kind === 'jump_target') {
@@ -839,9 +920,21 @@ function exportBlock(x: Xml, net: Network, b: Block, byDst: Map<string, Wire[]>)
   x.close('block');
 }
 
-function exportVarBlock(x: Xml, b: Block, byDst: Map<string, Wire[]>): void {
+function exportVarBlock(x: Xml, net: Network, b: Block, byDst: Map<string, Wire[]>): void {
   const role = b.role ?? 'in';
-  const tag = role === 'in' ? 'inVariable' : role === 'out' ? 'outVariable' : 'inOutVariable';
+  // ladder power elements (contacts/coils) export as IEC LD
+  // elements; data taps (flow=data) and all FBD vars keep the
+  // in/out/inOutVariable form
+  const power = net.kind === 'ld' && b.flow !== 'data';
+  const tag = power
+    ? role === 'in'
+      ? 'contact'
+      : 'coil'
+    : role === 'in'
+      ? 'inVariable'
+      : role === 'out'
+        ? 'outVariable'
+        : 'inOutVariable';
   const nameExpr = b.at ?? b.name ?? '';
   const a: [string, string][] = [['localId', String(b.id)]];
   if (b.negated.length) a.push(['negated', 'true']);
@@ -862,17 +955,30 @@ function exportVarBlock(x: Xml, b: Block, byDst: Map<string, Wire[]>): void {
     }
     x.close('connectionPointIn');
   }
-  if (role !== 'out') {
-    x.open('connectionPointOut');
-    x.open('expression');
+  if (power) {
+    // IEC LD elements reference their variable in a <variable>
+    // child; contacts keep an (empty) out connection-point marker,
+    // coils have none
+    if (role !== 'out') {
+      x.open('connectionPointOut');
+      x.close('connectionPointOut');
+    }
+    x.open('variable');
     x.text(nameExpr);
-    x.close('expression');
-    x.close('connectionPointOut');
-  }
-  if (role === 'out') {
-    x.open('expression');
-    x.text(nameExpr);
-    x.close('expression');
+    x.close('variable');
+  } else {
+    if (role !== 'out') {
+      x.open('connectionPointOut');
+      x.open('expression');
+      x.text(nameExpr);
+      x.close('expression');
+      x.close('connectionPointOut');
+    }
+    if (role === 'out') {
+      x.open('expression');
+      x.text(nameExpr);
+      x.close('expression');
+    }
   }
   x.close(tag);
 }

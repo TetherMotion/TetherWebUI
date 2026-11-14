@@ -77,6 +77,12 @@ export interface Block {
   negated: number[];
   comment: string;
   role?: VarRole;
+  /**
+   * Ladder-only flow class. Absent = power flow (IEC contact/coil —
+   * BOOL gated by rung flow). 'data' = PLCopen in/out/inOutVariable
+   * element: typed data tap lowered like an FBD variable block.
+   */
+  flow?: 'data';
   name?: string;
   at?: string;
   /**

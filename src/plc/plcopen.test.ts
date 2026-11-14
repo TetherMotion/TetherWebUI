@@ -415,4 +415,78 @@ describe('LD body import', () => {
       n.wires.map((w) => `${w.src.block}->${w.dsts.map((d) => d.block).join(',')}`).sort();
     expect(edges(n2)).toEqual(edges(n1));
   });
+
+  // Beremiz-style LD: in/out/inOutVariable data taps plus an
+  // embedded operator block — wires carry values, not gated flow.
+  const LD_DATA_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://www.plcopen.org/xml/tc6_0201">
+  <contentHeader name="lddata"/>
+  <types/>
+  <pous>
+    <pou name="LdData" pouType="program">
+      <interface/>
+      <body>
+        <LD>
+          <inVariable localId="3" height="30" width="34">
+            <position x="100" y="50"/>
+            <connectionPointOut><relPosition x="34" y="15"/></connectionPointOut>
+            <expression>Reset</expression>
+          </inVariable>
+          <inOutVariable localId="4" height="30" width="34">
+            <position x="200" y="50"/>
+            <connectionPointIn><relPosition x="0" y="15"/><connection refLocalId="7" formalParameter="OUT"/></connectionPointIn>
+            <connectionPointOut><relPosition x="34" y="15"/></connectionPointOut>
+            <expression>Cnt</expression>
+          </inOutVariable>
+          <outVariable localId="2" height="30" width="34">
+            <position x="300" y="50"/>
+            <connectionPointIn><relPosition x="0" y="15"/><connection refLocalId="4"/></connectionPointIn>
+            <expression>Out</expression>
+          </outVariable>
+          <block localId="7" typeName="ADD" height="80" width="67">
+            <position x="150" y="50"/>
+            <inputVariables>
+              <variable formalParameter="IN1">
+                <connectionPointIn><relPosition x="0" y="35"/><connection refLocalId="4"/></connectionPointIn>
+              </variable>
+              <variable formalParameter="IN2">
+                <connectionPointIn><relPosition x="0" y="65"/></connectionPointIn>
+              </variable>
+            </inputVariables>
+            <inOutVariables/>
+            <outputVariables>
+              <variable formalParameter="OUT">
+                <connectionPointOut><relPosition x="67" y="35"/></connectionPointOut>
+              </variable>
+            </outputVariables>
+          </block>
+        </LD>
+      </body>
+    </pou>
+  </pous>
+</project>`;
+
+  it('imports LD data taps as flow=data variable blocks', () => {
+    const { project, notes } = importPlcopenXml(LD_DATA_XML);
+    expect(notes.filter((n) => n.includes('not imported'))).toHaveLength(0);
+    const net = project.pous[0]!.networks[0]!;
+    expect(net.kind).toBe('ld');
+    const vars = net.blocks.filter((b) => b.kind === 'variable');
+    expect(vars).toHaveLength(3);
+    for (const v of vars) expect(v.flow).toBe('data');
+    expect(vars.map((v) => v.role).sort()).toEqual(['in', 'in_out', 'out']);
+  });
+
+  it('imports embedded LD blocks with named-pin connections', () => {
+    const { project } = importPlcopenXml(LD_DATA_XML);
+    const net = project.pous[0]!.networks[0]!;
+    const add = net.blocks.find((b) => b.kind === 'operator')!;
+    expect(add.type_ref).toBe('ADD');
+    // SEL-style named ports survive as string port selectors
+    const w = net.wires.find((w) => w.src.block === 7)!;
+    expect(w.src.port).toBe('OUT');
+    // mergeWires groups by source — find the dst entry for block 7
+    const d7 = net.wires.flatMap((w) => w.dsts).find((d) => d.block === 7)!;
+    expect(d7.port).toBe(1); // formalParameter IN1 → pin index 1
+  });
 });
