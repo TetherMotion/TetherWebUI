@@ -678,6 +678,22 @@ test.describe('TetherPLC IDE — live runtime', () => {
                   unit: '°C',
                 },
               },
+              {
+                id: 't-trend1',
+                type: 'trend',
+                x: 4, y: 0, w: 8, h: 4,
+                bindings: [
+                  { entry: 'plc.POU1.pv' },
+                  { entry: 'plc.POU1.sp' },
+                  { entry: 'plc.POU1.u' },
+                ],
+                options: {
+                  labels: '["PV","SP","U"]',
+                  windowSec: 60,
+                  min: 0,
+                  max: 100,
+                },
+              },
             ],
           },
         ]),
@@ -696,6 +712,15 @@ test.describe('TetherPLC IDE — live runtime', () => {
     await expect(pt.locator('.fp-pv-val')).not.toHaveText('—');
     await expect(pt.locator('.fp-detail')).toContainText('seg');
     await expect(pt.locator('.fp-pv-inline b')).not.toHaveText('—');
+
+    /* trend tile: three pens bound to live program vars — legend shows
+       numeric values and at least one pen has enough samples to draw */
+    const tr = page.locator('tile-trend');
+    await expect(tr.locator('.trend-pen')).toHaveCount(3, { timeout: 60_000 });
+    await expect(tr.locator('.trend-pen b').first()).not.toHaveText('—', {
+      timeout: 60_000,
+    });
+    await expect(tr.locator('svg path')).not.toHaveCount(0, { timeout: 60_000 });
   });
 
   test('faceplate tile: loop panel binds plc.* roles; SP write drives PV', async ({
@@ -760,6 +785,13 @@ test.describe('TetherPLC IDE — live runtime', () => {
                   max: 200,
                 },
               },
+              {
+                id: 't-btn1',
+                type: 'bitbutton',
+                x: 6, y: 0, w: 2, h: 2,
+                bindings: [{ entry: 'plc.POU1.auto' }],
+                options: { label: 'AUTO', mode: 'toggle' },
+              },
             ],
           },
         ]),
@@ -794,5 +826,12 @@ test.describe('TetherPLC IDE — live runtime', () => {
       timeout: 60_000,
     });
     await expect(fp.locator('.fp-msg')).toContainText('SP');
+
+    /* bitbutton: toggle write to plc.POU1.auto (program never assigns
+       it, so the written 1 persists and the button shows ON) */
+    const btn = page.locator('tile-bitbutton .bitbtn');
+    await expect(btn).toBeEnabled({ timeout: 60_000 });
+    await btn.click();
+    await expect(btn).toHaveClass(/on/, { timeout: 30_000 });
   });
 });

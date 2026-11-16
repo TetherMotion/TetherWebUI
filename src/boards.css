@@ -2064,3 +2064,58 @@ tile-frame {
   color: var(--text-muted);
   line-height: 1.3;
 }
+
+/* ---- trend tile (multi-pen chart) ---- */
+.trend-svg {
+  width: 100%;
+  height: 110px;
+  display: block;
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 4px;
+}
+.trend-grid { stroke: var(--glass-border, #333); stroke-width: 0.5; }
+.trend-axis { fill: var(--text-muted); font-size: 7px; }
+.trend-th.warn { stroke: #fc4; stroke-width: 1; stroke-dasharray: 4 3; }
+.trend-th.crit { stroke: var(--danger, #f66); stroke-width: 1; stroke-dasharray: 2 2; }
+.trend-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 4px 2px 0;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.trend-pen { display: inline-flex; align-items: center; gap: 4px; }
+.trend-pen i {
+  width: 8px; height: 3px; border-radius: 1px; display: inline-block;
+}
+.trend-pen b { color: var(--text, #dde); font-weight: 600; }
+
+/* ---- bit button ---- */
+.bitbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  height: 100%;
+  min-height: 44px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  border: 1px solid var(--glass-border, #444);
+  border-radius: 8px;
+  background: var(--panel, #1a1d24);
+  color: var(--text, #dde);
+  cursor: pointer;
+  user-select: none;
+}
+.bitbtn:hover:not(:disabled) { border-color: var(--mint, #7f5); }
+.bitbtn:disabled { opacity: 0.4; cursor: default; }
+.bitbtn:active:not(:disabled) { background: rgba(127, 255, 170, 0.12); }
+.bitbtn.on { border-color: var(--mint, #7f5); color: var(--mint, #7f5); }
+.bitbtn-state {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--glass-border, #444);
+}
+.bitbtn.on .bitbtn-state { background: var(--mint, #7f5); }

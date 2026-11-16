@@ -7,3 +7,4 @@ import './tools';
 import './plc';
 import './faceplate';
 import './profile';
+import './hmi';

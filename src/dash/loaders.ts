@@ -13,6 +13,7 @@ const loadTools = () => import('../tiles/tools');
 const loadPlc = () => import('../tiles/plc');
 const loadFaceplate = () => import('../tiles/faceplate');
 const loadProfile = () => import('../tiles/profile');
+const loadHmi = () => import('../tiles/hmi');
 
 const TAG_LOADERS: Record<string, () => Promise<unknown>> = {
   // tiles/display.ts
@@ -60,6 +61,9 @@ const TAG_LOADERS: Record<string, () => Promise<unknown>> = {
   'tile-faceplate': loadFaceplate,
   // tiles/profile.ts
   'tile-profile': loadProfile,
+  // tiles/hmi.ts
+  'tile-trend': loadHmi,
+  'tile-bitbutton': loadHmi,
 };
 
 /** In-flight module loads, deduped by loader so one import serves all tags in a module. */

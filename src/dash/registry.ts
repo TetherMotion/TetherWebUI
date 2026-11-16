@@ -573,6 +573,62 @@ export const TILE_SPECS: TileSpec[] = [
     ],
   },
 
+  {
+    type: 'trend',
+    label: 'Trend',
+    group: 'Signals',
+    description:
+      'Multi-pen time-series chart — bind several catalog signals (PV/SP/OUT…) with autoscale, threshold lines and a live legend.',
+    tag: 'tile-trend',
+    defaultSize: { w: 6, h: 4 },
+    minSize: { w: 3, h: 2 },
+    fields: [
+      {
+        key: 'signals',
+        label: 'Signals (one per pen, in order)',
+        kind: 'signals',
+        hint: 'each line becomes a colored pen — e.g. plc.POU1.pv, plc.POU1.sp, plc.POU1.out',
+      },
+      { key: 'labels', label: 'Pen labels (JSON array)', kind: 'text', placeholder: '["PV","SP","OUT"]' },
+      { key: 'windowSec', label: 'Time window (s)', kind: 'number' },
+      { key: 'min', label: 'Y min (blank = auto)', kind: 'number' },
+      { key: 'max', label: 'Y max (blank = auto)', kind: 'number' },
+      { key: 'warnAbove', label: 'Warn threshold', kind: 'number' },
+      { key: 'critAbove', label: 'Crit threshold', kind: 'number' },
+      { key: 'title', label: 'Title override', kind: 'text' },
+    ],
+  },
+  {
+    type: 'bitbutton',
+    label: 'Bit button',
+    group: 'Signals',
+    description:
+      'Generic catalog-param pushbutton — momentary (press=1/release=0) or toggle; audited setParameter writes, enabled only for writable params.',
+    tag: 'tile-bitbutton',
+    defaultSize: { w: 2, h: 2 },
+    minSize: { w: 2, h: 1 },
+    fields: [
+      {
+        key: 'signal',
+        label: 'Signal',
+        kind: 'signal',
+        hint: 'catalog param to write (BOOL/INT)',
+      },
+      { key: 'label', label: 'Button label', kind: 'text', placeholder: 'START' },
+      {
+        key: 'mode',
+        label: 'Mode',
+        kind: 'select',
+        options: [
+          { value: 'momentary', label: 'Momentary (press/release)' },
+          { value: 'toggle', label: 'Toggle (latched)' },
+        ],
+      },
+      { key: 'onValue', label: 'ON value', kind: 'number' },
+      { key: 'offValue', label: 'OFF value', kind: 'number' },
+    ],
+  },
+
   // ---- Layout ---------------------------------------------------------------------
   {
     type: 'note',
