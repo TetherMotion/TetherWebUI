@@ -1,0 +1,420 @@
+{
+ "schema": "fbd.v1",
+ "project": "p02_safety_circuit",
+ "data_types": [],
+ "global_vars": [],
+ "pous": [
+  {
+   "id": "p1",
+   "name": "P02_SAFETY_CIRCUIT",
+   "kind": "program",
+   "en_eno": "relaxed",
+   "interface": [],
+   "networks": [
+    {
+     "id": "n1",
+     "kind": "fbd",
+     "label": "E-stop + guard safety circuit",
+     "comments": [],
+     "assocs": [],
+     "labels": [],
+     "jumps": [],
+     "returns": [],
+     "blocks": [
+      {
+       "id": 1,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 1,
+        "y": 2
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "in",
+       "name": "estop_in",
+       "at": "%IX0.0"
+      },
+      {
+       "id": 2,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 1,
+        "y": 5
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "in",
+       "name": "guard_in",
+       "at": "%IX0.1"
+      },
+      {
+       "id": 3,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 1,
+        "y": 8
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "in",
+       "name": "reset_pb",
+       "at": "%IX0.2"
+      },
+      {
+       "id": 4,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 1,
+        "y": 11
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "in",
+       "name": "start_in",
+       "at": "%IX0.3"
+      },
+      {
+       "id": 5,
+       "kind": "operator",
+       "type_ref": "AND",
+       "pos": {
+        "x": 8,
+        "y": 4
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [
+        0,
+        1
+       ],
+       "comment": ""
+      },
+      {
+       "id": 6,
+       "kind": "operator",
+       "type_ref": "OR",
+       "pos": {
+        "x": 8,
+        "y": 10
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [
+        0,
+        1
+       ],
+       "comment": ""
+      },
+      {
+       "id": 7,
+       "kind": "operator",
+       "type_ref": "AND",
+       "pos": {
+        "x": 16,
+        "y": 4
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": ""
+      },
+      {
+       "id": 8,
+       "kind": "fb",
+       "type_ref": "SR",
+       "instance": "sr1",
+       "pos": {
+        "x": 22,
+        "y": 6
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": ""
+      },
+      {
+       "id": 9,
+       "kind": "operator",
+       "type_ref": "AND",
+       "pos": {
+        "x": 30,
+        "y": 6
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [
+        1
+       ],
+       "comment": ""
+      },
+      {
+       "id": 10,
+       "kind": "operator",
+       "type_ref": "AND",
+       "pos": {
+        "x": 30,
+        "y": 10
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": ""
+      },
+      {
+       "id": 11,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 38,
+        "y": 8
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "out",
+       "name": "motor",
+       "at": "%QX0.0"
+      },
+      {
+       "id": 12,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 30,
+        "y": 3
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "out",
+       "name": "fault_lamp",
+       "at": "%QX0.1"
+      }
+     ],
+     "wires": [
+      {
+       "id": 40,
+       "src": {
+        "block": 1,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 5,
+         "port": 0
+        }
+       ],
+       "probe": false
+      },
+      {
+       "id": 41,
+       "src": {
+        "block": 2,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 5,
+         "port": 1
+        }
+       ],
+       "probe": false
+      },
+      {
+       "id": 42,
+       "src": {
+        "block": 5,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 9,
+         "port": 0
+        }
+       ],
+       "probe": false
+      },
+      {
+       "id": 43,
+       "src": {
+        "block": 5,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 7,
+         "port": 1
+        }
+       ],
+       "probe": false
+      },
+      {
+       "id": 44,
+       "src": {
+        "block": 6,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 8,
+         "port": "R"
+        }
+       ],
+       "probe": false
+      },
+      {
+       "id": 45,
+       "src": {
+        "block": 3,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 7,
+         "port": 0
+        }
+       ],
+       "probe": false
+      },
+      {
+       "id": 46,
+       "src": {
+        "block": 5,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 7,
+         "port": 1
+        }
+       ],
+       "probe": false
+      },
+      {
+       "id": 47,
+       "src": {
+        "block": 7,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 8,
+         "port": "S1"
+        }
+       ],
+       "probe": false
+      },
+      {
+       "id": 48,
+       "src": {
+        "block": 8,
+        "port": "Q1"
+       },
+       "dsts": [
+        {
+         "block": 9,
+         "port": 0
+        }
+       ],
+       "probe": false
+      },
+      {
+       "id": 49,
+       "src": {
+        "block": 6,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 9,
+         "port": 1
+        }
+       ],
+       "probe": false
+      },
+      {
+       "id": 50,
+       "src": {
+        "block": 9,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 10,
+         "port": 0
+        }
+       ],
+       "probe": false
+      },
+      {
+       "id": 51,
+       "src": {
+        "block": 4,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 10,
+         "port": 1
+        }
+       ],
+       "probe": false
+      },
+      {
+       "id": 53,
+       "src": {
+        "block": 6,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 12,
+         "port": 0
+        }
+       ],
+       "probe": false
+      },
+      {
+       "id": 53,
+       "src": {
+        "block": 8,
+        "port": "Q1"
+       },
+       "dsts": [
+        {
+         "block": 12,
+         "port": 0
+        }
+       ],
+       "probe": false
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "tasks": [
+  {
+   "name": "MAIN",
+   "period_ns": 10000000,
+   "priority": 0,
+   "programs": [
+    "p1"
+   ]
+  }
+ ]
+}

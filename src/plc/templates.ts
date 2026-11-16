@@ -7,7 +7,9 @@
 
 import { importFbdJson, type PlcProject } from './store';
 import deviceTerminals from './templates/device-terminals.fbd.json';
+import motorControl from './templates/motor-control.fbd.json';
 import profileLoop from './templates/profile-loop.fbd.json';
+import safetyCircuit from './templates/safety-circuit.fbd.json';
 import temperatureCell from './templates/temperature-cell.fbd.json';
 import tonDebounce from './templates/ton-debounce.fbd.json';
 
@@ -52,6 +54,20 @@ export const PROJECT_TEMPLATES: readonly ProjectTemplate[] = [
     desc: 'Minimal timer-on-delay example network',
     project: 'TON debounce',
     doc: tonDebounce,
+  },
+  {
+    id: 'motor-control',
+    name: 'Motor control',
+    desc: 'DOL starter — start/stop/overload with SR seal-in latch',
+    project: 'Motor control',
+    doc: motorControl,
+  },
+  {
+    id: 'safety-circuit',
+    name: 'Safety circuit',
+    desc: 'E-stop + guard door — reset-required enable latch',
+    project: 'Safety circuit',
+    doc: safetyCircuit,
   },
 ];
 
