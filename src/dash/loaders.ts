@@ -11,6 +11,7 @@ const loadAnalysis = () => import('../tiles/analysis');
 const loadActions = () => import('../tiles/actions');
 const loadTools = () => import('../tiles/tools');
 const loadPlc = () => import('../tiles/plc');
+const loadFaceplate = () => import('../tiles/faceplate');
 
 const TAG_LOADERS: Record<string, () => Promise<unknown>> = {
   // tiles/display.ts
@@ -54,6 +55,8 @@ const TAG_LOADERS: Record<string, () => Promise<unknown>> = {
   'tile-note': loadTools,
   // tiles/plc.ts
   'tile-plc-ide': loadPlc,
+  // tiles/faceplate.ts
+  'tile-faceplate': loadFaceplate,
 };
 
 /** In-flight module loads, deduped by loader so one import serves all tags in a module. */

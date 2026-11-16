@@ -655,4 +655,102 @@ test.describe('TetherPLC IDE — live runtime', () => {
       .poll(() => num('plc.POU1.flags'), { timeout: 20_000, intervals: [2000] })
       .toBeGreaterThan(0);
   });
+
+  test('faceplate tile: loop panel binds plc.* roles; SP write drives PV', async ({
+    page,
+  }) => {
+    /* HMI faceplate end-to-end: deploy a program whose vars follow the
+       loop-role naming convention (pv/sp/out/auto/man/rem/fault), then
+       mount a faceplate tile on a user board. The panel must resolve
+       roles against the live plc.* catalog, show PV, and an SP write
+       must round-trip through setParameter into program memory. */
+    await freshPlcProject(page, LIVE_CTL);
+    await connectDashboard(page, 'operator', 'ws://127.0.0.1:8090/tether-io');
+    await openPlcIde(page);
+    await newPou(page, 'program');
+    await pane(page, 'ST');
+    await setStSource(
+      page,
+      [
+        'PROGRAM POU1',
+        'VAR',
+        '    pv : LREAL := 0.0;',
+        '    sp : LREAL := 21.5;',
+        '    out : LREAL := 0.0;',
+        '    auto : BOOL := FALSE;',
+        '    man : BOOL := FALSE;',
+        '    rem : BOOL := FALSE;',
+        '    fault : BOOL := FALSE;',
+        'END_VAR',
+        '    pv := sp * 2.0;',   // echo: SP writes are observable via PV
+        '    out := 55.0;',
+        'END_PROGRAM',
+      ].join('\n'),
+    );
+    await pane(page, 'Deploy');
+    await page.locator('.plc-ops button', { hasText: 'build & deploy' }).click();
+    await expect(page.locator('.plc-status')).toContainText('deployed', {
+      timeout: 60_000,
+    });
+    await expect(progHead(page)).toContainText('running', { timeout: 15_000 });
+
+    /* inject a user board carrying the faceplate, then reload so the
+       shell picks it up (boards load once at app boot) */
+    await page.evaluate(() => {
+      localStorage.setItem(
+        'tether.boards.v1',
+        JSON.stringify([
+          {
+            format: 'tether.dashboard.v1',
+            id: 'fp-e2e',
+            title: 'Faceplate E2E',
+            source: 'user',
+            tiles: [
+              {
+                id: 't-fp1',
+                type: 'faceplate',
+                x: 0, y: 0, w: 6, h: 4,
+                options: {
+                  kind: 'loop',
+                  prefix: 'plc.POU1',
+                  title: 'Test Loop',
+                  min: 0,
+                  max: 200,
+                },
+              },
+            ],
+          },
+        ]),
+      );
+    });
+    await page.reload();
+    /* auto-connect renegotiates V6 + reloads catalogs before bound
+       polling starts — on the live backend that chain can take tens of
+       seconds, so wait for 'connected' then give values a live-sized
+       window (same scale as the deploy/profile waits above) */
+    await expect(page.locator('.status-strip')).toContainText('connected', {
+      timeout: 60_000,
+    });
+    await page.locator('.board-tab', { hasText: 'Faceplate E2E' }).click();
+
+    const fp = page.locator('tile-faceplate');
+    await expect(fp.locator('.fp-title')).toHaveText('Test Loop');
+    /* sp=21.5 → pv=43.0 once the first scans land */
+    await expect(fp.locator('.fp-pv-val')).toHaveText('43.0', { timeout: 60_000 });
+    /* mode lamps resolved (all read FALSE → unlit but present) */
+    await expect(fp.locator('.fp-lamp', { hasText: 'AUTO' })).toBeVisible();
+    await expect(fp.locator('.fp-lamp', { hasText: 'FAULT' })).toBeVisible();
+    /* command buttons enabled only for writable params — program vars
+       are rw params, so AUTO/MAN/REM/RUN are clickable */
+    await expect(fp.locator('.fp-btn', { hasText: 'AUTO' })).toBeEnabled();
+
+    /* SP write round-trip: type 50, Enter → pv := 100 next scan */
+    const spInput = fp.locator('.fp-input');
+    await spInput.fill('50');
+    await spInput.press('Enter');
+    await expect(fp.locator('.fp-pv-val')).toHaveText('100.0', {
+      timeout: 60_000,
+    });
+    await expect(fp.locator('.fp-msg')).toContainText('SP');
+  });
 });

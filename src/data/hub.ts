@@ -641,15 +641,20 @@ export class DataHub extends EventTarget {
   private async sweepBoundValues(): Promise<void> {
     const entries = [...this.params, ...this.signals];
     const byName = new Map(entries.map((s) => [s.name, s]));
+    /* ST identifiers are case-insensitive — binding keys may differ in
+       case from catalog names (e.g. faceplate suffix candidates) */
+    const byLower = new Map(entries.map((s) => [s.name.toLowerCase(), s]));
     /* binding keys are `entry` or `entry.field`; entry names may contain
        dots (plc.* catalogs), so resolve the entry as the longest name that
        equals the key or prefixes it at a '.' boundary */
     const resolveEntry = (key: string): { entry?: CatalogEntry; field?: string } => {
-      const exact = byName.get(key);
+      const exact = byName.get(key) ?? byLower.get(key.toLowerCase());
       if (exact) return { entry: exact };
+      const k = key.toLowerCase();
       let best: CatalogEntry | undefined;
       for (const e of entries) {
-        if (key.startsWith(e.name + '.') && (!best || e.name.length > best.name.length))
+        const en = e.name.toLowerCase();
+        if (k.startsWith(en + '.') && (!best || e.name.length > best.name.length))
           best = e;
       }
       return best ? { entry: best, field: key.slice(best.name.length + 1) } : {};

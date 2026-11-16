@@ -500,6 +500,56 @@ export const TILE_SPECS: TileSpec[] = [
     defaultSize: { w: 12, h: 14 },
     minSize: { w: 8, h: 8 },
   },
+  {
+    type: 'faceplate',
+    label: 'Faceplate',
+    group: 'Signals',
+    description:
+      'Operator panel for a PLC loop/device: PV+trend, SP/CMD editor, mode lamps, momentary commands — bound by naming convention (prefix + role suffixes) or explicit roles JSON.',
+    tag: 'tile-faceplate',
+    defaultSize: { w: 4, h: 4 },
+    minSize: { w: 3, h: 3 },
+    fields: [
+      {
+        key: 'kind',
+        label: 'Faceplate kind',
+        kind: 'select',
+        options: [
+          { value: 'loop', label: 'Loop (PID)' },
+          { value: 'motor', label: 'Motor' },
+          { value: 'valve', label: 'Valve' },
+          { value: 'generic', label: 'Generic (bound signals)' },
+        ],
+      },
+      {
+        key: 'prefix',
+        label: 'Signal prefix',
+        kind: 'text',
+        placeholder: 'e.g. plc.Main.TIC101',
+        hint: 'Roles resolve as prefix.PV/.SP/.OUT/.AUTO/... — see tiles/faceplate.ts ROLE_SUFFIXES.',
+      },
+      {
+        key: 'roles',
+        label: 'Role overrides (JSON)',
+        kind: 'text',
+        placeholder: '{"pv":"plc.x.ACT","sp":"plc.x.SP"}',
+      },
+      { key: 'title', label: 'Title override', kind: 'text' },
+      { key: 'min', label: 'PV bar min', kind: 'number' },
+      { key: 'max', label: 'PV bar max', kind: 'number' },
+      {
+        key: 'momentary',
+        label: 'Momentary commands (press=1/release=0)',
+        kind: 'checkbox',
+      },
+      {
+        key: 'signals',
+        label: 'Bound signals (generic kind)',
+        kind: 'signals',
+        hint: 'one catalog signal name per line',
+      },
+    ],
+  },
 
   // ---- Layout ---------------------------------------------------------------------
   {
