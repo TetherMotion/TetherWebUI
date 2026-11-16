@@ -6,3 +6,4 @@ import './actions';
 import './tools';
 import './plc';
 import './faceplate';
+import './profile';

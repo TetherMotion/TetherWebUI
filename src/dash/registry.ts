@@ -550,6 +550,28 @@ export const TILE_SPECS: TileSpec[] = [
       },
     ],
   },
+  {
+    type: 'profile',
+    label: 'Profile run',
+    group: 'Signals',
+    description:
+      'Operator panel for an FB_AtcProfile temperature profile: state (IDLE/RUNNING/DONE/HOLD/ERROR), segment progress, SP/PV, rate, RUN/HOLD/RESET commands.',
+    tag: 'tile-profile',
+    defaultSize: { w: 4, h: 3 },
+    minSize: { w: 3, h: 2 },
+    fields: [
+      {
+        key: 'prefix',
+        label: 'Profile prefix',
+        kind: 'text',
+        placeholder: 'e.g. plc.Main.Prof',
+        hint: 'FB_AtcProfile instance members resolve as prefix.Done/.Busy/.SegIdx/.SegTime/.SP/.RUN/... — see tiles/profile.ts MEMBERS.',
+      },
+      { key: 'title', label: 'Title override', kind: 'text' },
+      { key: 'unit', label: 'PV/SP unit suffix', kind: 'text', placeholder: '°C' },
+      { key: 'numSeg', label: 'Segment count (if NUM_SEG unreadable)', kind: 'number' },
+    ],
+  },
 
   // ---- Layout ---------------------------------------------------------------------
   {

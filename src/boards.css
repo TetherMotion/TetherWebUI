@@ -2010,3 +2010,28 @@ tile-frame {
 .fp-table td { padding: 2px 6px; font-size: 11px; }
 .fp-lbl { color: var(--text-muted); }
 .fp-val { font-variant-numeric: tabular-nums; text-align: right; }
+
+/* ---- profile tile (FB_AtcProfile run panel) ---- */
+.fp-state {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+  padding: 1px 8px; border-radius: 8px; border: 1px solid var(--border, #444);
+  color: var(--text-muted);
+}
+.fp-state.run { color: #4c4; border-color: #4c4; }
+.fp-state.done { color: #6af; border-color: #6af; }
+.fp-state.err { color: var(--danger, #f66); border-color: var(--danger, #f66); }
+.fp-state.hold { color: #fc4; border-color: #fc4; }
+.fp-state.armed { color: var(--mint, #7f5); border-color: var(--mint, #7f5); }
+
+.fp-seg {
+  font-size: 10px; color: var(--text-muted);
+  font-variant-numeric: tabular-nums; margin-left: 6px;
+}
+.fp-detail {
+  font-size: 10px; color: var(--text-muted);
+  gap: 10px; flex-wrap: wrap;
+}
+.fp-detail b { color: var(--text, #dde); font-weight: 600; }
+.fp-pv-inline { font-size: 11px; color: var(--text-muted); }
+.fp-pv-inline b { color: var(--text, #dde); }
+.fp-btn.on { border-color: var(--mint, #7f5); color: var(--mint, #7f5); }

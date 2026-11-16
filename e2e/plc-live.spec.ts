@@ -654,6 +654,48 @@ test.describe('TetherPLC IDE — live runtime', () => {
     await expect
       .poll(() => num('plc.POU1.flags'), { timeout: 20_000, intervals: [2000] })
       .toBeGreaterThan(0);
+
+    /* profile tile: mount an operator panel bound to the same
+       FB_AtcProfile instance (plc.POU1.prof.*) — Done has latched, so
+       the state lamp must read DONE and member values must stream */
+    await page.evaluate(() => {
+      localStorage.setItem(
+        'tether.boards.v1',
+        JSON.stringify([
+          {
+            format: 'tether.dashboard.v1',
+            id: 'prof-e2e',
+            title: 'Profile E2E',
+            source: 'user',
+            tiles: [
+              {
+                id: 't-prof1',
+                type: 'profile',
+                x: 0, y: 0, w: 4, h: 3,
+                options: {
+                  prefix: 'plc.POU1.prof',
+                  title: 'Reflow',
+                  unit: '°C',
+                },
+              },
+            ],
+          },
+        ]),
+      );
+    });
+    await page.reload();
+    await expect(page.locator('.status-strip')).toContainText('connected', {
+      timeout: 60_000,
+    });
+    await page.locator('.board-tab', { hasText: 'Profile E2E' }).click();
+
+    const pt = page.locator('tile-profile');
+    await expect(pt.locator('.fp-title')).toHaveText('Reflow');
+    await expect(pt.locator('.fp-state')).toHaveText('DONE', { timeout: 60_000 });
+    /* SP output holds the final setpoint; member telemetry streams */
+    await expect(pt.locator('.fp-pv-val')).not.toHaveText('—');
+    await expect(pt.locator('.fp-detail')).toContainText('seg');
+    await expect(pt.locator('.fp-pv-inline b')).not.toHaveText('—');
   });
 
   test('faceplate tile: loop panel binds plc.* roles; SP write drives PV', async ({
