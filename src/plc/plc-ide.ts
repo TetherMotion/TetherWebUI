@@ -42,6 +42,14 @@ import {
   sourceStem,
 } from './curve';
 import { TuneCfg, tunerFromPou } from './tune';
+import {
+  instantiateTemplate,
+  PROJECT_TEMPLATES,
+  TPL_PICKER_FOREVER_KEY,
+  TPL_PICKER_SESSION_KEY,
+  tplPickerWanted,
+  type ProjectTemplate,
+} from './templates';
 
 type Pane = 'explorer' | 'st' | 'fbd' | 'curves' | 'tasks' | 'watch' | 'alarms' | 'deploy';
 
@@ -324,6 +332,7 @@ export class TetherPlcIde extends LitElement {
     breaks: { state: true },
     trace: { state: true },
     traceLines: { state: true },
+    tplPicker: { state: true },
   };
 
   declare pane: Pane;
@@ -353,6 +362,8 @@ export class TetherPlcIde extends LitElement {
   declare breaks?: DbgBreak[];
   declare trace?: DbgTraceStatus;
   declare traceLines?: string[];
+  /** project-template picker overlay (auto-opened on fresh projects). */
+  declare tplPicker: boolean;
   private traceFrames: DbgTraceFrame[] = [];
   private traceFrameLen = 0;
   declare watches?: DbgWatchEntry[];
@@ -429,6 +440,63 @@ export class TetherPlcIde extends LitElement {
     super.connectedCallback();
     this.syncHub();
     void this.loadCatalog();
+    /* first-run guidance: offer project templates on a fresh empty
+       project until the user picks one, starts blank, or opts out */
+    if (
+      this.project.fbd.pous.length === 0 &&
+      tplPickerWanted(sessionStorage, localStorage)
+    ) {
+      this.tplPicker = true;
+    }
+  }
+
+  /** Apply a starter template — replaces the whole project document. */
+  private applyTemplate(t: ProjectTemplate): void {
+    this.project = instantiateTemplate(t);
+    this.project.stSources = {};
+    this.tplPicker = false;
+    this.save();
+    this.flash(`loaded template "${t.name}"`);
+  }
+
+  /** Close the picker; `forever` also suppresses future auto-opens. */
+  private dismissTplPicker(forever: boolean): void {
+    this.tplPicker = false;
+    sessionStorage.setItem(TPL_PICKER_SESSION_KEY, '1');
+    if (forever) localStorage.setItem(TPL_PICKER_FOREVER_KEY, '1');
+    this.requestUpdate();
+  }
+
+  /** Template-picker dialog — cards + blank/never-show row. */
+  private templatePicker(): unknown {
+    return html`
+      <div class="plc-tpl-overlay" @click=${(e: Event) => {
+        if (e.target === e.currentTarget) this.dismissTplPicker(false);
+      }}>
+        <div class="plc-tpl-dialog">
+          <div class="plc-tpl-title">Start a project</div>
+          <div class="plc-tpl-sub">Pick a template or start blank.</div>
+          <div class="plc-tpl-grid">
+            ${PROJECT_TEMPLATES.map(
+              (t) => html`
+                <button class="plc-tpl-card" @click=${() => this.applyTemplate(t)}>
+                  <span class="plc-tpl-name">${t.name}</span>
+                  <span class="plc-tpl-desc">${t.desc}</span>
+                </button>
+              `,
+            )}
+          </div>
+          <div class="plc-tpl-foot">
+            <button class="chip-btn" @click=${() => this.dismissTplPicker(false)}>
+              Blank project
+            </button>
+            <button class="chip-btn" @click=${() => this.dismissTplPicker(true)}>
+              Don't show again
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   /** Fetch the proxy's library block catalog once (no-op without proxy/libs). */
@@ -693,6 +761,7 @@ export class TetherPlcIde extends LitElement {
           <span class="plc-proj">${fbd.project}</span>
           <span class="spacer"></span>
           <button class="chip-btn" @click=${this.onImport}>Import…</button>
+          <button class="chip-btn" @click=${() => { this.tplPicker = true; }}>Templates…</button>
           <button class="chip-btn" @click=${this.onExport}>Export .fbd.json</button>
           <button class="chip-btn" @click=${this.onExportXml}>Export .xml</button>
           <button class="chip-btn" ?disabled=${this.compiling} @click=${() => void this.onCheck()}>
@@ -718,6 +787,7 @@ export class TetherPlcIde extends LitElement {
         </div>
         <div class="plc-main">${this.paneBody()}</div>
         ${this.diagsStrip()}
+        ${this.tplPicker ? this.templatePicker() : nothing}
       </div>
     `;
   }

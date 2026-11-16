@@ -49,6 +49,13 @@ export async function openPlcIde(page: Page): Promise<Locator> {
   await page.locator('.board-tab', { hasText: 'TetherPLC' }).click();
   const ide = page.locator('tile-plc-ide tether-plc-ide');
   await expect(ide).toHaveCount(1, { timeout: 30_000 });
+  /* fresh projects auto-open the template picker — tests want the
+     blank canvas, so dismiss it (session-scoped: reloads stay blank).
+     Wait for the toolbar (first render) first: tplPicker is set in
+     connectedCallback but Lit flushes it in the initial update. */
+  await expect(ide.locator('.plc-toolbar')).toBeVisible({ timeout: 15_000 });
+  const blank = ide.locator('.plc-tpl-foot button', { hasText: 'Blank project' });
+  if (await blank.count()) await blank.click();
   return ide;
 }
 

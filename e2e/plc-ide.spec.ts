@@ -20,6 +20,29 @@ import {
 const FIXTURES = fileURLToPath(new URL('../test-fixtures', import.meta.url));
 
 test.describe('TetherPLC IDE', () => {
+  test('template picker offers starters on a fresh project; apply loads POUs', async ({
+    page,
+  }) => {
+    /* bypass openPlcIde — it dismisses the picker for the other tests */
+    await freshPlcProject(page);
+    await connectDashboard(page);
+    await page.locator('.board-tab', { hasText: 'TetherPLC' }).click();
+    const ide = page.locator('tile-plc-ide tether-plc-ide');
+    await expect(ide).toHaveCount(1, { timeout: 30_000 });
+
+    const card = ide.locator('.plc-tpl-card', { hasText: 'Temperature cell' });
+    await expect(card).toBeVisible({ timeout: 15_000 });
+    await card.click();
+
+    await expect(ide.locator('.plc-proj')).toHaveText('Temperature cell');
+    await expect(
+      ide.locator('.plc-tree-pou').filter({ hasNotText: 'globals' }).first(),
+    ).toBeVisible();
+    const proj = await projectJson(page);
+    expect(proj.fbd.pous.length).toBeGreaterThan(0);
+    expect(proj.fbd.project).toBe('Temperature cell');
+  });
+
   test('IDE connects to the ctl proxy and loads the library catalog', async ({ page }) => {
     await openFreshIde(page);
     await newPou(page, 'program');
@@ -47,7 +70,12 @@ test.describe('TetherPLC IDE', () => {
     await newPou(page, 'function');
     await expect(page.locator('.plc-tree-pou', { hasText: 'POU3' })).toContainText('FUN');
 
-    const pouCount = await page.locator('.plc-tree-pou').count();
+    /* .plc-tree-pou also matches the unconditional "globals" row —
+       count only real POUs */
+    const pouCount = await page
+      .locator('.plc-tree-pou')
+      .filter({ hasNotText: 'globals' })
+      .count();
     expect(pouCount).toBe(3);
   });
 
@@ -252,7 +280,9 @@ test.describe('TetherPLC IDE', () => {
 
     await pane(page, 'Deploy');
     await expect(page.locator('.plc-ctlbar')).toContainText('connected', { timeout: 15_000 });
-    await expect(page.locator('.plc-ops')).toBeVisible();
+    /* the deploy pane has several .plc-ops card groups — assert the
+       first is visible rather than violating strict mode */
+    await expect(page.locator('.plc-ops').first()).toBeVisible();
   });
 
   test('export .fbd.json downloads a valid project document', async ({ page }) => {

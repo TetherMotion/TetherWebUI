@@ -1,0 +1,265 @@
+{
+    "schema": "fbd.v1",
+    "project": "ui_mixed",
+    "data_types": [],
+    "pous": [
+        {
+            "id": "p1",
+            "name": "Main",
+            "kind": "program",
+            "en_eno": "off",
+            "interface": [
+                {
+                    "name": "Pv",
+                    "kind": "var_input",
+                    "type": "LREAL"
+                },
+                {
+                    "name": "Run",
+                    "kind": "var_input",
+                    "type": "BOOL"
+                },
+                {
+                    "name": "Q",
+                    "kind": "var_output",
+                    "type": "LREAL"
+                }
+            ],
+            "networks": [
+                {
+                    "id": "n1",
+                    "kind": "fbd",
+                    "label": "",
+                    "blocks": [
+                        {
+                            "id": 1,
+                            "kind": "st",
+                            "type_ref": "ST",
+                            "pos": {
+                                "x": 2,
+                                "y": 6
+                            },
+                            "params": {
+                                "CFG": "TRUE",
+                                "CODE": "IF CFG AND NOT loaded THEN\n    PROF.NUM_SEG := 4;\n    PROF.PvStart := TRUE;\n    PROF.CycleTime := 0.1;\n    PROF.SEG[1].KIND := 3;\n    PROF.SEG[1].TGT := 150.0;\n    PROF.SEG[1].P1 := 60.0;\n    PROF.SEG[1].P2 := 0.0;\n    PROF.SEG[2].KIND := 1;\n    PROF.SEG[2].TGT := 150.0;\n    PROF.SEG[2].P1 := 120.0;\n    PROF.SEG[2].P2 := 2.0;\n    PROF.SEG[2].EV := 1;\n    PROF.SEG[3].KIND := 2;\n    PROF.SEG[3].TGT := 80.0;\n    PROF.SEG[3].P1 := 0.5;\n    PROF.SEG[3].P2 := 0.0;\n    PROF.SEG[4].KIND := 1;\n    PROF.SEG[4].TGT := 80.0;\n    PROF.SEG[4].P1 := 30.0;\n    PROF.SEG[4].P2 := 0.0;\n    PROF.SEG[4].EV := 2;\n    PROF.SEG[5].KIND := 0;\n    PROF.SEG[5].TGT := 0.0;\n    PROF.SEG[5].P1 := 0.0;\n    PROF.SEG[5].P2 := 0.0;\n    loaded := TRUE;\nEND_IF;\nDONE := loaded;\n"
+                            },
+                            "exec_order": 0,
+                            "negated": [],
+                            "comment": "temperature profile prof",
+                            "pins": [
+                                {
+                                    "name": "CFG",
+                                    "kind": "var_input",
+                                    "type": "BOOL"
+                                },
+                                {
+                                    "name": "PROF",
+                                    "kind": "var_in_out",
+                                    "type": "FB_AtcProfile"
+                                },
+                                {
+                                    "name": "DONE",
+                                    "kind": "var_output",
+                                    "type": "BOOL"
+                                },
+                                {
+                                    "name": "loaded",
+                                    "kind": "var",
+                                    "type": "BOOL"
+                                }
+                            ]
+                        },
+                        {
+                            "id": 2,
+                            "kind": "fb",
+                            "type_ref": "FB_AtcProfile",
+                            "instance": "prof",
+                            "pos": {
+                                "x": 14,
+                                "y": 2
+                            },
+                            "params": {
+                                "CycleTime": "0.1"
+                            },
+                            "exec_order": 0,
+                            "negated": [],
+                            "comment": "wire RUN, PV; SP \u2192 controller"
+                        },
+                        {
+                            "id": 3,
+                            "kind": "variable",
+                            "type_ref": "",
+                            "pos": {
+                                "x": 2,
+                                "y": 2
+                            },
+                            "params": {},
+                            "exec_order": 0,
+                            "negated": [],
+                            "comment": "",
+                            "role": "in",
+                            "name": "prof"
+                        },
+                        {
+                            "id": 4,
+                            "kind": "fb",
+                            "type_ref": "FB_AtcPid",
+                            "instance": "ctl",
+                            "pos": {
+                                "x": 28,
+                                "y": 2
+                            },
+                            "params": {
+                                "Kp": "2.0",
+                                "Tn": "60.0",
+                                "Tv": "0.0",
+                                "OutMin": "0.0",
+                                "OutMax": "100.0",
+                                "CycleTime": "0.1"
+                            },
+                            "exec_order": 0,
+                            "negated": [],
+                            "comment": "wire Execute, Actual; Setpoint \u2190 prof.SP; Out \u2192 output"
+                        },
+                        {
+                            "id": 10,
+                            "kind": "variable",
+                            "type_ref": "",
+                            "pos": {
+                                "x": 0,
+                                "y": 0
+                            },
+                            "params": {},
+                            "exec_order": 0,
+                            "negated": [],
+                            "comment": "",
+                            "role": "in",
+                            "name": "Pv"
+                        },
+                        {
+                            "id": 11,
+                            "kind": "variable",
+                            "type_ref": "",
+                            "pos": {
+                                "x": 0,
+                                "y": 0
+                            },
+                            "params": {},
+                            "exec_order": 0,
+                            "negated": [],
+                            "comment": "",
+                            "role": "in",
+                            "name": "Run"
+                        },
+                        {
+                            "id": 12,
+                            "kind": "variable",
+                            "type_ref": "",
+                            "pos": {
+                                "x": 0,
+                                "y": 0
+                            },
+                            "params": {},
+                            "exec_order": 0,
+                            "negated": [],
+                            "comment": "",
+                            "role": "out",
+                            "name": "Q"
+                        }
+                    ],
+                    "wires": [
+                        {
+                            "id": 5,
+                            "src": {
+                                "block": 3,
+                                "port": 0
+                            },
+                            "dsts": [
+                                {
+                                    "block": 1,
+                                    "port": "PROF"
+                                }
+                            ]
+                        },
+                        {
+                            "id": 20,
+                            "src": {
+                                "block": 10,
+                                "port": 0
+                            },
+                            "dsts": [
+                                {
+                                    "block": 2,
+                                    "port": "PV"
+                                },
+                                {
+                                    "block": 4,
+                                    "port": "Actual"
+                                }
+                            ]
+                        },
+                        {
+                            "id": 21,
+                            "src": {
+                                "block": 11,
+                                "port": 0
+                            },
+                            "dsts": [
+                                {
+                                    "block": 2,
+                                    "port": "RUN"
+                                },
+                                {
+                                    "block": 4,
+                                    "port": "Execute"
+                                }
+                            ]
+                        },
+                        {
+                            "id": 22,
+                            "src": {
+                                "block": 2,
+                                "port": "SP"
+                            },
+                            "dsts": [
+                                {
+                                    "block": 4,
+                                    "port": "Setpoint"
+                                }
+                            ]
+                        },
+                        {
+                            "id": 23,
+                            "src": {
+                                "block": 4,
+                                "port": "Out"
+                            },
+                            "dsts": [
+                                {
+                                    "block": 12,
+                                    "port": 0
+                                }
+                            ]
+                        }
+                    ],
+                    "assocs": [],
+                    "comments": [],
+                    "labels": [],
+                    "jumps": [],
+                    "returns": []
+                }
+            ]
+        }
+    ],
+    "global_vars": [],
+    "tasks": [
+        {
+            "name": "Main",
+            "period_ns": 10000000,
+            "programs": [
+                "Main"
+            ],
+            "priority": 0
+        }
+    ]
+}

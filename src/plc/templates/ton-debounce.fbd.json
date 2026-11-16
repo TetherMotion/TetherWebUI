@@ -1,0 +1,176 @@
+{
+ "schema": "fbd.v1",
+ "project": "p01_ton_debounce",
+ "data_types": [],
+ "global_vars": [],
+ "pous": [
+  {
+   "id": "p1",
+   "name": "P01_TON_DEBOUNCE",
+   "kind": "program",
+   "en_eno": "relaxed",
+   "interface": [],
+   "networks": [
+    {
+     "id": "n1",
+     "kind": "fbd",
+     "label": "",
+     "comments": [],
+     "assocs": [],
+     "labels": [],
+     "jumps": [],
+     "returns": [],
+     "blocks": [
+      {
+       "id": 1,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 1,
+        "y": 4
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "in",
+       "name": "start_in",
+       "at": "%IX0.0"
+      },
+      {
+       "id": 2,
+       "kind": "fb",
+       "type_ref": "TON",
+       "instance": "ton1",
+       "pos": {
+        "x": 8,
+        "y": 4
+       },
+       "params": {
+        "PT": "T#200ms"
+       },
+       "exec_order": 0,
+       "negated": [],
+       "comment": ""
+      },
+      {
+       "id": 3,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 1,
+        "y": 8
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "in",
+       "name": "stop_in",
+       "at": "%IX0.1"
+      },
+      {
+       "id": 4,
+       "kind": "operator",
+       "type_ref": "AND",
+       "pos": {
+        "x": 20,
+        "y": 6
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [
+        1
+       ],
+       "comment": ""
+      },
+      {
+       "id": 5,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 30,
+        "y": 6
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "out",
+       "name": "run",
+       "at": "%QX0.0"
+      }
+     ],
+     "wires": [
+      {
+       "id": 40,
+       "src": {
+        "block": 1,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 2,
+         "port": 0
+        }
+       ],
+       "probe": false
+      },
+      {
+       "id": 41,
+       "src": {
+        "block": 2,
+        "port": "Q"
+       },
+       "dsts": [
+        {
+         "block": 4,
+         "port": 0
+        }
+       ],
+       "probe": true
+      },
+      {
+       "id": 42,
+       "src": {
+        "block": 3,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 4,
+         "port": 1
+        }
+       ],
+       "probe": false
+      },
+      {
+       "id": 43,
+       "src": {
+        "block": 4,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 5,
+         "port": 0
+        }
+       ],
+       "probe": false
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "tasks": [
+  {
+   "name": "MAIN",
+   "period_ns": 10000000,
+   "priority": 0,
+   "programs": [
+    "p1"
+   ]
+  }
+ ]
+}

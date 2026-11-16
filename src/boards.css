@@ -1789,3 +1789,78 @@ tile-frame {
   font-size: 12px;
   color: var(--text-muted);
 }
+
+/* project-template picker (first-run + toolbar) */
+.plc-tpl-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+}
+
+.plc-tpl-dialog {
+  background: var(--glass-bg, #1a1d24);
+  border: 1px solid var(--glass-border, #333);
+  border-radius: 10px;
+  padding: 18px 20px;
+  min-width: 420px;
+  max-width: 640px;
+}
+
+.plc-tpl-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--mint, #7f5);
+  margin-bottom: 2px;
+}
+
+.plc-tpl-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 14px;
+}
+
+.plc-tpl-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.plc-tpl-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  padding: 10px 12px;
+  border: 1px solid var(--glass-border, #333);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text, #ddd);
+  cursor: pointer;
+}
+
+.plc-tpl-card:hover {
+  border-color: var(--mint, #7f5);
+  background: rgba(127, 255, 170, 0.06);
+}
+
+.plc-tpl-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.plc-tpl-desc {
+  font-size: 10px;
+  color: var(--text-muted);
+  line-height: 1.3;
+}
+
+.plc-tpl-foot {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}

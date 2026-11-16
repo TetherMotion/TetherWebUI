@@ -1,0 +1,136 @@
+{
+ "schema": "fbd.v1",
+ "project": "p_ekpid",
+ "data_types": [],
+ "global_vars": [],
+ "pous": [
+  {
+   "id": "p1",
+   "name": "EK_PID",
+   "kind": "program",
+   "en_eno": "relaxed",
+   "interface": [],
+   "networks": [
+    {
+     "id": "n1",
+     "kind": "fbd",
+     "label": "",
+     "comments": [],
+     "assocs": [],
+     "labels": [],
+     "jumps": [],
+     "returns": [],
+     "blocks": [
+      {
+       "id": 10,
+       "kind": "device",
+       "type_ref": "EK1108",
+       "pos": { "x": 2, "y": 2 },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "digital input terminal — DI0 = run",
+       "pins": [
+        { "name": "DI0", "kind": "var_output", "type": "BOOL", "at": "%IX0.0" },
+        { "name": "DI1", "kind": "var_output", "type": "BOOL", "at": "%IX0.1" }
+       ]
+      },
+      {
+       "id": 11,
+       "kind": "device",
+       "type_ref": "EK1122",
+       "pos": { "x": 2, "y": 14 },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "analog terminal — AI0 = process value",
+       "pins": [
+        { "name": "AI0", "kind": "var_output", "type": "REAL", "at": "%ID4.0" },
+        { "name": "AO0", "kind": "var_input", "type": "REAL", "at": "%QD4.0" }
+       ]
+      },
+      {
+       "id": 12,
+       "kind": "device",
+       "type_ref": "EK1123",
+       "pos": { "x": 34, "y": 8 },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "digital output terminal — DO0 = heater PWM",
+       "pins": [
+        { "name": "DO0", "kind": "var_input", "type": "BOOL", "at": "%QX0.0" }
+       ]
+      },
+      {
+       "id": 20,
+       "kind": "fb",
+       "type_ref": "FB_AtcPid",
+       "instance": "pid",
+       "pos": { "x": 14, "y": 4 },
+       "params": {
+        "Setpoint": "75.0",
+        "Kp": "0.5",
+        "B": "1.0",
+        "OutMin": "0.0",
+        "OutMax": "100.0",
+        "CycleTime": "0.01"
+       },
+       "exec_order": 0,
+       "negated": [],
+       "comment": "P-only: Out = 0.5*(75-PV) = 27.5 %"
+      },
+      {
+       "id": 21,
+       "kind": "fb",
+       "type_ref": "FB_AtcPwm",
+       "instance": "pwm",
+       "pos": { "x": 24, "y": 10 },
+       "params": {
+        "Period": "10.0",
+        "MinOn": "0.0",
+        "CycleTime": "0.01"
+       },
+       "exec_order": 0,
+       "negated": [],
+       "comment": "Duty = pid.Out (0..100 %) → Q bit"
+      }
+     ],
+     "wires": [
+      {
+       "id": 30,
+       "src": { "block": 10, "port": "DI0" },
+       "dsts": [
+        { "block": 20, "port": "Execute" },
+        { "block": 21, "port": "Execute" }
+       ]
+      },
+      {
+       "id": 31,
+       "src": { "block": 11, "port": "AI0" },
+       "dsts": [{ "block": 20, "port": "Actual" }]
+      },
+      {
+       "id": 32,
+       "src": { "block": 20, "port": "Out" },
+       "dsts": [{ "block": 21, "port": "Duty" }]
+      },
+      {
+       "id": 33,
+       "src": { "block": 21, "port": "Q" },
+       "dsts": [{ "block": 12, "port": "DO0" }]
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "tasks": [
+  {
+   "name": "MAIN",
+   "period_ns": 10000000,
+   "priority": 0,
+   "programs": ["EK_PID"]
+  }
+ ]
+}
