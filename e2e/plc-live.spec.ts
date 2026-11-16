@@ -681,7 +681,7 @@ test.describe('TetherPLC IDE — live runtime', () => {
               {
                 id: 't-trend1',
                 type: 'trend',
-                x: 4, y: 0, w: 8, h: 4,
+                x: 4, y: 0, w: 8, h: 3,
                 bindings: [
                   { entry: 'plc.POU1.pv' },
                   { entry: 'plc.POU1.sp' },
@@ -693,6 +693,55 @@ test.describe('TetherPLC IDE — live runtime', () => {
                   min: 0,
                   max: 100,
                 },
+              },
+              {
+                id: 't-hmi-dig',
+                type: 'hmi-digital',
+                x: 0, y: 3, w: 3, h: 2,
+                bindings: [{ entry: 'plc.POU1.pv' }],
+                options: {
+                  label: 'PV', unit: '°C', min: 0, max: 100,
+                  warn: 75, crit: 90, decimals: 1, window: '1',
+                },
+              },
+              {
+                id: 't-hmi-bar',
+                type: 'hmi-bar',
+                x: 3, y: 3, w: 5, h: 2,
+                bindings: [{ entry: 'plc.POU1.u' }],
+                options: {
+                  label: 'U', unit: '%', min: 0, max: 100,
+                  warn: 90, decimals: 1,
+                },
+              },
+              {
+                id: 't-hmi-gauge',
+                type: 'hmi-gauge',
+                x: 8, y: 3, w: 4, h: 3,
+                bindings: [{ entry: 'plc.POU1.sp' }],
+                options: {
+                  label: 'SP', unit: '°C', min: 0, max: 100,
+                  warn: 80, crit: 95, decimals: 1,
+                },
+              },
+              {
+                id: 't-hmi-lamp',
+                type: 'hmi-lamp',
+                x: 0, y: 5, w: 2, h: 3,
+                bindings: [
+                  { entry: 'plc.POU1.prof.Done' },
+                  { entry: 'plc.POU1.prof.Err' },
+                  { entry: 'plc.POU1.flags' },
+                ],
+                options: {
+                  labels: '{"run":"DONE","alarm":"ERR","fault":"FLAGS"}',
+                },
+              },
+              {
+                id: 't-hmi-alarms',
+                type: 'hmi-alarms',
+                x: 2, y: 5, w: 5, h: 3,
+                options: { title: 'ALARMS', maxRows: 6 },
               },
             ],
           },
@@ -721,6 +770,47 @@ test.describe('TetherPLC IDE — live runtime', () => {
       timeout: 60_000,
     });
     await expect(tr.locator('svg path')).not.toHaveCount(0, { timeout: 60_000 });
+
+    /* scene-native HMI widgets: each renders the shared scene IR as
+       SVG — digital/bar/gauge show live plc.POU1 values, lamp stack
+       shows DONE lit, alarm board renders its header */
+    const dig = page.locator('tile-hmi-digital');
+    await expect(dig.locator('svg text').first()).toBeVisible({
+      timeout: 60_000,
+    });
+    await expect(dig.locator('svg text').first()).not.toHaveText('———', {
+      timeout: 60_000,
+    });
+    await expect(page.locator('tile-hmi-bar svg')).toBeVisible();
+    await expect(page.locator('tile-hmi-gauge svg path').first()).toBeVisible();
+    const lamp = page.locator('tile-hmi-lamp');
+    await expect(lamp.locator('svg')).toBeVisible({ timeout: 60_000 });
+    /* DONE latched → first lamp lit: its label text renders */
+    await expect(lamp.locator('svg text', { hasText: 'DONE' })).toBeVisible();
+    const alm = page.locator('tile-hmi-alarms');
+    await expect(
+      alm.locator('svg text', { hasText: 'active' }).first(),
+    ).toBeVisible();
+
+    /* auto board: catalog-driven generation — every plc.* entry becomes
+       a bound widget with no manual wiring (same rules as the native
+       hmi_remote client) */
+    await page.locator('.board-tab.add').click();
+    await page
+      .locator('.bp-card', { hasText: 'Auto (PLC)' })
+      .click();
+    await expect(
+      page.locator('.board-tab', { hasText: 'PLC auto' }),
+    ).toBeVisible();
+    await expect(page.locator('tile-hmi-digital').first()).toBeVisible({
+      timeout: 60_000,
+    });
+    /* FB_AtcProfile instance members → auto profile tile; pid/scalar
+       members → digital readouts; alarm board always appended */
+    await expect(page.locator('tile-profile').first()).toBeVisible({
+      timeout: 60_000,
+    });
+    await expect(page.locator('tile-hmi-alarms').first()).toBeVisible();
   });
 
   test('faceplate tile: loop panel binds plc.* roles; SP write drives PV', async ({

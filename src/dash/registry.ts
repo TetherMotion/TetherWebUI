@@ -34,7 +34,7 @@ export interface ConfigField {
 export interface TileSpec {
   type: string;
   label: string;
-  group: 'Signals' | 'Machine' | 'Analysis' | 'Actions' | 'Tools' | 'Layout';
+  group: 'Signals' | 'Machine' | 'Analysis' | 'Actions' | 'Tools' | 'HMI' | 'Layout';
   description: string;
   /** Element tag name registered via customElements. */
   tag: string;
@@ -626,6 +626,122 @@ export const TILE_SPECS: TileSpec[] = [
       },
       { key: 'onValue', label: 'ON value', kind: 'number' },
       { key: 'offValue', label: 'OFF value', kind: 'number' },
+    ],
+  },
+
+  // ---- Scene-native HMI widgets -------------------------------------------------
+  // These render the shared HMI scene IR (src/hmi/scene.ts): the same
+  // document feeds the web SVG backend and the native Vulkan renderer
+  // (Tether examples/hmi_vulkan.cpp) — identical views by construction.
+  {
+    type: 'hmi-gauge',
+    label: 'HMI gauge',
+    group: 'HMI',
+    description:
+      'Circular process gauge — alarm bands, needle, digital readout. Scene IR widget: identical rendering on web (SVG) and native Vulkan.',
+    tag: 'tile-hmi-gauge',
+    defaultSize: { w: 4, h: 4 },
+    minSize: { w: 3, h: 3 },
+    fields: [
+      { key: 'signal', label: 'Signal', kind: 'signal', hint: 'catalog signal to display' },
+      { key: 'label', label: 'Label', kind: 'text' },
+      { key: 'unit', label: 'Unit', kind: 'text' },
+      { key: 'min', label: 'Min', kind: 'number' },
+      { key: 'max', label: 'Max', kind: 'number' },
+      { key: 'warn', label: 'Warn ≥', kind: 'number' },
+      { key: 'crit', label: 'Crit ≥', kind: 'number' },
+      { key: 'decimals', label: 'Decimals', kind: 'number' },
+    ],
+  },
+  {
+    type: 'hmi-bar',
+    label: 'HMI bargraph',
+    group: 'HMI',
+    description:
+      'Horizontal/vertical bargraph with scale ticks, threshold markers and readout. Scene IR widget: identical rendering on web and native Vulkan.',
+    tag: 'tile-hmi-bar',
+    defaultSize: { w: 5, h: 2 },
+    minSize: { w: 3, h: 2 },
+    fields: [
+      { key: 'signal', label: 'Signal', kind: 'signal', hint: 'catalog signal to display' },
+      { key: 'label', label: 'Label', kind: 'text' },
+      { key: 'unit', label: 'Unit', kind: 'text' },
+      { key: 'min', label: 'Min', kind: 'number' },
+      { key: 'max', label: 'Max', kind: 'number' },
+      { key: 'warn', label: 'Warn ≥', kind: 'number' },
+      { key: 'crit', label: 'Crit ≥', kind: 'number' },
+      { key: 'decimals', label: 'Decimals', kind: 'number' },
+      {
+        key: 'orientation',
+        label: 'Orientation',
+        kind: 'select',
+        options: [
+          { value: 'horizontal', label: 'Horizontal' },
+          { value: 'vertical', label: 'Vertical' },
+        ],
+      },
+    ],
+  },
+  {
+    type: 'hmi-digital',
+    label: 'HMI digital',
+    group: 'HMI',
+    description:
+      'Large numeric readout with unit, label and alarm-colored value. Scene IR widget: identical rendering on web and native Vulkan.',
+    tag: 'tile-hmi-digital',
+    defaultSize: { w: 3, h: 2 },
+    minSize: { w: 2, h: 2 },
+    fields: [
+      { key: 'signal', label: 'Signal', kind: 'signal', hint: 'catalog signal to display' },
+      { key: 'label', label: 'Label', kind: 'text' },
+      { key: 'unit', label: 'Unit', kind: 'text' },
+      { key: 'min', label: 'Min', kind: 'number' },
+      { key: 'max', label: 'Max', kind: 'number' },
+      { key: 'warn', label: 'Warn ≥', kind: 'number' },
+      { key: 'crit', label: 'Crit ≥', kind: 'number' },
+      { key: 'decimals', label: 'Decimals', kind: 'number' },
+      {
+        key: 'window',
+        label: 'Instrument window',
+        kind: 'select',
+        options: [
+          { value: '', label: 'No' },
+          { value: '1', label: 'Yes' },
+        ],
+      },
+    ],
+  },
+  {
+    type: 'hmi-lamp',
+    label: 'HMI lamp stack',
+    group: 'HMI',
+    description:
+      'RUN/ALARM/FAULT stack light with optional blink — bind up to three signals. Scene IR widget: identical rendering on web and native Vulkan.',
+    tag: 'tile-hmi-lamp',
+    defaultSize: { w: 2, h: 3 },
+    minSize: { w: 2, h: 3 },
+    fields: [
+      {
+        key: 'signals',
+        label: 'Signals (RUN, ALARM, FAULT order)',
+        kind: 'signals',
+        hint: 'one signal per lamp, in order — nonzero = lit',
+      },
+      { key: 'labels', label: 'Lamp labels (JSON)', kind: 'text', placeholder: '{"run":"RUN","alarm":"ALM","fault":"FLT"}' },
+    ],
+  },
+  {
+    type: 'hmi-alarms',
+    label: 'HMI alarm board',
+    group: 'HMI',
+    description:
+      'Active-alarm summary — severity chips, acked state, newest first. Scene IR widget: identical rendering on web and native Vulkan.',
+    tag: 'tile-hmi-alarms',
+    defaultSize: { w: 5, h: 3 },
+    minSize: { w: 3, h: 2 },
+    fields: [
+      { key: 'title', label: 'Title', kind: 'text', placeholder: 'ALARMS' },
+      { key: 'maxRows', label: 'Max rows', kind: 'number' },
     ],
   },
 

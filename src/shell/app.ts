@@ -5,7 +5,7 @@
  */
 import { html, nothing, TemplateResult } from 'lit';
 import { DataHub, HubTopic } from '../data/hub';
-import { BoardDoc, parseBoardDoc, serializeBoard, TileBinding, TileDef } from '../dash/model';
+import { BOARD_FORMAT, BoardDoc, parseBoardDoc, serializeBoard, TileBinding, TileDef } from '../dash/model';
 import {
   boardsFromProfile,
   ensureBuiltinBoards,
@@ -14,6 +14,7 @@ import {
   saveBoards,
 } from '../dash/store';
 import { BOARD_TEMPLATES, boardFromTemplate } from '../dash/board-templates';
+import { autoBoardTiles } from '../hmi/autoscreen';
 import { TILE_SPECS, TileSpec } from '../dash/registry';
 import '../board/board-view';
 import '../board/tile-frame';
@@ -199,7 +200,8 @@ export class TetherShell extends TileElement {
 
   private createBoard(templateId: string): void {
     this.boardPickerOpen = false;
-    const board = boardFromTemplate(templateId);
+    const board =
+      templateId === 'auto-plc' ? this.autoPlcBoard() : boardFromTemplate(templateId);
     if (!board) return;
     if (templateId === 'blank') board.title = `Board ${this.boards.filter((b) => b.source === 'user').length + 1}`;
     this.boards.push(board);
@@ -207,6 +209,30 @@ export class TetherShell extends TileElement {
     this.activeId = board.id;
     this.editing = true;
     this.requestUpdate();
+  }
+
+  /** "Auto (PLC)" board — derive tiles from the live plc.* catalog. */
+  private autoPlcBoard(): BoardDoc | undefined {
+    const hub = this.hub;
+    if (!hub) return undefined;
+    const entries = [...hub.params, ...hub.signals].map((e) => ({
+      name: e.name,
+    }));
+    const tiles = autoBoardTiles(entries);
+    if (tiles.length <= 1) {
+      hub.toast(
+        'No plc.* catalog entries — deploy a PLC program first',
+        'error',
+      );
+      return undefined;
+    }
+    return {
+      format: BOARD_FORMAT,
+      id: `user.${crypto.randomUUID().slice(0, 8)}`,
+      title: 'PLC auto',
+      source: 'user',
+      tiles,
+    };
   }
 
   private cloneBoard(board: BoardDoc): void {
@@ -697,6 +723,16 @@ export class TetherShell extends TileElement {
               <span>${t.description}</span>
             </button>`,
           )}
+          <button
+            class="bp-card"
+            @click=${() => this.createBoard('auto-plc')}
+          >
+            <strong>Auto (PLC)</strong>
+            <span>
+              Generate widgets from the live plc.* catalog — profiles,
+              loops, lamps and readouts bind themselves.
+            </span>
+          </button>
         </div>
       </div>
     </div>`;

@@ -112,7 +112,7 @@ test('new-board picker offers templates; temperature cell pre-places HMI tiles',
   await page.locator('.board-tab.add').click();
   const picker = page.locator('.board-picker');
   await expect(picker).toBeVisible();
-  await expect(picker.locator('.bp-card')).toHaveCount(3);
+  await expect(picker.locator('.bp-card')).toHaveCount(4);
 
   await picker.locator('.bp-card', { hasText: 'Temperature cell' }).click();
   await expect(picker).toHaveCount(0);

@@ -8,3 +8,4 @@ import './plc';
 import './faceplate';
 import './profile';
 import './hmi';
+import './hmiw';

@@ -14,6 +14,7 @@ const loadPlc = () => import('../tiles/plc');
 const loadFaceplate = () => import('../tiles/faceplate');
 const loadProfile = () => import('../tiles/profile');
 const loadHmi = () => import('../tiles/hmi');
+const loadHmiw = () => import('../tiles/hmiw');
 
 const TAG_LOADERS: Record<string, () => Promise<unknown>> = {
   // tiles/display.ts
@@ -64,6 +65,13 @@ const TAG_LOADERS: Record<string, () => Promise<unknown>> = {
   // tiles/hmi.ts
   'tile-trend': loadHmi,
   'tile-bitbutton': loadHmi,
+  // tiles/hmiw.ts — scene-native widgets (shared HMI scene IR → SVG web /
+  // Vulkan native, identical views)
+  'tile-hmi-gauge': loadHmiw,
+  'tile-hmi-bar': loadHmiw,
+  'tile-hmi-digital': loadHmiw,
+  'tile-hmi-lamp': loadHmiw,
+  'tile-hmi-alarms': loadHmiw,
 };
 
 /** In-flight module loads, deduped by loader so one import serves all tags in a module. */
