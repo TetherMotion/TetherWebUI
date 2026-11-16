@@ -86,6 +86,46 @@ reconstruct the listed schema graphs and must produce the same BLAKE3 digests
 of the canonical descriptor. **Do not edit digests by hand** — recompute with
 the TypeScript builder and confirm the C++ test still passes.
 
+## HMI scene widgets (web ⇄ native parity)
+
+The `tile-hmi-*` widgets (gauge, bargraph, digital, lamp stack, alarm
+board) render a shared **scene IR** — a JSON document of `rect`/`line`/
+`path`/`text` ops in `src/hmi/scene.ts`. Two backends consume the
+identical document, so views match by construction:
+
+- **web** — `sceneToSvg()` → inline SVG (Lit tiles in `src/tiles/hmiw.ts`)
+- **native Vulkan** — `examples/hmi_vulkan.cpp` in the Tether repo parses
+  the same JSON and rasterizes with Vulkan + glyb (the VolcanoPlot glyph
+  engine: FreeType rasterization, HarfBuzz shaping)
+
+`src/hmi/parity.test.ts` rasterizes every widget through both backends
+(resvg vs `hmi_vulkan` under lavapipe) and diffs the pixels.
+
+**Auto boards** — `src/hmi/autoscreen.ts` ports the catalog→screen rules
+from `Tether/examples/common/HmiAuto.cpp`: `plc.<prog>.<inst>.<member>`
+entries are grouped into profile panels, loop clusters (PV/SP/OUT),
+lamp stacks and digital readouts, plus an alarm board. The "Auto (PLC)"
+card in the new-board picker generates a fully bound board from the
+live catalog — no manual wiring.
+
+**Remote native HMI** — `hmi_remote` (Tether repo) connects to any
+Tether IO endpoint over TCP (`SlipFramedTransport` + `TetherIOClient`),
+enumerates the catalog, runs the same auto-screen rules, polls values
+and renders live frames through the Vulkan backend:
+
+```bash
+hmi_remote --host 127.0.0.1 --port 43770 --auto --frames 0 --period 500
+# --screen FILE   authored screen JSON instead of --auto
+# --out PREFIX    PPM frame prefix (default hmi_remote; offscreen render)
+```
+
+`hmi_remote` currently renders offscreen to PPM sequences (headless /
+lavapipe-friendly); windowed output is future work.
+
+`tplc-io` serves `plc.*` entries for any deployed TetherPLC package, so
+the same screen definitions work for the browser UI and a Vulkan
+display with zero configuration.
+
 ## Protocol
 
 The wire protocol (binary framing, V6 schema negotiation, catalog, function
