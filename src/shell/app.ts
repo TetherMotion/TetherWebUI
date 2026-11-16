@@ -13,6 +13,7 @@ import {
   resetBuiltinBoard,
   saveBoards,
 } from '../dash/store';
+import { BOARD_TEMPLATES, boardFromTemplate } from '../dash/board-templates';
 import { TILE_SPECS, TileSpec } from '../dash/registry';
 import '../board/board-view';
 import '../board/tile-frame';
@@ -73,6 +74,7 @@ export class TetherShell extends TileElement {
   private drawer?: Drawer;
   private overlay?: Overlay;
   private galleryOpen = false;
+  private boardPickerOpen = false;
   private paletteOpen = false;
   private paletteQuery = '';
   private paletteIndex = 0;
@@ -140,6 +142,9 @@ export class TetherShell extends TileElement {
       if (this.paletteOpen) {
         this.paletteOpen = false;
         this.requestUpdate();
+      } else if (this.boardPickerOpen) {
+        this.boardPickerOpen = false;
+        this.requestUpdate();
       } else if (this.overlay) {
         this.overlay = undefined;
         this.requestUpdate();
@@ -187,14 +192,16 @@ export class TetherShell extends TileElement {
   }
 
   private addBoard(): void {
-    const n = this.boards.filter((b) => b.source === 'user').length + 1;
-    const board: BoardDoc = {
-      format: 'tether.dashboard.v1',
-      id: `user.${crypto.randomUUID().slice(0, 8)}`,
-      title: `Board ${n}`,
-      source: 'user',
-      tiles: [],
-    };
+    /* template picker — blank is one of the cards */
+    this.boardPickerOpen = true;
+    this.requestUpdate();
+  }
+
+  private createBoard(templateId: string): void {
+    this.boardPickerOpen = false;
+    const board = boardFromTemplate(templateId);
+    if (!board) return;
+    if (templateId === 'blank') board.title = `Board ${this.boards.filter((b) => b.source === 'user').length + 1}`;
     this.boards.push(board);
     this.persist();
     this.activeId = board.id;
@@ -655,6 +662,46 @@ export class TetherShell extends TileElement {
     });
   }
 
+  /** "New board" template picker — blank plus operator presets. */
+  private boardPickerOverlay(): TemplateResult | typeof nothing {
+    if (!this.boardPickerOpen) return nothing;
+    return html`<div
+      class="overlay"
+      @click=${(e: Event) => {
+        if (e.target === e.currentTarget) {
+          this.boardPickerOpen = false;
+          this.requestUpdate();
+        }
+      }}
+    >
+      <div class="overlay-panel narrow">
+        <header class="overlay-head">
+          <strong>New board</strong>
+          <button
+            class="icon-btn"
+            @click=${() => {
+              this.boardPickerOpen = false;
+              this.requestUpdate();
+            }}
+          >
+            ${icon('x')}
+          </button>
+        </header>
+        <div class="overlay-body board-picker">
+          ${BOARD_TEMPLATES.map(
+            (t) => html`<button
+              class="bp-card"
+              @click=${() => this.createBoard(t.id)}
+            >
+              <strong>${t.title}</strong>
+              <span>${t.description}</span>
+            </button>`,
+          )}
+        </div>
+      </div>
+    </div>`;
+  }
+
   private settingsOverlay(): TemplateResult {
     return html`<div
       class="overlay"
@@ -933,7 +980,7 @@ export class TetherShell extends TileElement {
           </main>
           ${this.gallery()} ${this.drawerPanel()}
         </div>
-        ${this.overlayPanel()} ${this.palette()} ${this.toastsEl()}
+        ${this.overlayPanel()} ${this.boardPickerOverlay()} ${this.palette()} ${this.toastsEl()}
       </div>
     `;
   }

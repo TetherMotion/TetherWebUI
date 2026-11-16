@@ -104,6 +104,26 @@ test('edit mode adds a tile from the gallery', async ({ page }) => {
   await expect(page.locator('board-view tile-value')).toHaveCount(1);
 });
 
+test('new-board picker offers templates; temperature cell pre-places HMI tiles', async ({
+  page,
+}) => {
+  await connectAs(page, 'operator');
+
+  await page.locator('.board-tab.add').click();
+  const picker = page.locator('.board-picker');
+  await expect(picker).toBeVisible();
+  await expect(picker.locator('.bp-card')).toHaveCount(3);
+
+  await picker.locator('.bp-card', { hasText: 'Temperature cell' }).click();
+  await expect(picker).toHaveCount(0);
+
+  /* the template board becomes active with its tiles mounted */
+  await expect(page.locator('.board-tab.active')).toContainText('Temperature cell');
+  await expect(page.locator('tile-faceplate')).toHaveCount(1);
+  await expect(page.locator('tile-profile')).toHaveCount(1);
+  await expect(page.locator('tile-alarm-list')).toHaveCount(1);
+});
+
 test('drive cards render interpreted state, not raw tables', async ({ page }) => {
   await connectAs(page, 'operator');
 

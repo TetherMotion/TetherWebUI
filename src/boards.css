@@ -2035,3 +2035,32 @@ tile-frame {
 .fp-pv-inline { font-size: 11px; color: var(--text-muted); }
 .fp-pv-inline b { color: var(--text, #dde); }
 .fp-btn.on { border-color: var(--mint, #7f5); color: var(--mint, #7f5); }
+
+/* ---- new-board template picker ---- */
+.board-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.bp-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  padding: 10px 12px;
+  border: 1px solid var(--glass-border, #333);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text, #ddd);
+  cursor: pointer;
+}
+.bp-card:hover {
+  border-color: var(--mint, #7f5);
+  background: rgba(127, 255, 170, 0.06);
+}
+.bp-card strong { font-size: 12px; }
+.bp-card span {
+  font-size: 10px;
+  color: var(--text-muted);
+  line-height: 1.3;
+}
