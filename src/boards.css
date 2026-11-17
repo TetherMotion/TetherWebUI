@@ -2141,4 +2141,15 @@ tile-frame {
   max-width: 100%;
   max-height: 100%;
 }
-.hmi-tile.hmi-stale .hmi-scene-svg { opacity: 0.45; }
+.hmi-tile.hmi-stale .hmi-scene-svg,
+.hmi-tile.hmi-stale .hmi-gpu-canvas { opacity: 0.45; }
+.hmi-gpu-host {
+  width: 100%;
+  height: 100%;
+  display: flex;
+}
+.hmi-gpu-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}

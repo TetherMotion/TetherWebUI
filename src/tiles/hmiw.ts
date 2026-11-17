@@ -15,7 +15,7 @@
  * Each tile exposes `sceneJson()` returning the exact JSON document a
  * native renderer consumes — used by the identical-view e2e tests.
  */
-import { html, nothing, TemplateResult } from 'lit';
+import { html, nothing, TemplateResult, PropertyValues } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { HubTopic } from '../data/hub';
 import { TileDef } from '../dash/model';
@@ -24,14 +24,22 @@ import { AlarmView } from '../domain/machine-control';
 import {
   HmiScene, sceneToSvg,
 } from '../hmi/scene';
+import { webgpuSceneEnabled, paintWebGpuScene } from '../hmi/webgpu-scene';
 import {
   AlarmLevel, GaugeOpts, BarOpts, DigitalOpts, LampOpts, AlarmBoardOpts,
   gaugeScene, bargraphScene, digitalScene, lampStackScene, alarmBoardScene,
 } from '../hmi/widgets';
 
-/** Render an HmiScene into the tile — meet-scaled, undistorted. */
+/** Render an HmiScene into the tile — WebGPU canvas when enabled, SVG otherwise. */
 function sceneHtml(scene: HmiScene): TemplateResult {
+  if (webgpuSceneEnabled())
+    return html`<div class="hmi-scene-wrap"><div class="hmi-gpu-host"></div></div>`;
   return html`<div class="hmi-scene-wrap">${unsafeHTML(sceneToSvg(scene, 'hmi-scene-svg'))}</div>`;
+}
+
+/** Shared updated() hook — pushes the latest scene to the WebGPU canvas. */
+function paintGpu(el: HTMLElement & { lastScene?: HmiScene }) {
+  if (webgpuSceneEnabled() && el.lastScene) paintWebGpuScene(el, el.lastScene);
 }
 
 function num(v: unknown): number | undefined {
@@ -56,7 +64,7 @@ abstract class SceneSignalTile extends TileElement {
   /** design-space size — fixed per widget so text never distorts */
   protected abstract sceneSize(): { w: number; h: number };
   protected abstract build(value: number | undefined): HmiScene;
-  protected lastScene?: HmiScene;
+  lastScene?: HmiScene;
 
   protected topics(): HubTopic[] {
     return ['values', 'connection'];
@@ -80,6 +88,11 @@ abstract class SceneSignalTile extends TileElement {
   /** Exact JSON document for the native Vulkan backend. */
   sceneJson(): string | undefined {
     return this.lastScene ? JSON.stringify(this.lastScene) : undefined;
+  }
+
+  protected override updated(_changed: PropertyValues): void {
+    super.updated(_changed);
+    paintGpu(this);
   }
 }
 
@@ -138,7 +151,7 @@ customElements.define('tile-hmi-digital', TileHmiDigital);
 export class TileHmiLamp extends TileElement {
   private phase = 0;
   private timer?: number;
-  private lastScene?: HmiScene;
+  lastScene?: HmiScene;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -204,6 +217,11 @@ export class TileHmiLamp extends TileElement {
   sceneJson(): string | undefined {
     return this.lastScene ? JSON.stringify(this.lastScene) : undefined;
   }
+
+  protected override updated(_changed: PropertyValues): void {
+    super.updated(_changed);
+    paintGpu(this);
+  }
 }
 customElements.define('tile-hmi-lamp', TileHmiLamp);
 
@@ -212,7 +230,7 @@ customElements.define('tile-hmi-lamp', TileHmiLamp);
 // ---------------------------------------------------------------------------
 
 export class TileHmiAlarms extends TileElement {
-  private lastScene?: HmiScene;
+  lastScene?: HmiScene;
 
   protected topics(): HubTopic[] {
     return ['alarms', 'connection'];
@@ -253,6 +271,11 @@ export class TileHmiAlarms extends TileElement {
 
   sceneJson(): string | undefined {
     return this.lastScene ? JSON.stringify(this.lastScene) : undefined;
+  }
+
+  protected override updated(_changed: PropertyValues): void {
+    super.updated(_changed);
+    paintGpu(this);
   }
 }
 customElements.define('tile-hmi-alarms', TileHmiAlarms);
