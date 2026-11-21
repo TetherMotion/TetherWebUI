@@ -11,8 +11,9 @@ import {
   highlightActiveLine,
   keymap,
   drawSelection,
+  hoverTooltip,
 } from '@codemirror/view';
-import { Compartment, EditorState } from '@codemirror/state';
+import { Compartment, EditorState, Prec } from '@codemirror/state';
 import {
   bracketMatching,
   defaultHighlightStyle,
@@ -24,6 +25,18 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirro
 import { lintGutter, setDiagnostics, type Diagnostic } from '@codemirror/lint';
 import { st } from './st-lang';
 import { stCompletion, StSymbols } from './st-complete';
+import { signatureAt, findDefinition, findUsages, wordAt } from './stnav';
+import type { StWorld, DefTarget, Usage } from './stnav';
+
+/** detail payload of the `st-nav` event the IDE listens for. */
+export interface StNavEvent {
+  action: 'goto' | 'usages' | 'rename';
+  target?: DefTarget;
+  name?: string;
+  usages?: Usage[];
+  from?: number;
+  to?: number;
+}
 
 export class StEditor extends LitElement {
   declare value: string;
@@ -31,15 +44,22 @@ export class StEditor extends LitElement {
   declare debounceMs: number;
   /** project symbols for autocompletion (POU + interface var names) */
   declare symbols: StSymbols;
+  /** semantic nav world (POUs + stSources) for calltips/goto/usages */
+  declare world: StWorld | undefined;
+  /** name of the POU this editor buffer belongs to */
+  declare pouName: string;
 
   static properties = {
     value: { attribute: false },
     debounceMs: { type: Number },
     symbols: { attribute: false },
+    world: { attribute: false },
+    pouName: { attribute: false },
   };
 
   private view?: EditorView;
   private symbolsComp = new Compartment();
+  private navComp = new Compartment();
   private debounceTimer?: number;
   private applying = false;
 
@@ -63,6 +83,8 @@ export class StEditor extends LitElement {
     this.value = '';
     this.debounceMs = 400;
     this.symbols = { pous: [], vars: [] };
+    this.world = undefined;
+    this.pouName = '';
   }
 
   updated(changed: Map<string, unknown>): void {
@@ -70,6 +92,71 @@ export class StEditor extends LitElement {
       this.view.dispatch({
         effects: this.symbolsComp.reconfigure(stCompletion(this.symbols)),
       });
+    if ((changed.has('world') || changed.has('pouName')) && this.view)
+      this.view.dispatch({ effects: this.navComp.reconfigure(this.navExt()) });
+  }
+
+  /** semantic-nav extensions: signature hover + F12/Shift-F12/F2 keys.
+      Results are emitted as `st-nav` events — the IDE owns navigation
+      (POU switching) and rename application. */
+  private navExt() {
+    return [
+      hoverTooltip(
+        (view, pos) => {
+          const w = this.world;
+          if (!w || !this.pouName) return null;
+          const s = signatureAt(w, view.state.doc.toString(), pos);
+          if (!s) return null;
+          return {
+            pos: s.from,
+            end: s.to,
+            above: true,
+            create: () => {
+              const dom = document.createElement('div');
+              dom.className = 'st-tooltip';
+              dom.textContent = `${s.name} — ${s.sig}`;
+              return { dom };
+            },
+          };
+        },
+        { hoverTime: 250 },
+      ),
+      Prec.high(
+        keymap.of([
+          { key: 'F12', run: (v) => this.navAction(v, 'goto') },
+          { key: 'Shift-F12', run: (v) => this.navAction(v, 'usages') },
+          { key: 'F2', run: (v) => this.navAction(v, 'rename') },
+        ]),
+      ),
+    ];
+  }
+
+  private navAction(view: EditorView, action: StNavEvent['action']): boolean {
+    const w = this.world;
+    const pn = this.pouName;
+    if (!w || !pn) return false;
+    const doc = view.state.doc.toString();
+    const pos = view.state.selection.main.head;
+    const word = wordAt(doc, pos);
+    if (!word) return false;
+    const detail: StNavEvent = { action };
+    if (action === 'goto') {
+      const t = findDefinition(w, pn, doc, pos);
+      if (!t) return false;
+      detail.target = t;
+    } else if (action === 'usages') {
+      detail.name = word.text;
+      detail.usages = findUsages(w, word.text);
+      if (!detail.usages.length) return false;
+    } else {
+      detail.name = word.text;
+      detail.from = word.from;
+      detail.to = word.to;
+    }
+    this.dispatchEvent(
+      new CustomEvent('st-nav', { detail, bubbles: true, composed: true }),
+    );
+    return true;
   }
 
   createRenderRoot(): this {
@@ -93,6 +180,7 @@ export class StEditor extends LitElement {
           keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
           st(),
           this.symbolsComp.of(stCompletion(this.symbols)),
+          this.navComp.of(this.navExt()),
           syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
           EditorView.updateListener.of((u) => {
             if (!u.docChanged || this.applying) return;

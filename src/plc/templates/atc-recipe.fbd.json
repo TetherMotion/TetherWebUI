@@ -1,0 +1,477 @@
+{
+ "schema": "fbd.v1",
+ "project": "atc_batch_recipe",
+ "data_types": [],
+ "global_vars": [],
+ "pous": [
+  {
+   "id": "p1",
+   "name": "Main",
+   "kind": "program",
+   "en_eno": "off",
+   "interface": [
+    {
+     "name": "Run",
+     "kind": "var_input",
+     "type": "BOOL"
+    },
+    {
+     "name": "PvIn",
+     "kind": "var_input",
+     "type": "LREAL"
+    },
+    {
+     "name": "SpOut",
+     "kind": "var_output",
+     "type": "LREAL"
+    },
+    {
+     "name": "QOut",
+     "kind": "var_output",
+     "type": "LREAL"
+    },
+    {
+     "name": "DoneQ",
+     "kind": "var_output",
+     "type": "BOOL"
+    },
+    {
+     "name": "PhaseQ",
+     "kind": "var_output",
+     "type": "DINT"
+    }
+   ],
+   "networks": [
+    {
+     "id": "n1",
+     "kind": "fbd",
+     "label": "",
+     "comments": [],
+     "assocs": [],
+     "labels": [],
+     "jumps": [],
+     "returns": [],
+     "blocks": [
+      {
+       "id": 2,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 1,
+        "y": 2
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "in",
+       "name": "run"
+      },
+      {
+       "id": 3,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 1,
+        "y": 6
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "in",
+       "name": "pvin"
+      },
+      {
+       "id": 4,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 20,
+        "y": 4
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "in",
+       "name": "rcp"
+      },
+      {
+       "id": 6,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 1,
+        "y": 14
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "out",
+       "name": "spout"
+      },
+      {
+       "id": 7,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 1,
+        "y": 18
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "out",
+       "name": "qout"
+      },
+      {
+       "id": 8,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 1,
+        "y": 22
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "out",
+       "name": "doneq"
+      },
+      {
+       "id": 9,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 1,
+        "y": 26
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "out",
+       "name": "phaseq"
+      },
+      {
+       "id": 10,
+       "kind": "fb",
+       "type_ref": "FB_AtcPid",
+       "instance": "pid",
+       "pos": {
+        "x": 8,
+        "y": 12
+       },
+       "params": {
+        "OutMin": "0.0",
+        "OutMax": "100.0",
+        "CycleTime": "0.1"
+       },
+       "exec_order": 0,
+       "negated": [],
+       "comment": "gains arrive wired from the recipe"
+      },
+      {
+       "id": 11,
+       "kind": "st",
+       "type_ref": "ST",
+       "pos": {
+        "x": 36,
+        "y": 10
+       },
+       "params": {
+        "CFG": "TRUE",
+        "CODE": "rcp.Execute := RUN;\nrcp.START := RUN;\nrcp.HOLD := FALSE;\nrcp.RESET := FALSE;\nrcp.PV := PV;\nrcp.CycleTime := 0.1;\nrcp.PidOut := PIDOUT;\nrcp.AutoTune := FALSE;\nrcp.TrendEn := TRUE;\nrcp.TrendDepth := 256;\nrcp.TrigSeg := 2;\nIF NOT loaded THEN\n    rcp.PresetKp := 2.0; rcp.PresetTn := 60.0; rcp.PresetTv := 0.0;\n    rcp.nseg := 4;\n    rcp.SEG[1].KIND := 2; rcp.SEG[1].TGT := 180.0;\n    rcp.SEG[1].P1 := 2.0; rcp.SEG[1].P2 := 0.0;\n    rcp.SEG[2].KIND := 1; rcp.SEG[2].TGT := 180.0;\n    rcp.SEG[2].P1 := 600.0; rcp.SEG[2].P2 := 2.0; rcp.SEG[2].EV := 1;\n    rcp.SEG[3].KIND := 2; rcp.SEG[3].TGT := 25.0;\n    rcp.SEG[3].P1 := 0.8; rcp.SEG[3].P2 := 0.0;\n    rcp.SEG[4].KIND := 1; rcp.SEG[4].TGT := 25.0;\n    rcp.SEG[4].P1 := 300.0; rcp.SEG[4].P2 := 0.0; rcp.SEG[4].EV := 2;\n    rcp.SEG[5].KIND := 0;\n    loaded := TRUE;\nEND_IF;\nrcp();\nSP := rcp.SP;\nKP := rcp.Kp; TN := rcp.Tn; TV := rcp.Tv;\nOUTV := rcp.Out;\nDONE := rcp.Done;\nPH := rcp.Phase;\nTRACK := rcp.PidTrack;\nTRACKV := rcp.PidTrackVal;\n"
+       },
+       "exec_order": 0,
+       "negated": [],
+       "comment": "batch recipe \u2014 heat/dwell/cool with trend capture",
+       "pins": [
+        {
+         "name": "RUN",
+         "kind": "var_input",
+         "type": "BOOL"
+        },
+        {
+         "name": "PV",
+         "kind": "var_input",
+         "type": "LREAL"
+        },
+        {
+         "name": "PIDOUT",
+         "kind": "var_input",
+         "type": "LREAL"
+        },
+        {
+         "name": "RCP",
+         "kind": "var_in_out",
+         "type": "FB_AtcBatch"
+        },
+        {
+         "name": "SP",
+         "kind": "var_output",
+         "type": "LREAL"
+        },
+        {
+         "name": "KP",
+         "kind": "var_output",
+         "type": "LREAL"
+        },
+        {
+         "name": "TN",
+         "kind": "var_output",
+         "type": "LREAL"
+        },
+        {
+         "name": "TV",
+         "kind": "var_output",
+         "type": "LREAL"
+        },
+        {
+         "name": "OUTV",
+         "kind": "var_output",
+         "type": "LREAL"
+        },
+        {
+         "name": "DONE",
+         "kind": "var_output",
+         "type": "BOOL"
+        },
+        {
+         "name": "PH",
+         "kind": "var_output",
+         "type": "DINT"
+        },
+        {
+         "name": "TRACK",
+         "kind": "var_output",
+         "type": "BOOL"
+        },
+        {
+         "name": "TRACKV",
+         "kind": "var_output",
+         "type": "LREAL"
+        },
+        {
+         "name": "loaded",
+         "kind": "var",
+         "type": "BOOL"
+        }
+       ]
+      }
+     ],
+     "wires": [
+      {
+       "id": 20,
+       "src": {
+        "block": 2,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 11,
+         "port": "RUN"
+        }
+       ]
+      },
+      {
+       "id": 21,
+       "src": {
+        "block": 3,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 11,
+         "port": "PV"
+        },
+        {
+         "block": 10,
+         "port": "Actual"
+        }
+       ]
+      },
+      {
+       "id": 22,
+       "src": {
+        "block": 4,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 11,
+         "port": "RCP"
+        }
+       ]
+      },
+      {
+       "id": 24,
+       "src": {
+        "block": 11,
+        "port": "SP"
+       },
+       "dsts": [
+        {
+         "block": 10,
+         "port": "Setpoint"
+        },
+        {
+         "block": 6,
+         "port": 0
+        }
+       ]
+      },
+      {
+       "id": 25,
+       "src": {
+        "block": 11,
+        "port": "KP"
+       },
+       "dsts": [
+        {
+         "block": 10,
+         "port": "Kp"
+        }
+       ]
+      },
+      {
+       "id": 26,
+       "src": {
+        "block": 11,
+        "port": "TN"
+       },
+       "dsts": [
+        {
+         "block": 10,
+         "port": "Tn"
+        }
+       ]
+      },
+      {
+       "id": 27,
+       "src": {
+        "block": 11,
+        "port": "TV"
+       },
+       "dsts": [
+        {
+         "block": 10,
+         "port": "Tv"
+        }
+       ]
+      },
+      {
+       "id": 28,
+       "src": {
+        "block": 11,
+        "port": "TRACK"
+       },
+       "dsts": [
+        {
+         "block": 10,
+         "port": "TrackEn"
+        }
+       ]
+      },
+      {
+       "id": 29,
+       "src": {
+        "block": 11,
+        "port": "TRACKV"
+       },
+       "dsts": [
+        {
+         "block": 10,
+         "port": "TrackVal"
+        }
+       ]
+      },
+      {
+       "id": 30,
+       "src": {
+        "block": 11,
+        "port": "DONE"
+       },
+       "dsts": [
+        {
+         "block": 8,
+         "port": 0
+        }
+       ]
+      },
+      {
+       "id": 31,
+       "src": {
+        "block": 11,
+        "port": "PH"
+       },
+       "dsts": [
+        {
+         "block": 9,
+         "port": 0
+        }
+       ]
+      },
+      {
+       "id": 32,
+       "src": {
+        "block": 10,
+        "port": "Out"
+       },
+       "dsts": [
+        {
+         "block": 7,
+         "port": 0
+        },
+        {
+         "block": 11,
+         "port": "PIDOUT"
+        }
+       ]
+      },
+      {
+       "id": 33,
+       "src": {
+        "block": 10,
+        "port": "SP"
+       },
+       "dsts": [
+        {
+         "block": 6,
+         "port": 0
+        }
+       ]
+      },
+      {
+       "id": 34,
+       "src": {
+        "block": 2,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 10,
+         "port": "Execute"
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "tasks": [
+  {
+   "name": "MAIN",
+   "period_ns": 100000000,
+   "priority": 0,
+   "programs": [
+    "p1"
+   ]
+  }
+ ]
+}

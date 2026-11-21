@@ -1,0 +1,288 @@
+{
+ "schema": "fbd.v1",
+ "project": "ha_bridge_demo",
+ "data_types": [],
+ "global_vars": [],
+ "pous": [
+  {
+   "id": "p1",
+   "name": "Main",
+   "kind": "program",
+   "en_eno": "off",
+   "interface": [
+    {
+     "name": "Run",
+     "kind": "var_input",
+     "type": "BOOL"
+    },
+    {
+     "name": "TempPV",
+     "kind": "var_input",
+     "type": "LREAL"
+    },
+    {
+     "name": "PumpQ",
+     "kind": "var_output",
+     "type": "BOOL"
+    },
+    {
+     "name": "Setpoint",
+     "kind": "var_output",
+     "type": "LREAL"
+    },
+    {
+     "name": "HaEvent",
+     "kind": "var_output",
+     "type": "BOOL"
+    }
+   ],
+   "networks": [
+    {
+     "id": "n1",
+     "kind": "fbd",
+     "label": "",
+     "comments": [],
+     "assocs": [],
+     "labels": [],
+     "jumps": [],
+     "returns": [],
+     "blocks": [
+      {
+       "id": 1,
+       "kind": "st",
+       "type_ref": "ST",
+       "pos": {
+        "x": 6,
+        "y": 4
+       },
+       "params": {
+        "CFG": "TRUE",
+        "CODE": "br.Execute := CFG;\nbr.CycleTime := 0.1;\nIF NOT loaded THEN\n    br.Dev := 'oven';\n    br.Host := 'homeassistant.local';\n    br.Port := 1883;\n    br.HbS := 30;\n    br.CHAN[1].En := TRUE;  br.CHAN[1].Kind := 0;\n    br.CHAN[1].ObjId := 'boiler_temp'; br.CHAN[1].Name := 'Boiler temperature';\n    br.CHAN[1].Unit := 'degC'; br.CHAN[1].DevCls := 'temperature';\n    br.CHAN[2].En := TRUE;  br.CHAN[2].Kind := 2;\n    br.CHAN[2].ObjId := 'circulation_pump'; br.CHAN[2].Name := 'Circulation pump';\n    br.CHAN[2].AutoWr := TRUE;\n    br.CHAN[3].En := TRUE;  br.CHAN[3].Kind := 3;\n    br.CHAN[3].ObjId := 'boiler_setpoint'; br.CHAN[3].Name := 'Boiler setpoint';\n    br.CHAN[3].Unit := 'degC'; br.CHAN[3].MinV := 0.0; br.CHAN[3].MaxV := 300.0;\n    br.CHAN[3].AutoWr := TRUE;\n    loaded := TRUE;\nEND_IF;\nbr.CHAN[1].Value := TEMP;\nbr();\nPUMP := br.CHAN[2].BVal;\nSP := br.CHAN[3].Value;\nEVT := br.CHAN[2].Event OR br.CHAN[3].Event;\n"
+       },
+       "exec_order": 0,
+       "negated": [],
+       "comment": "Home Assistant bridge \u2014 sensor/switch/number channels",
+       "pins": [
+        {
+         "name": "CFG",
+         "kind": "var_input",
+         "type": "BOOL"
+        },
+        {
+         "name": "TEMP",
+         "kind": "var_input",
+         "type": "LREAL"
+        },
+        {
+         "name": "BR",
+         "kind": "var_in_out",
+         "type": "FB_HaBridge"
+        },
+        {
+         "name": "PUMP",
+         "kind": "var_output",
+         "type": "BOOL"
+        },
+        {
+         "name": "SP",
+         "kind": "var_output",
+         "type": "LREAL"
+        },
+        {
+         "name": "EVT",
+         "kind": "var_output",
+         "type": "BOOL"
+        },
+        {
+         "name": "loaded",
+         "kind": "var",
+         "type": "BOOL"
+        }
+       ]
+      },
+      {
+       "id": 2,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 1,
+        "y": 2
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "in",
+       "name": "run"
+      },
+      {
+       "id": 3,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 1,
+        "y": 6
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "in",
+       "name": "temppv"
+      },
+      {
+       "id": 4,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 1,
+        "y": 10
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "out",
+       "name": "pumpq"
+      },
+      {
+       "id": 5,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 1,
+        "y": 14
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "out",
+       "name": "setpoint"
+      },
+      {
+       "id": 6,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 1,
+        "y": 18
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "out",
+       "name": "haevent"
+      },
+      {
+       "id": 7,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {
+        "x": 20,
+        "y": 4
+       },
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "in",
+       "name": "br"
+      }
+     ],
+     "wires": [
+      {
+       "id": 10,
+       "src": {
+        "block": 2,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 1,
+         "port": "CFG"
+        }
+       ]
+      },
+      {
+       "id": 11,
+       "src": {
+        "block": 3,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 1,
+         "port": "TEMP"
+        }
+       ]
+      },
+      {
+       "id": 12,
+       "src": {
+        "block": 7,
+        "port": 0
+       },
+       "dsts": [
+        {
+         "block": 1,
+         "port": "BR"
+        }
+       ]
+      },
+      {
+       "id": 13,
+       "src": {
+        "block": 1,
+        "port": "PUMP"
+       },
+       "dsts": [
+        {
+         "block": 4,
+         "port": 0
+        }
+       ]
+      },
+      {
+       "id": 14,
+       "src": {
+        "block": 1,
+        "port": "SP"
+       },
+       "dsts": [
+        {
+         "block": 5,
+         "port": 0
+        }
+       ]
+      },
+      {
+       "id": 15,
+       "src": {
+        "block": 1,
+        "port": "EVT"
+       },
+       "dsts": [
+        {
+         "block": 6,
+         "port": 0
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "tasks": [
+  {
+   "name": "MAIN",
+   "period_ns": 100000000,
+   "priority": 0,
+   "programs": [
+    "p1"
+   ]
+  }
+ ]
+}

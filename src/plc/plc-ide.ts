@@ -2,10 +2,11 @@
  * <tether-plc-ide> — the PLC IDE surface for the TetherPLC tab.
  *
  * Owns the project document (fbd.v1 + ST sources) via src/plc/store.
- * Sub-views: explorer tree, ST source editor, FBD network inspector,
- * task table, watch (live plc.* catalog values), deploy status.
- * Backend channels (tplccd, ctl proxy) are not wired yet — deploy is a
- * stub view and watch reads whatever the hub catalog provides.
+ * Sub-views: explorer tree, ST source editor (CodeMirror 6 with
+ * completion, lint, signature help, go-to-def/usages/rename), FBD and
+ * LD network inspectors, task table, watch (live plc.* catalog values),
+ * deploy/debug via the tplc-ctl-proxy (compile, deploy, shadow runs,
+ * breakpoints, forces, retain, traces, alarms, historians).
  */
 import { html, LitElement, nothing, TemplateResult } from 'lit';
 import { DataHub } from '../data/hub';
@@ -20,20 +21,34 @@ import {
   atCollisions,
   endpointCollisions,
   generateDeployMap,
+  serializeDeployMap,
   projectIoBindingsEx,
   stIoBindings,
   validateDeployMapText,
   type MapViolation,
 } from './deploymap';
-import type { StEditor } from './st-editor';
+import type { StEditor, StNavEvent } from './st-editor';
+import {
+  declaredPous as declaredPousIn,
+  findDefinition,
+  instanceType,
+  renameInSource,
+  renameMemberAccesses,
+  renamePou,
+  stWorld,
+  stVarSections,
+} from './stnav';
+import type { DefTarget, StWorld, Usage } from './stnav';
+import { ALARM_OPS, buildAlarmPou, defaultRule, ruleStem, type AlarmRule } from './alarms';
 import { FbdProject, IfaceKind, IfaceVar, Pou, Task } from './model';
 import { entryWritable, writeScalar } from './mon';
 import { codecFromSchema, codecsForSize, defaultCodec, hex, odDecode, odEncode, odTypeName, parseHex, type ScalarCodec } from './typedval';
 import { exportPlcopenXml, importPlcopenXml } from './plcopen';
 import type { CatalogEntry } from '../protocol';
 import { exportFbdJson, importFbdJson, loadProject, PlcProject, saveProject } from './store';
+import { deleteSnapshot, diffSummary, getSnapshot, historyIndex, pushSnapshot } from './history';
 import { parseStInterfaces } from './stiface';
-import { catalogGroups, catalogPous, fetchCatalog, fetchLibSrc, libStem, type CatalogLib } from './catalog';
+import { blockSource, catalogGroups, catalogPous, fetchCatalog, fetchLibSrc, libStem, type CatalogLib } from './catalog';
 import {
   CurveProfile,
   defaultProfile,
@@ -333,6 +348,7 @@ export class TetherPlcIde extends LitElement {
     trace: { state: true },
     traceLines: { state: true },
     tplPicker: { state: true },
+  historyOpen: { state: true },
   };
 
   declare pane: Pane;
@@ -364,6 +380,7 @@ export class TetherPlcIde extends LitElement {
   declare traceLines?: string[];
   /** project-template picker overlay (auto-opened on fresh projects). */
   declare tplPicker: boolean;
+  declare historyOpen: boolean;
   private traceFrames: DbgTraceFrame[] = [];
   private traceFrameLen = 0;
   declare watches?: DbgWatchEntry[];
@@ -379,6 +396,16 @@ export class TetherPlcIde extends LitElement {
   declare mapEdit?: string;
   /** client-side validation of mapEdit. */
   declare mapViolations?: MapViolation[];
+  /** graphical channel/binding editor state (parsed from mapEdit draft) */
+  declare mapRows?: {
+    inSize?: number; outSize?: number;
+    channels: DeployMapChannel[];
+    bindings: DeployMapBinding[];
+  };
+  /** find-usages panel shown under the ST editor */
+  declare usagesPanel?: { name: string; list: Usage[] };
+  /** attached library source open in the ST pane (no fbd POU) */
+  declare selLib?: string;
 
   private ctl = new PlcCtl();
   private dbgSymName = '';
@@ -467,6 +494,53 @@ export class TetherPlcIde extends LitElement {
     this.requestUpdate();
   }
 
+  private historyDialog(): unknown {
+    const items = historyIndex();
+    return html`
+      <div class="plc-tpl-overlay" @click=${(e: Event) => {
+        if (e.target === e.currentTarget) this.historyOpen = false;
+      }}>
+        <div class="plc-tpl-dialog" style="max-width:34rem">
+          <div class="plc-tpl-title">Project history</div>
+          <div class="plc-tpl-sub">${items.length} snapshots · auto-saved on edits (30s throttle)</div>
+          <div class="plc-tpl-grid" style="grid-template-columns:1fr;max-height:50vh;overflow:auto">
+            ${items.map(
+              (h) => html`
+                <div class="plc-tpl-card" style="cursor:default;text-align:left">
+                  <span class="plc-tpl-name">${new Date(h.ts).toLocaleString()}</span>
+                  <span class="plc-tpl-desc">${h.label} · id ${h.id}</span>
+                  <span style="display:flex;gap:.4rem;margin-top:.3rem">
+                    <button class="chip-btn" @click=${() => this.restoreSnapshot(h.id)}>restore</button>
+                    <button class="chip-btn" @click=${() => { deleteSnapshot(h.id); this.requestUpdate(); }}>delete</button>
+                  </span>
+                </div>
+              `,
+            )}
+            ${items.length ? nothing : html`<p class="plc-dim">no snapshots yet — edits auto-snapshot after the first save.</p>`}
+          </div>
+          <div class="plc-tpl-foot">
+            <button class="chip-btn" @click=${() => {
+              pushSnapshot(this.project, 'manual', false);
+              this.requestUpdate();
+            }}>snapshot now</button>
+            <button class="chip-btn" @click=${() => { this.historyOpen = false; }}>close</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private restoreSnapshot(id: number): void {
+    const p = getSnapshot(id);
+    if (!p) return;
+    const d = diffSummary(this.project, p);
+    this.project = p;
+    this.selPou = p.fbd.pous[0]?.id ?? '';
+    this.save();
+    this.historyOpen = false;
+    this.flash(`restored snapshot ${id} (${d} vs current)`);
+  }
+
   /** Template-picker dialog — cards + blank/never-show row. */
   private templatePicker(): unknown {
     return html`
@@ -506,6 +580,42 @@ export class TetherPlcIde extends LitElement {
       this.catalogLibs = libs;
       this.catGroups = catalogGroups(libs);
       this.requestUpdate();
+    }
+  }
+
+  /** Attach library sources for every catalog block the project
+      references (fbd block type_refs + inline-st pin types) that isn't
+      already in stSources — makes templates and pasted networks
+      compile without a manual attach step. */
+  private async ensureLibSources(): Promise<void> {
+    const libs = this.catalogLibs ?? [];
+    if (!libs.length) return;
+    const refs = new Set<string>();
+    for (const p of this.project.fbd.pous)
+      for (const n of p.networks)
+        for (const b of n.blocks) {
+          if (b.type_ref) refs.add(b.type_ref.toUpperCase());
+          for (const pin of b.pins ?? [])
+            if (/^(FB_|F_)/i.test(pin.type)) refs.add(pin.type.toUpperCase());
+        }
+    let changed = false;
+    for (const ref of refs) {
+      const src = blockSource(libs, ref);
+      if (!src) continue;
+      const stem = libStem(src.file);
+      const have = Object.keys(this.project.stSources).some(
+        (k) => k.toUpperCase() === stem.toUpperCase(),
+      );
+      if (have) continue;
+      const text = await fetchLibSrc(this.ctl.url, src.lib, src.file);
+      if (text) {
+        this.project.stSources[stem] = text;
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.save();
+      this.flash('attached library sources');
     }
   }
 
@@ -580,6 +690,7 @@ export class TetherPlcIde extends LitElement {
   }
 
   private save(): void {
+    pushSnapshot(this.project, `auto ${new Date().toLocaleTimeString()}`, true);
     saveProject(this.project);
     this.requestUpdate();
   }
@@ -676,6 +787,201 @@ export class TetherPlcIde extends LitElement {
     this.save();
   }
 
+  // ---- ST semantic navigation (stnav.ts) ------------------------------
+
+  private stNavWorld(): StWorld {
+    return stWorld({ fbd: this.project.fbd, stSources: this.project.stSources });
+  }
+
+  private onStNav(e: CustomEvent<StNavEvent>): void {
+    const d = e.detail;
+    const pou =
+      this.project.fbd.pous.find((p) => p.id === this.selPou) ??
+      this.project.fbd.pous[0];
+    if (!pou) return;
+    if (d.action === 'goto' && d.target) void this.stGoto(d.target, pou);
+    else if (d.action === 'usages')
+      this.usagesPanel = { name: d.name ?? '', list: d.usages ?? [] };
+    else if (d.action === 'rename' && d.name !== undefined && d.from !== undefined)
+      this.stRename(d.name, pou, d.from);
+  }
+
+  /** open `pouName`'s ST source (fbd POU or attached lib file) at `off`. */
+  private async openStSource(pouName: string, off?: number): Promise<boolean> {
+    const pou = this.project.fbd.pous.find(
+      (p) => p.name.toUpperCase() === pouName.toUpperCase(),
+    );
+    if (pou) {
+      this.selPou = pou.id;
+      this.selLib = undefined;
+      this.pane = 'st';
+    } else if (this.project.stSources[pouName]) {
+      this.selLib = pouName;
+      this.selPou = '';
+      this.pane = 'st';
+    } else {
+      /* lib file whose key differs from the POU name — find the source
+         that declares it */
+      const key = Object.keys(this.project.stSources).find((k) =>
+        declaredPousIn(this.project.stSources[k]!).some(
+          (d) => d.name.toUpperCase() === pouName.toUpperCase(),
+        ),
+      );
+      if (!key) return false;
+      this.selLib = key;
+      this.selPou = '';
+      this.pane = 'st';
+      pouName = key;
+    }
+    if (off !== undefined) {
+      await this.updateComplete;
+      this.querySelector<StEditor>('st-editor')?.jumpTo(off);
+    }
+    return true;
+  }
+
+  private async stGoto(t: DefTarget, fromPou: Pou): Promise<void> {
+    switch (t.kind) {
+      case 'pou': {
+        /* prefer the declaring source + decl offset (covers lib files) */
+        const key = t.source ?? t.pou;
+        if (t.offset !== undefined && this.project.stSources[key]) {
+          await this.openStSource(key, t.offset);
+          return;
+        }
+        await this.openStSource(t.pou);
+        return;
+      }
+      case 'var': {
+        if (t.source && this.project.stSources[t.source]) {
+          await this.openStSource(t.source, t.offset);
+        } else {
+          const pou = this.project.fbd.pous.find(
+            (p) => p.name.toUpperCase() === t.pou.toUpperCase(),
+          );
+          if (pou) {
+            this.selPou = pou.id;
+            this.selLib = undefined;
+            this.pane = 'st';
+          }
+        }
+        return;
+      }
+      case 'member': {
+        const src = this.project.stSources[fromPou.name] ?? '';
+        const ty = instanceType(src, t.instance);
+        if (!ty) return;
+        /* find the source declaring the FB type, then the member decl */
+        const key = Object.keys(this.project.stSources).find(
+          (k) =>
+            k.toUpperCase() === ty.toUpperCase() ||
+            declaredPousIn(this.project.stSources[k]!).some(
+              (d) => d.name.toUpperCase() === ty.toUpperCase(),
+            ),
+        );
+        if (!key) {
+          await this.openStSource(ty);
+          return;
+        }
+        const fsrc = this.project.stSources[key]!;
+        const decl = stVarSections(fsrc)
+          .flatMap((s) => s.decls)
+          .find((d) =>
+            d.names.some((n) => n.toUpperCase() === t.member.toUpperCase()),
+          );
+        await this.openStSource(key, decl?.offset);
+        return;
+      }
+      case 'global':
+        return;
+    }
+  }
+
+  private onUsageClick(u: Usage): void {
+    if (!u.where.startsWith('st:')) return;
+    void this.openStSource(u.where.slice(3), u.offset);
+  }
+
+  /** rename the symbol under the caret. POU renames are project-wide;
+      var/member renames are scoped to the declaring POU's source +
+      `inst.member` accesses (named-arg call sites are flagged by the
+      compiler if they go stale). */
+  private stRename(name: string, pou: Pou, at: number): void {
+    const world = this.stNavWorld();
+    const src = this.project.stSources[pou.name] ?? '';
+    const t = findDefinition(world, pou.name, src, at);
+    const nw = window.prompt(`Rename '${name}' to:`, name);
+    if (!nw || nw === name || !/^[A-Za-z_]\w*$/.test(nw)) return;
+
+    if (t?.kind === 'pou') {
+      const r = renamePou(world, t.pou, nw);
+      this.project.stSources = r.stSources;
+      for (const p of this.project.fbd.pous)
+        if (p.name.toUpperCase() === t.pou.toUpperCase()) p.name = nw;
+      for (const tk of this.project.fbd.tasks ?? []) {
+        const progs = (tk as { programs?: string[] }).programs;
+        if (progs)
+          for (let i = 0; i < progs.length; i++)
+            if (progs[i]!.toUpperCase() === t.pou.toUpperCase()) progs[i] = nw;
+      }
+      this.save();
+      this.status = `renamed ${t.pou} → ${nw}`;
+      return;
+    }
+
+    /* var or member: declaring POU = target pou (or current for locals) */
+    const pouName = t?.kind === 'member' ? this.memberPouName(pou, t.instance, t.member) : (t?.kind === 'var' ? t.pou : pou.name);
+    if (!pouName) {
+      this.status = 'rename: could not resolve declaring POU';
+      return;
+    }
+    const sym = t?.kind === 'member' ? t.member : name;
+    /* source key: fbd pou name, or the lib file declaring it */
+    const key =
+      this.project.stSources[pouName]
+        ? pouName
+        : Object.keys(this.project.stSources).find(
+            (k) =>
+              k.toUpperCase() === pouName.toUpperCase() ||
+              declaredPousIn(this.project.stSources[k]!).some(
+                (d) => d.name.toUpperCase() === pouName.toUpperCase(),
+              ),
+          );
+    if (key) {
+      this.project.stSources[key] = renameInSource(
+        this.project.stSources[key]!,
+        sym,
+        nw,
+      );
+    }
+    /* member accesses in every other source */
+    for (const [k, v] of Object.entries(this.project.stSources)) {
+      if (k === key) continue;
+      this.project.stSources[k] = renameMemberAccesses(v, pouName, sym, nw);
+    }
+    /* fbd.v1 interface + variable blocks of the declaring POU */
+    const dp = this.project.fbd.pous.find(
+      (p) => p.name.toUpperCase() === pouName.toUpperCase(),
+    );
+    if (dp) {
+      for (const v of dp.interface)
+        if (v.name.toUpperCase() === sym.toUpperCase()) v.name = nw;
+      for (const net of dp.networks)
+        for (const b of net.blocks)
+          if (b.kind === 'variable' && b.name?.toUpperCase() === sym.toUpperCase())
+            b.name = nw;
+    }
+    this.save();
+    this.status = `renamed ${sym} → ${nw} in ${pouName}`;
+  }
+
+  /** for `inst.member`, find the POU type `inst` is declared as. */
+  private memberPouName(pou: Pou, inst: string, member: string): string | undefined {
+    void member;
+    const src = this.project.stSources[pou.name] ?? '';
+    return instanceType(src, inst);
+  }
+
   /**
    * Stimulate an image channel (`plc.image.<R>.ch.<name>`): resolve the
    * channel's qualified var name through the debug symmap and arm a
@@ -763,6 +1069,7 @@ export class TetherPlcIde extends LitElement {
           <button class="chip-btn" @click=${this.onImport}>Import…</button>
           <button class="chip-btn" @click=${() => { this.tplPicker = true; }}>Templates…</button>
           <button class="chip-btn" @click=${this.onExport}>Export .fbd.json</button>
+          <button class="chip-btn" @click=${() => { this.historyOpen = true; }}>History</button>
           <button class="chip-btn" @click=${this.onExportXml}>Export .xml</button>
           <button class="chip-btn" ?disabled=${this.compiling} @click=${() => void this.onCheck()}>
             ${this.compiling ? 'checking…' : 'check'}
@@ -788,6 +1095,7 @@ export class TetherPlcIde extends LitElement {
         <div class="plc-main">${this.paneBody()}</div>
         ${this.diagsStrip()}
         ${this.tplPicker ? this.templatePicker() : nothing}
+        ${this.historyOpen ? this.historyDialog() : nothing}
       </div>
     `;
   }
@@ -870,6 +1178,7 @@ export class TetherPlcIde extends LitElement {
     this.compiling = true;
     this.flushStEditors();
     try {
+      await this.ensureLibSources();
       const r = await compileProject(this.ctl.url, this.project);
       this.diags = r.diags;
       this.flash(r.ok ? 'check ok' : `${r.errors} error(s)`);
@@ -979,7 +1288,11 @@ export class TetherPlcIde extends LitElement {
             if (!libs.length) return nothing;
             return html`<div class="plc-tree-head"><span>Libraries</span></div>
               ${libs.map(
-                (n) => html`<div class="plc-tree-net">
+                (n) => html`<div class="plc-tree-net plc-tree-lib" @click=${() => {
+                  this.selLib = n;
+                  this.selPou = '';
+                  this.pane = 'st';
+                }}>
                   ${n} <span class="plc-dim">${this.project.stSources[n]!.length} B</span>
                   <button class="chip-btn" title="detach source" @click=${() => this.detachSource(n)}>
                     ✕
@@ -1211,6 +1524,7 @@ export class TetherPlcIde extends LitElement {
   // ---- ST ------------------------------------------------------------
 
   private stPane(): TemplateResult {
+    if (this.selLib) return this.libPane();
     const pou = this.project.fbd.pous.find((p) => p.id === this.selPou) ?? this.project.fbd.pous[0];
     return html`
       <div class="plc-split">
@@ -1222,6 +1536,7 @@ export class TetherPlcIde extends LitElement {
                 class="plc-tree-pou ${pou && p.id === pou.id ? 'sel' : ''}"
                 @click=${() => {
                   this.selPou = p.id;
+                  this.selLib = undefined;
                   this.pane = 'st';
                 }}
               >
@@ -1242,11 +1557,65 @@ export class TetherPlcIde extends LitElement {
                       pous: this.project.fbd.pous.map((p) => p.name),
                       vars: pou.interface.map((v) => v.name),
                     }}
+                    .world=${this.stNavWorld()}
+                    .pouName=${pou.name}
                     @change=${(e: CustomEvent<string>) => this.onStEdit(pou, e.detail)}
+                    @st-nav=${(e: CustomEvent<StNavEvent>) => this.onStNav(e)}
                   ></st-editor>
+                  ${this.usagesPanel
+                    ? html`<div class="plc-usages">
+                        <div class="plc-usages-head">
+                          <b>${this.usagesPanel.list.length}</b> use(s) of
+                          <b>${this.usagesPanel.name}</b>
+                          <button class="chip-btn" @click=${() => (this.usagesPanel = undefined)}>✕</button>
+                        </div>
+                        ${this.usagesPanel.list.map(
+                          (u) => html`<div class="plc-usage" @click=${() => this.onUsageClick(u)}>
+                            ${u.where.replace(/^st:/, '')}:${u.line}:${u.col}
+                          </div>`,
+                        )}
+                      </div>`
+                    : nothing}
                 `
               : html`<p class="plc-dim">No POU selected.</p>`
           }
+        </div>
+      </div>
+    `;
+  }
+
+  /** read/write view of an attached library .st source (no fbd POU). */
+  private libPane(): TemplateResult {
+    const name = this.selLib ?? '';
+    const src = this.project.stSources[name] ?? '';
+    return html`
+      <div class="plc-split">
+        <div class="plc-tree tile-scroll">
+          <div class="plc-tree-head"><span>Libraries</span></div>
+          ${Object.keys(this.project.stSources)
+            .filter((n) => this.project.stSources[n]!.trim())
+            .map(
+              (n) => html`<div class="plc-tree-net ${n === name ? 'sel' : ''}" @click=${() => {
+                this.selLib = n;
+              }}>
+                ${n} <span class="plc-dim">${this.project.stSources[n]!.length} B</span>
+              </div>`,
+            )}
+        </div>
+        <div class="plc-detail">
+          <h3>${name} <span class="plc-dim">library source</span></h3>
+          <st-editor
+            class="plc-st-editor"
+            .value=${src}
+            .symbols=${{ pous: [], vars: [] }}
+            .world=${this.stNavWorld()}
+            .pouName=${name}
+            @change=${(e: CustomEvent<string>) => {
+              this.project.stSources[name] = e.detail;
+              this.save();
+            }}
+            @st-nav=${(e: CustomEvent<StNavEvent>) => this.onStNav(e)}
+          ></st-editor>
         </div>
       </div>
     `;
@@ -1873,6 +2242,98 @@ export class TetherPlcIde extends LitElement {
     this.trendTimer = window.setInterval(() => void this.trendTick(), 700);
   }
 
+  // ---- alarm rules ----------------------------------------------------
+
+  private alarmRules(): AlarmRule[] {
+    if (!this.project.alarms) this.project.alarms = [];
+    return this.project.alarms;
+  }
+
+  private setAlarmRule(i: number, k: keyof AlarmRule, v: string): void {
+    const r = this.alarmRules()[i];
+    if (!r) return;
+    if (k === 'priority') (r as unknown as Record<string, number>).priority = Math.max(0, Math.min(3, Number(v) || 0));
+    else if (k === 'op') (r as unknown as Record<string, string>).op = v;
+    else (r as unknown as Record<string, string>)[k] = v;
+    this.save();
+    this.requestUpdate();
+  }
+
+  private addAlarmRule(): void {
+    const rules = this.alarmRules();
+    const id = Math.max(0, ...rules.map((r) => r.id)) + 1;
+    rules.push(defaultRule(id));
+    this.save();
+    this.requestUpdate();
+  }
+
+  private delAlarmRule(i: number): void {
+    this.alarmRules().splice(i, 1);
+    this.save();
+    this.requestUpdate();
+  }
+
+  /** (re)generate the AlarmRules FBD program + ensure a task runs it. */
+  private buildAlarmProgram(): void {
+    const rules = this.alarmRules();
+    const pou = buildAlarmPou(rules);
+    const idx = this.project.fbd.pous.findIndex((p) => p.name === 'AlarmRules');
+    if (idx >= 0) this.project.fbd.pous[idx] = pou;
+    else this.project.fbd.pous.push(pou);
+    /* run it on the first task (create MAIN if none) */
+    const fbd = this.project.fbd;
+    if (!fbd.tasks.length) {
+      fbd.tasks.push({ name: 'MAIN', period_ns: 100000000, priority: 0, programs: [] } as never);
+    }
+    const t = fbd.tasks[0]! as { programs?: string[] };
+    t.programs = t.programs ?? [];
+    if (!t.programs.includes('p_alarms') && !t.programs.includes('AlarmRules'))
+      t.programs.push('p_alarms');
+    this.save();
+    this.flash(`AlarmRules program built (${rules.length} rules)`);
+    this.selPou = pou.id;
+    this.pane = 'fbd';
+  }
+
+  private alarmRulesEditor(): TemplateResult {
+    const rules = this.alarmRules();
+    return html`
+      <div class="plc-ops">
+        <button class="chip-btn" @click=${() => this.addAlarmRule()}>+ rule</button>
+        <button class="chip-btn primary" ?disabled=${!rules.length} @click=${() => this.buildAlarmProgram()}>build AlarmRules</button>
+        ${rules.length ? html`<button class="chip-btn" @click=${() => { this.project.alarms = []; this.save(); this.requestUpdate(); }}>clear</button>` : nothing}
+      </div>
+      ${
+        rules.length
+          ? html`<table class="plc-table">
+              <thead><tr><th>name</th><th>signal</th><th>op</th><th>threshold</th><th>pri</th><th>msg</th><th></th></tr></thead>
+              <tbody>
+                ${rules.map(
+                  (r, i) => html`<tr>
+                    <td><input class="plc-mapcell" .value=${r.name}
+                      @change=${(e: Event) => this.setAlarmRule(i, 'name', (e.target as HTMLInputElement).value)} /></td>
+                    <td><input class="plc-mapcell" style="width:12ch" .value=${r.signal} placeholder="%IX0.0 / var"
+                      @change=${(e: Event) => this.setAlarmRule(i, 'signal', (e.target as HTMLInputElement).value)} /></td>
+                    <td><select class="plc-mapcell" .value=${r.op}
+                      @change=${(e: Event) => this.setAlarmRule(i, 'op', (e.target as HTMLSelectElement).value)}>
+                      ${ALARM_OPS.map((o) => html`<option value=${o.op}>${o.op}</option>`)}
+                    </select></td>
+                    <td><input class="plc-mapcell" style="width:8ch" .value=${r.threshold}
+                      @change=${(e: Event) => this.setAlarmRule(i, 'threshold', (e.target as HTMLInputElement).value)} /></td>
+                    <td><input class="plc-mapcell" type="number" min="0" max="3" style="width:4ch" .value=${String(r.priority)}
+                      @change=${(e: Event) => this.setAlarmRule(i, 'priority', (e.target as HTMLInputElement).value)} /></td>
+                    <td><input class="plc-mapcell" style="width:14ch" .value=${r.message ?? ''}
+                      @change=${(e: Event) => this.setAlarmRule(i, 'message', (e.target as HTMLInputElement).value)} /></td>
+                    <td><button class="chip-btn" @click=${() => this.delAlarmRule(i)}>✕</button></td>
+                  </tr>`,
+                )}
+              </tbody>
+            </table>`
+          : html`<p class="plc-dim">no rules — define a condition on a signal, then build the AlarmRules program.</p>`
+      }
+    `;
+  }
+
   private alarmsPane(): TemplateResult {
     const st = this.alarmStats;
     const live = this.alarms ?? [];
@@ -1896,6 +2357,8 @@ export class TetherPlcIde extends LitElement {
             ? html`<p class="plc-dim">ctl unreachable — connect on the Deploy pane.</p>`
             : nothing
         }
+        <h4>Rules <span class="plc-dim">compiled into the AlarmRules program</span></h4>
+        ${this.alarmRulesEditor()}
         <h4>Live events</h4>
         ${
           live.length
@@ -3213,6 +3676,134 @@ export class TetherPlcIde extends LitElement {
       bridge format: `image in=N out=M`, `in|out off= size= key=
       [pdo=] [type=] [safe=]`, `bind <at> <key>`, `safety <key>`,
       `hash <sha>`. */
+  /** parse the current draft into editable channel/binding rows. */
+  private openMapRows(): void {
+    const draft = this.mapEdit ?? this.genMap?.text ?? this.project.deployMap ?? '';
+    const m = parseDeployMap(draft);
+    this.mapRows = {
+      inSize: m.inSize, outSize: m.outSize,
+      channels: m.channels.map((c) => ({ ...c })),
+      bindings: m.bindings.map((b) => ({ ...b })),
+    };
+    this.requestUpdate();
+  }
+
+  private mapRow(k: string, v: string): void {
+    const r = this.mapRows;
+    if (!r) return;
+    if (k === 'inSize' || k === 'outSize') {
+      const n = Number(v);
+      r[k] = Number.isFinite(n) && n >= 0 ? n : undefined;
+      return;
+    }
+    /* channel field: idx:key */
+    const m = /^(\d+):([\w]+)$/.exec(k);
+    if (!m) return;
+    const c = r.channels[Number(m[1])];
+    if (!c) return;
+    const f = m[2]!;
+    if (f === 'dir') { if (v === 'in' || v === 'out') c.dir = v; return; }
+    if (f === 'off' || f === 'size') {
+      const n = Number(v);
+      if (Number.isFinite(n) && n >= 0) (c as unknown as Record<string, number>)[f] = Math.floor(n);
+      return;
+    }
+    if (f === 'pdo' || f === 'type' || f === 'safe' || f === 'key') {
+      if (v) (c as unknown as Record<string, string>)[f] = v;
+      else delete (c as unknown as Record<string, string>)[f];
+      if (f === 'key' && !c.pdo) c.key = v;
+      if (f === 'pdo' && v) { delete (c as unknown as Record<string, string>).key; c.key = v; }
+    }
+    this.requestUpdate();
+  }
+
+  private mapBindRow(i: number, k: 'at' | 'key', v: string): void {
+    const b = this.mapRows?.bindings[i];
+    if (b) { b[k] = v; this.requestUpdate(); }
+  }
+
+  private addMapChannel(): void {
+    this.mapRows?.channels.push({ dir: 'in', off: 0, size: 1, key: 'ch0' });
+    this.requestUpdate();
+  }
+
+  private addMapBind(): void {
+    this.mapRows?.bindings.push({ at: '%IX0.0', key: 'ch0' });
+    this.requestUpdate();
+  }
+
+  private delMapRow(kind: 'chan' | 'bind', i: number): void {
+    if (kind === 'chan') this.mapRows?.channels.splice(i, 1);
+    else this.mapRows?.bindings.splice(i, 1);
+    this.requestUpdate();
+  }
+
+  /** serialize rows back into the editable map text. */
+  private applyMapRows(): void {
+    const r = this.mapRows;
+    if (!r) return;
+    this.mapEdit = serializeDeployMap({
+      inSize: r.inSize, outSize: r.outSize,
+      channels: r.channels, bindings: r.bindings, safety: [],
+    });
+    this.mapRows = undefined;
+    this.mapViolations = undefined;
+    this.requestUpdate();
+  }
+
+  /** editable channel/binding grid — the graphical deploy-map editor. */
+  private mapRowsEditor(): TemplateResult {
+    const r = this.mapRows!;
+    const cell = (i: number, k: string, v: string | number | undefined, w = 6) => html`
+      <input class="plc-mapcell" style="width:${w}ch" .value=${v ?? ''}
+        @change=${(e: Event) => this.mapRow(`${i}:${k}`, (e.target as HTMLInputElement).value)} />`;
+    return html`
+      <div class="plc-mapgrid">
+        <div class="plc-mapgrid-row">
+          <label>image in <input class="plc-mapcell" type="number" .value=${r.inSize ?? ''}
+            @change=${(e: Event) => this.mapRow('inSize', (e.target as HTMLInputElement).value)} /></label>
+          <label>out <input class="plc-mapcell" type="number" .value=${r.outSize ?? ''}
+            @change=${(e: Event) => this.mapRow('outSize', (e.target as HTMLInputElement).value)} /></label>
+          <button class="chip-btn" @click=${() => this.addMapChannel()}>+ channel</button>
+          <button class="chip-btn" @click=${() => this.addMapBind()}>+ bind</button>
+          <button class="chip-btn primary" @click=${() => this.applyMapRows()}>apply to text</button>
+          <button class="chip-btn" @click=${() => { this.mapRows = undefined; this.requestUpdate(); }}>cancel</button>
+        </div>
+        <table class="plc-table plc-mapgrid-tbl">
+          <thead><tr><th>dir</th><th>off</th><th>size</th><th>key/pdo</th><th>type</th><th>safe</th><th></th></tr></thead>
+          <tbody>
+            ${r.channels.map((c, i) => html`
+              <tr>
+                <td><select class="plc-mapcell" .value=${c.dir}
+                  @change=${(e: Event) => this.mapRow(`${i}:dir`, (e.target as HTMLSelectElement).value)}>
+                  <option value="in">in</option><option value="out">out</option>
+                </select></td>
+                <td>${cell(i, 'off', c.off)}</td>
+                <td>${cell(i, 'size', c.size)}</td>
+                <td>${cell(i, c.pdo ? 'pdo' : 'key', c.pdo ?? c.key, 14)}</td>
+                <td>${cell(i, 'type', c.type, 8)}</td>
+                <td>${cell(i, 'safe', c.safe, 8)}</td>
+                <td><button class="chip-btn" @click=${() => this.delMapRow('chan', i)}>✕</button></td>
+              </tr>`)}
+          </tbody>
+        </table>
+        ${r.bindings.length ? html`
+          <table class="plc-table plc-mapgrid-tbl">
+            <thead><tr><th>bind at</th><th>→ key</th><th></th></tr></thead>
+            <tbody>
+              ${r.bindings.map((b, i) => html`
+                <tr>
+                  <td><input class="plc-mapcell" style="width:12ch" .value=${b.at}
+                    @change=${(e: Event) => this.mapBindRow(i, 'at', (e.target as HTMLInputElement).value)} /></td>
+                  <td><input class="plc-mapcell" style="width:16ch" .value=${b.key}
+                    @change=${(e: Event) => this.mapBindRow(i, 'key', (e.target as HTMLInputElement).value)} /></td>
+                  <td><button class="chip-btn" @click=${() => this.delMapRow('bind', i)}>✕</button></td>
+                </tr>`)}
+            </tbody>
+          </table>` : nothing}
+      </div>`;
+  }
+
   private ioMapCard(): TemplateResult {
     const m = this.ioMap ?? parseDeployMap('');
     const chans = m.channels;
@@ -3278,6 +3869,8 @@ export class TetherPlcIde extends LitElement {
         placeholder="deploy map (bridge format) — generate drafts channels + binds from project AT bindings; pdo= endpoints come from device blocks"
         .value=${draft}
         @input=${(e: Event) => { this.mapEdit = (e.target as HTMLTextAreaElement).value; this.mapViolations = undefined; }}></textarea>
+      ${this.mapRows ? this.mapRowsEditor() : html`
+        <button class="chip-btn" ?disabled=${!draft.trim()} @click=${() => this.openMapRows()}>edit channels…</button>`}
       ${
         chans.length
           ? html`
@@ -3438,6 +4031,7 @@ export class TetherPlcIde extends LitElement {
     this.ctlErr = '';
     this.flushStEditors();
     try {
+      await this.ensureLibSources();
       const r = await compileProject(this.ctl.url, this.project, true);
       this.diags = r.diags;
       if (!r.ok || !r.package) {

@@ -6,7 +6,9 @@
  */
 
 import { importFbdJson, type PlcProject } from './store';
+import atcRecipe from './templates/atc-recipe.fbd.json';
 import deviceTerminals from './templates/device-terminals.fbd.json';
+import haBridge from './templates/ha-bridge.fbd.json';
 import motorControl from './templates/motor-control.fbd.json';
 import profileLoop from './templates/profile-loop.fbd.json';
 import safetyCircuit from './templates/safety-circuit.fbd.json';
@@ -68,6 +70,20 @@ export const PROJECT_TEMPLATES: readonly ProjectTemplate[] = [
     desc: 'E-stop + guard door — reset-required enable latch',
     project: 'Safety circuit',
     doc: safetyCircuit,
+  },
+  {
+    id: 'ha-bridge',
+    name: 'Home Assistant bridge',
+    desc: 'FB_HaBridge — MQTT entities in/out + event triggers',
+    project: 'HA bridge',
+    doc: haBridge,
+  },
+  {
+    id: 'atc-recipe',
+    name: 'Batch temperature recipe',
+    desc: 'FB_AtcBatch ramp/dwell/cool profile + PID + trend capture',
+    project: 'ATC batch recipe',
+    doc: atcRecipe,
   },
 ];
 

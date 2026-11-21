@@ -8,8 +8,9 @@
  * zoom. Mutations edit the network in place and emit `change` for the
  * host to persist.
  *
- * Not yet: comment/label editing UI, wire-end reconnect, clipboard
- * across networks.
+ * Undo/redo snapshots are per-network: switching networks or POUs
+ * resets the stacks (they hold one net's JSON) while the clipboard
+ * survives so copy in one network pastes into another.
  */
 import { html, LitElement, nothing, svg, TemplateResult } from 'lit';
 import { Assoc, Block, IfaceVar, Network, PortSel, Pou, Wire, nextNodeId, portLabel } from './model';
@@ -84,6 +85,21 @@ interface Clipboard {
   assocs: Assoc[];
 }
 
+/** Wire-end reconnect drag: which wire, which end, dst index, cursor. */
+interface PendingRec {
+  wire: number;
+  end: 'src' | 'dst';
+  di: number;
+  x: number;
+  y: number;
+}
+
+/** Selected annotation node (comment/label/jump/return marker). */
+interface SelNote {
+  kind: 'comment' | 'label' | 'jump' | 'return';
+  id: number;
+}
+
 /** "add device" wizard form state. */
 interface DeviceForm {
   name: string;
@@ -118,7 +134,10 @@ export class FbdCanvas extends LitElement {
     paletteQ: { state: true },
     selIds: { state: true },
     selWire: { state: true },
+    selNote: { state: true },
     pending: { state: true },
+    pendingRec: { state: true },
+    placing: { state: true },
     marquee: { state: true },
     vb: { state: true },
   };
@@ -146,7 +165,11 @@ export class FbdCanvas extends LitElement {
 
   declare selIds: Set<number>;
   declare selWire?: number;
+  declare selNote?: SelNote;
   declare pending?: PendingWire;
+  declare pendingRec?: PendingRec;
+  /** annotation placement mode: next canvas click drops a node of this kind. */
+  declare placing?: SelNote['kind'];
   declare marquee?: Marquee;
   declare vb: { x: number; y: number; s: number };
 
@@ -155,6 +178,7 @@ export class FbdCanvas extends LitElement {
   private clipboard?: Clipboard;
   private undoStack: string[] = [];
   private redoStack: string[] = [];
+  private stackNet?: Network;
 
   constructor() {
     super();
@@ -190,7 +214,33 @@ export class FbdCanvas extends LitElement {
     this.dispatchEvent(new CustomEvent('change', { bubbles: true, composed: true }));
   }
 
+  /** net/pou switches invalidate undo stacks (they hold one net's JSON)
+      and transient gesture state; the clipboard deliberately survives
+      so copy in one network pastes into another. */
+  private syncNet(): void {
+    const net = this.net;
+    if (net === this.stackNet) return;
+    /* only a real switch (known net → different net) clears transient
+       state — first adoption must not wipe a selection the user just
+       made before the first mutation */
+    const switching = this.stackNet !== undefined;
+    this.stackNet = net;
+    this.undoStack = [];
+    this.redoStack = [];
+    if (!switching) return;
+    this.selIds = new Set();
+    this.selWire = undefined;
+    this.selNote = undefined;
+    this.pending = undefined;
+    this.pendingRec = undefined;
+    this.placing = undefined;
+    this.drag = undefined;
+    this.pan = undefined;
+    this.marquee = undefined;
+  }
+
   private snapshot(): void {
+    this.syncNet();
     const net = this.net;
     if (!net) return;
     this.undoStack.push(JSON.stringify(net));
@@ -203,13 +253,18 @@ export class FbdCanvas extends LitElement {
     const pou = this.pou;
     if (!net || !pou) return;
     pou.networks[this.netIndex] = JSON.parse(json) as Network;
+    /* restored object is a new identity — keep stackNet on it or the
+       next syncNet() would treat this as a network switch */
+    this.stackNet = pou.networks[this.netIndex];
     this.selIds = new Set();
     this.selWire = undefined;
+    this.selNote = undefined;
     this.emitChange();
     this.requestUpdate();
   }
 
   private undo(): void {
+    this.syncNet();
     const prev = this.undoStack.pop();
     const net = this.net;
     if (prev === undefined || !net) return;
@@ -218,6 +273,7 @@ export class FbdCanvas extends LitElement {
   }
 
   private redo(): void {
+    this.syncNet();
     const next = this.redoStack.pop();
     const net = this.net;
     if (next === undefined || !net) return;
@@ -226,6 +282,7 @@ export class FbdCanvas extends LitElement {
   }
 
   private mutate(fn: (net: Network) => void): void {
+    this.syncNet();
     const net = this.net;
     if (!net) return;
     this.snapshot();
@@ -277,7 +334,8 @@ export class FbdCanvas extends LitElement {
   private deleteSel(): void {
     const ids = this.selIds;
     const wire = this.selWire;
-    if (!ids.size && wire === undefined) return;
+    const note = this.selNote;
+    if (!ids.size && wire === undefined && !note) return;
     this.mutate((net) => {
       if (ids.size) {
         net.blocks = net.blocks.filter((b) => !ids.has(b.id));
@@ -288,9 +346,89 @@ export class FbdCanvas extends LitElement {
         net.assocs = net.assocs.filter((a) => !ids.has(a.dst.block));
       }
       if (wire !== undefined) net.wires = net.wires.filter((w) => w.id !== wire);
+      if (note) {
+        const arr =
+          note.kind === 'comment'
+            ? net.comments
+            : note.kind === 'label'
+              ? net.labels
+              : note.kind === 'jump'
+                ? net.jumps
+                : net.returns;
+        const i = arr.findIndex((n) => n.id === note.id);
+        if (i >= 0) arr.splice(i, 1);
+      }
       this.selIds = new Set();
       this.selWire = undefined;
+      this.selNote = undefined;
     });
+  }
+
+  // ---- annotations (comments / labels / jumps / returns) -----------------
+
+  /** Arm annotation placement — the next canvas click drops the node. */
+  private armPlacing(kind: SelNote['kind']): void {
+    this.placing = this.placing === kind ? undefined : kind;
+    this.selIds = new Set();
+    this.selWire = undefined;
+    this.selNote = undefined;
+    this.requestUpdate();
+  }
+
+  /** Drop the armed annotation at grid pos (pos is in grid units). */
+  private placeNote(p: { x: number; y: number }): void {
+    const kind = this.placing;
+    const net = this.net;
+    if (!kind || !net) return;
+    this.placing = undefined;
+    let text = '';
+    if (kind === 'comment') text = window.prompt('comment text', '') ?? '';
+    else if (kind === 'label') text = window.prompt('label name', '') ?? '';
+    else if (kind === 'jump') text = window.prompt('jump target label', '') ?? '';
+    if (kind !== 'return' && !text.trim()) {
+      this.requestUpdate();
+      return;
+    }
+    this.mutate((n) => {
+      const id = nextNodeId(this.pou!);
+      const pos = { x: Math.round(p.x / GX), y: Math.round(p.y / GX) };
+      if (kind === 'comment') n.comments.push({ id, pos, text: text.trim() });
+      else if (kind === 'label') n.labels.push({ id, pos, name: text.trim() });
+      else if (kind === 'jump') n.jumps.push({ id, pos, target: text.trim() });
+      else n.returns.push({ id, pos });
+      this.selNote = { kind, id };
+    });
+  }
+
+  /** Double-click an annotation: edit its text/name in place. */
+  private editNote(kind: SelNote['kind'], id: number): void {
+    const net = this.net;
+    if (!net || kind === 'return') return;
+    const node =
+      kind === 'comment'
+        ? net.comments.find((c) => c.id === id)
+        : kind === 'label'
+          ? net.labels.find((l) => l.id === id)
+          : net.jumps.find((j) => j.id === id);
+    if (!node) return;
+    const field = kind === 'comment' ? 'text' : kind === 'label' ? 'name' : 'target';
+    const cur = (node as unknown as Record<string, string>)[field] ?? '';
+    const v = window.prompt(kind === 'comment' ? 'comment text' : 'name', cur);
+    if (v === null) return;
+    this.mutate((n) => {
+      const arr =
+        kind === 'comment' ? n.comments : kind === 'label' ? n.labels : n.jumps;
+      const t = arr.find((x) => x.id === id) as unknown as Record<string, string> | undefined;
+      if (t) t[field] = v;
+    });
+  }
+
+  /** click handler shared by all annotation renderers. */
+  private onNoteDown(e: PointerEvent, kind: SelNote['kind'], id: number): void {
+    e.stopPropagation();
+    this.selNote = { kind, id };
+    this.selIds = new Set();
+    this.selWire = undefined;
   }
 
   // ---- clipboard + align ----------------------------------------------
@@ -493,14 +631,17 @@ export class FbdCanvas extends LitElement {
     const mod = e.ctrlKey || e.metaKey;
     if (
       (e.key === 'Delete' || e.key === 'Backspace') &&
-      (this.selIds.size || this.selWire !== undefined)
+      (this.selIds.size || this.selWire !== undefined || this.selNote !== undefined)
     ) {
       this.deleteSel();
       e.preventDefault();
     } else if (e.key === 'Escape') {
       this.pending = undefined;
+      this.pendingRec = undefined;
+      this.placing = undefined;
       this.selIds = new Set();
       this.selWire = undefined;
+      this.selNote = undefined;
     } else if ((e.key === 'p' || e.key === 'P') && this.selWire !== undefined) {
       this.toggleProbe();
       e.preventDefault();
@@ -606,6 +747,101 @@ export class FbdCanvas extends LitElement {
     this.pending = undefined;
   }
 
+  // ---- wire-end reconnect ----------------------------------------------
+
+  /** Begin dragging a wire endpoint (src out-pin or one dst in-pin). */
+  private onWireEndDown(e: PointerEvent, w: Wire, end: 'src' | 'dst', di: number): void {
+    e.stopPropagation();
+    const p = this.svgPt(e);
+    this.pendingRec = { wire: w.id, end, di, x: p.x, y: p.y };
+    try {
+      (e.target as Element).setPointerCapture?.(e.pointerId);
+    } catch {
+      /* synthetic events */
+    }
+  }
+
+  /** Resolve a pending reconnect drop onto an in-pin (dst end) or
+      out-pin (src end) via hit-testing, like pending-wire drops. */
+  private completeRec(e: PointerEvent): void {
+    const rec = this.pendingRec;
+    if (!rec) return;
+    this.pendingRec = undefined;
+    const stack =
+      typeof document.elementsFromPoint === 'function'
+        ? document.elementsFromPoint(e.clientX, e.clientY)
+        : [];
+    const want = rec.end === 'dst' ? '.fbd-pin.in' : '.fbd-pin.out';
+    const pinEl = stack
+      .map((el) => el.closest?.(want))
+      .find((el): el is Element => !!el);
+    if (!pinEl) return;
+    const net = this.net;
+    const b = net?.blocks.find((x) => x.id === Number(pinEl.getAttribute('data-node')));
+    const i = Number(pinEl.getAttribute('data-pin'));
+    if (!net || !b || !Number.isInteger(i)) return;
+    const w = net.wires.find((x) => x.id === rec.wire);
+    if (!w) return;
+    if (rec.end === 'dst') {
+      const d = w.dsts[rec.di];
+      if (!d || (d.block === b.id && d.port === i)) return;
+      this.mutate((n) => {
+        const nw = n.wires.find((x) => x.id === rec.wire);
+        if (!nw || rec.di >= nw.dsts.length) return;
+        nw.dsts.splice(rec.di, 1);
+        if (!nw.dsts.length) n.wires = n.wires.filter((x) => x.id !== rec.wire);
+        /* push onto a same-src wire or create one — same rule as
+           completeWire so fan-out stays merged */
+        const srcBlk = n.blocks.find((x) => x.id === w.src.block);
+        const sel: PortSel =
+          srcBlk &&
+          (srcBlk.kind === 'fb' || srcBlk.kind === 'function' || srcBlk.kind === 'device' || srcBlk.kind === 'st')
+            ? (blockSig(srcBlk, this.pous).outs[outIndex(srcBlk, w.src.port, this.pous)] ?? w.src.port)
+            : w.src.port;
+        const existing = n.wires.find(
+          (x) => x.src.block === w.src.block && samePort(x.src.port, sel),
+        );
+        if (existing) existing.dsts.push({ block: b.id, port: i });
+        else
+          n.wires.push({
+            id: nextNodeId(this.pou!),
+            src: { block: w.src.block, port: sel },
+            dsts: [{ block: b.id, port: i }],
+          });
+      });
+    } else {
+      /* src end: new src block's out-pin i */
+      if (w.src.block === b.id) return;
+      this.mutate((n) => {
+        const nw = n.wires.find((x) => x.id === rec.wire);
+        if (!nw) return;
+        const dsts = nw.dsts;
+        n.wires = n.wires.filter((x) => x.id !== rec.wire);
+        const nb = n.blocks.find((x) => x.id === b.id);
+        const sel: PortSel =
+          nb &&
+          (nb.kind === 'fb' || nb.kind === 'function' || nb.kind === 'device' || nb.kind === 'st')
+            ? (blockSig(nb, this.pous).outs[i] ?? i)
+            : i;
+        const existing = n.wires.find(
+          (x) => x.src.block === b.id && samePort(x.src.port, sel),
+        );
+        if (existing) {
+          for (const d of dsts) {
+            if (!existing.dsts.some((e2) => e2.block === d.block && samePort(e2.port, d.port)))
+              existing.dsts.push(d);
+          }
+        } else {
+          n.wires.push({
+            id: nextNodeId(this.pou!),
+            src: { block: b.id, port: sel },
+            dsts,
+          });
+        }
+      });
+    }
+  }
+
   private onPinClick(e: MouseEvent, b: Block, i: number): void {
     if (!e.shiftKey) return;
     e.stopPropagation();
@@ -637,6 +873,10 @@ export class FbdCanvas extends LitElement {
       this.pending = { ...this.pending, x: p.x, y: p.y };
       return;
     }
+    if (this.pendingRec) {
+      this.pendingRec = { ...this.pendingRec, x: p.x, y: p.y };
+      return;
+    }
     const d = this.drag;
     if (!d) return;
     const net = this.net;
@@ -659,10 +899,29 @@ export class FbdCanvas extends LitElement {
       this.pan = undefined;
       return;
     }
+    if (this.pendingRec) {
+      this.completeRec(e);
+      return;
+    }
     const m = this.marquee;
     if (m) {
       this.marquee = undefined;
       const net = this.net;
+      /* tiny box = plain click: annotation placement mode drops a
+         node here; otherwise a click clears transient selections */
+      const tiny = Math.abs(m.x1 - m.x0) + Math.abs(m.y1 - m.y0) < 6;
+      if (net && tiny && this.placing) {
+        this.placeNote(this.svgPt(e));
+        return;
+      }
+      if (net && tiny) {
+        /* plain click on empty canvas — deselect like a zero-area
+           marquee did before */
+        this.selIds = new Set();
+        this.selWire = undefined;
+        this.selNote = undefined;
+        return;
+      }
       if (net) {
         const x0 = Math.min(m.x0, m.x1);
         const x1 = Math.max(m.x0, m.x1);
@@ -678,6 +937,7 @@ export class FbdCanvas extends LitElement {
           .map((b) => b.id);
         this.selIds = m.additive ? new Set([...this.selIds, ...hit]) : new Set(hit);
         this.selWire = undefined;
+        this.selNote = undefined;
       }
       return;
     }
@@ -763,6 +1023,7 @@ export class FbdCanvas extends LitElement {
   // ---- render ----------------------------------------------------------
 
   render(): TemplateResult {
+    this.syncNet();
     const net = this.net;
     if (!this.pou || !net) return html`<div class="fbd-canvas-empty">no network</div>`;
     const vb = this.vb;
@@ -780,25 +1041,51 @@ export class FbdCanvas extends LitElement {
           @wheel=${this.onWheel}
         >
           ${net.comments.map(
-            (c) => svg`<g transform="translate(${c.pos.x * GX} ${c.pos.y * GX})">
+            (c) => svg`<g class="fbd-note-g ${this.selNote?.kind === 'comment' && this.selNote.id === c.id ? 'sel' : ''}"
+                transform="translate(${c.pos.x * GX} ${c.pos.y * GX})"
+                @pointerdown=${(e: PointerEvent) => this.onNoteDown(e, 'comment', c.id)}
+                @dblclick=${() => this.editNote('comment', c.id)}>
               <rect class="fbd-note" width="180" height="40"></rect>
               <text class="fbd-note-text" x="4" y="14">${c.text}</text>
             </g>`,
           )}
           ${net.labels.map(
             (l) =>
-              svg`<text class="fbd-label" x="${l.pos.x * GX}" y="${l.pos.y * GX}">${l.name}:</text>`,
+              svg`<text class="fbd-label ${this.selNote?.kind === 'label' && this.selNote.id === l.id ? 'sel' : ''}"
+                x="${l.pos.x * GX}" y="${l.pos.y * GX}"
+                @pointerdown=${(e: PointerEvent) => this.onNoteDown(e, 'label', l.id)}
+                @dblclick=${() => this.editNote('label', l.id)}>${l.name}:</text>`,
           )}
           ${net.jumps.map(
             (j) =>
-              svg`<text class="fbd-label" x="${j.pos.x * GX}" y="${j.pos.y * GX}">→ ${j.target}</text>`,
+              svg`<text class="fbd-label ${this.selNote?.kind === 'jump' && this.selNote.id === j.id ? 'sel' : ''}"
+                x="${j.pos.x * GX}" y="${j.pos.y * GX}"
+                @pointerdown=${(e: PointerEvent) => this.onNoteDown(e, 'jump', j.id)}
+                @dblclick=${() => this.editNote('jump', j.id)}>→ ${j.target}</text>`,
+          )}
+          ${net.returns.map(
+            (r) =>
+              svg`<text class="fbd-label ${this.selNote?.kind === 'return' && this.selNote.id === r.id ? 'sel' : ''}"
+                x="${r.pos.x * GX}" y="${r.pos.y * GX}"
+                @pointerdown=${(e: PointerEvent) => this.onNoteDown(e, 'return', r.id)}>RET</text>`,
           )}
           ${net.wires.map((w) => this.wireSvg(w, net))}
           ${net.blocks.map((b) => this.blockSvg(b, net))}
           ${this.pending ? this.pendingSvg(net) : nothing}
+          ${this.pendingRec ? this.pendingRecSvg(net) : nothing}
           ${this.marquee ? this.marqueeSvg() : nothing}
         </svg>
         <div class="fbd-status">
+          ${this.placing
+            ? html`<span class="fbd-note-warn"
+                >placing ${this.placing} — click the canvas (Esc cancels)</span
+              >`
+            : nothing}
+          ${this.selNote
+            ? html`<span class="plc-dim"
+                >${this.selNote.kind} #${this.selNote.id} — dbl-click edits, Del removes</span
+              >`
+            : nothing}
           ${(() => {
             const issues = this.validateIssues();
             const errs = issues.filter((i) => i.severity === 'error').length;
@@ -1002,6 +1289,26 @@ export class FbdCanvas extends LitElement {
           title="inline ST block (expands to a FUNCTION_BLOCK)"
           @click=${() => this.addFromPalette('ST')}
         >ST</button>
+        <button
+          class="chip-btn ${this.placing === 'comment' ? 'active' : ''}"
+          title="place a comment note — click canvas, then type text"
+          @click=${() => this.armPlacing('comment')}
+        >note</button>
+        <button
+          class="chip-btn ${this.placing === 'label' ? 'active' : ''}"
+          title="place a label — click canvas, then type the name"
+          @click=${() => this.armPlacing('label')}
+        >label</button>
+        <button
+          class="chip-btn ${this.placing === 'jump' ? 'active' : ''}"
+          title="place a jump — click canvas, then type the target label"
+          @click=${() => this.armPlacing('jump')}
+        >jump</button>
+        <button
+          class="chip-btn ${this.placing === 'return' ? 'active' : ''}"
+          title="place a return marker"
+          @click=${() => this.armPlacing('return')}
+        >ret</button>
         ${groups.map(
           (g) => html`
             <span class="fbd-pgroup">
@@ -1605,6 +1912,7 @@ export class FbdCanvas extends LitElement {
          @pointerdown=${(e: PointerEvent) => {
            this.selWire = w.id;
            this.selIds = new Set();
+           this.selNote = undefined;
            e.stopPropagation();
          }}>
         ${
@@ -1614,15 +1922,33 @@ export class FbdCanvas extends LitElement {
               )}</text>`
             : nothing
         }
-        ${w.dsts.map((d) => {
+        ${w.dsts.map((d, di) => {
           const db = net.blocks.find((b) => b.id === d.block);
           if (!db) return nothing;
-          const di = inIndex(db, d.port, this.pous);
-          const to = this.inPinPos(db, Math.max(0, di));
+          const di2 = inIndex(db, d.port, this.pous);
+          const to = this.inPinPos(db, Math.max(0, di2));
           const mx = (from.x + to.x) / 2;
           return svg`<polyline class="fbd-line" fill="none"
               points="${from.x},${from.y} ${mx},${from.y} ${mx},${to.y} ${to.x},${to.y}"></polyline>`;
         })}
+        ${
+          /* reconnect handles — drag an end dot onto another pin to
+             re-source / re-destination this wire */
+          sel
+            ? svg`
+                <circle class="fbd-wire-end" cx="${from.x}" cy="${from.y}" r="5"
+                  @pointerdown=${(e: PointerEvent) => this.onWireEndDown(e, w, 'src', -1)} />
+                ${w.dsts.map((d, di) => {
+                  const db = net.blocks.find((b) => b.id === d.block);
+                  if (!db) return nothing;
+                  const di2 = inIndex(db, d.port, this.pous);
+                  const to = this.inPinPos(db, Math.max(0, di2));
+                  return svg`<circle class="fbd-wire-end" cx="${to.x}" cy="${to.y}" r="5"
+                    @pointerdown=${(e: PointerEvent) => this.onWireEndDown(e, w, 'dst', di)} />`;
+                })}
+              `
+            : nothing
+        }
       </g>
     `;
   }
@@ -1633,6 +1959,32 @@ export class FbdCanvas extends LitElement {
     if (!sb) return nothing;
     const from = this.outPinPos(sb, p.port);
     return svg`<line class="fbd-line pend" x1="${from.x}" y1="${from.y}" x2="${p.x}" y2="${p.y}"></line>`;
+  }
+
+  private pendingRecSvg(net: Network) {
+    const r = this.pendingRec;
+    if (!r) return nothing;
+    const w = net.wires.find((x) => x.id === r.wire);
+    if (!w) return nothing;
+    let ax = 0;
+    let ay = 0;
+    if (r.end === 'src') {
+      const sb = net.blocks.find((b) => b.id === w.src.block);
+      if (!sb) return nothing;
+      const si = outIndex(sb, w.src.port, this.pous);
+      const fp = this.outPinPos(sb, Math.max(0, si));
+      ax = fp.x; ay = fp.y;
+    } else {
+      const d = w.dsts[r.di];
+      const db = d && net.blocks.find((b) => b.id === d.block);
+      if (!db) return nothing;
+      const di = inIndex(db, d!.port, this.pous);
+      const fp = this.inPinPos(db, Math.max(0, di));
+      ax = fp.x; ay = fp.y;
+    }
+    const mx = (ax + r.x) / 2;
+    return svg`<polyline class="fbd-line pend" fill="none"
+      points="${ax},${ay} ${mx},${ay} ${mx},${r.y} ${r.x},${r.y}"></polyline>`;
   }
 
   private marqueeSvg() {

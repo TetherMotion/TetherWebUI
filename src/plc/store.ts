@@ -9,6 +9,7 @@
 import { CurveProfile } from './curve';
 import { emptyProject, FbdProject, isFbdProject } from './model';
 import { TuneCfg } from './tune';
+import type { AlarmRule } from './alarms';
 
 const STORAGE_KEY = 'tether.plc.project.v1';
 
@@ -23,6 +24,9 @@ export interface PlcProject {
   /** deploy-map override (bridge text) injected into the package at
       build+deploy time; absent = no DEPLOY_MAP section. */
   deployMap?: string;
+  /** user-defined alarm rules (Alarms pane) — compiled into the
+      generated `AlarmRules` FBD program on demand. */
+  alarms?: AlarmRule[];
 }
 
 export function emptyPlcProject(): PlcProject {
@@ -41,6 +45,7 @@ export function loadProject(): PlcProject {
         curves: parsed.curves && typeof parsed.curves === 'object' ? parsed.curves : {},
         tunes: parsed.tunes && typeof parsed.tunes === 'object' ? parsed.tunes : {},
         deployMap: typeof parsed.deployMap === 'string' ? parsed.deployMap : undefined,
+        alarms: Array.isArray(parsed.alarms) ? parsed.alarms : undefined,
       };
     }
     // tolerate a bare fbd.v1 doc saved by an earlier version

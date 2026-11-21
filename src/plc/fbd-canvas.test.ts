@@ -661,3 +661,139 @@ describe('fbd-canvas', () => {
     cv.remove();
   });
 });
+
+
+describe('fbd-canvas annotations + wire reconnect', () => {
+  it('places, edits and deletes a comment note', async () => {
+    const { cv, pou } = mount();
+    await cv.updateComplete;
+    const net = pou.networks[0]!;
+    const c = cv as unknown as {
+      armPlacing(k: string): void;
+      placeNote(p: { x: number; y: number }): void;
+      selNote?: { kind: string; id: number };
+    };
+    const prompts: string[] = [];
+    const origPrompt = window.prompt;
+    window.prompt = (msg?: string, def?: string) => { prompts.push(msg ?? ''); return 'hello note'; };
+    try {
+      c.armPlacing('comment');
+      expect(cv.placing).toBe('comment');
+      c.placeNote({ x: 140, y: 48 });
+      await cv.updateComplete;
+      expect(net.comments).toHaveLength(1);
+      expect(net.comments[0]!.text).toBe('hello note');
+      expect(net.comments[0]!.pos).toEqual({ x: 10, y: 3 });
+      // edit via dblclick path
+      const id = net.comments[0]!.id;
+      window.prompt = () => 'edited';
+      (cv as unknown as { editNote(k: string, id: number): void }).editNote('comment', id);
+      await cv.updateComplete;
+      expect(net.comments[0]!.text).toBe('edited');
+      // delete via selNote + deleteSel
+      cv.selNote = { kind: 'comment', id };
+      (cv as unknown as { deleteSel(): void }).deleteSel();
+      await cv.updateComplete;
+      expect(net.comments).toHaveLength(0);
+    } finally {
+      window.prompt = origPrompt;
+    }
+    cv.remove();
+  });
+
+  it('places labels and return markers', async () => {
+    const { cv, pou } = mount();
+    await cv.updateComplete;
+    const net = pou.networks[0]!;
+    const c = cv as unknown as {
+      armPlacing(k: string): void;
+      placeNote(p: { x: number; y: number }): void;
+    };
+    const origPrompt = window.prompt;
+    window.prompt = () => 'LBL1';
+    try {
+      c.armPlacing('label');
+      c.placeNote({ x: 0, y: 0 });
+      c.armPlacing('return');
+      c.placeNote({ x: 200, y: 0 });
+      await cv.updateComplete;
+      expect(net.labels[0]!.name).toBe('LBL1');
+      expect(net.returns).toHaveLength(1);
+    } finally {
+      window.prompt = origPrompt;
+    }
+    cv.remove();
+  });
+
+  it('reconnects a wire dst onto another in-pin', async () => {
+    const { cv, pou } = mount();
+    await cv.updateComplete;
+    const net = pou.networks[0]!;
+    // wire var-out → AND in0; reconnect dst to a second AND input
+    net.blocks.push({
+      id: 40, kind: 'operator', type_ref: 'AND',
+      pos: { x: 16, y: 2 }, params: {}, exec_order: 0, negated: [], comment: '',
+    });
+    net.wires.push({
+      id: 77, src: { block: 1, port: 0 },
+      dsts: [{ block: 2, port: 0 }],
+    });
+    const c = cv as unknown as {
+      pendingRec?: { wire: number; end: string; di: number; x: number; y: number };
+      completeRec(e: PointerEvent): void;
+    };
+    // simulate: pendingRec armed on dst end 0, drop resolves via a fake pin element
+    c.pendingRec = { wire: 77, end: 'dst', di: 0, x: 0, y: 0 };
+    const and = net.blocks[1]!;
+    const pinEl = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    pinEl.setAttribute('class', 'fbd-pin in');
+    pinEl.setAttribute('data-node', '40');
+    pinEl.setAttribute('data-pin', '1');
+    const origElements = document.elementsFromPoint;
+    (document as any).elementsFromPoint = () => [pinEl];
+    try {
+      c.completeRec(new MouseEvent('pointerup', { clientX: 0, clientY: 0 }) as PointerEvent);
+    } finally {
+      (document as any).elementsFromPoint = origElements;
+    }
+    await cv.updateComplete;
+    void and;
+    const w = net.wires.find((x) => x.src.block === 1);
+    // dst moved from AND#0 (block2 pin0) to block40 pin1
+    expect(w?.dsts).toEqual([{ block: 40, port: 1 }]);
+    cv.remove();
+  });
+
+  it('undo stacks reset on network switch; clipboard survives', async () => {
+    const { cv, pou } = mount();
+    await cv.updateComplete;
+    const net2 = {
+      id: 'net2', kind: 'fbd' as const, label: '', comments: [], assocs: [],
+      labels: [], jumps: [], returns: [], blocks: [], wires: [],
+    };
+    pou.networks.push(net2);
+    const c = cv as unknown as {
+      mutate(fn: (n: any) => void): void;
+      undo(): void; copySel(): void; paste(): void;
+      selIds: Set<number>; netIndex: number; undoStack: string[];
+    };
+    c.mutate((n) => { n.blocks.push({
+      id: 50, kind: 'variable', type_ref: '', pos: { x: 1, y: 1 },
+      params: {}, exec_order: 0, negated: [], comment: '', role: 'in', name: 'v',
+    }); });
+    // copy a block, switch network, paste — clipboard must survive
+    c.selIds = new Set([1]);
+    c.copySel();
+    c.netIndex = 1;
+    c.paste();
+    await cv.updateComplete;
+    expect(pou.networks[1]!.blocks).toHaveLength(1);
+    // undo on the new net reverts only the paste (per-net stacks) and
+    // never touches net1's blocks
+    c.undo();
+    await cv.updateComplete;
+    expect(pou.networks[1]!.blocks).toHaveLength(0);
+    expect(pou.networks[0]!.blocks.length).toBeGreaterThanOrEqual(2);
+    cv.remove();
+  });
+});

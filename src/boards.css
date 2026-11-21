@@ -1250,6 +1250,33 @@ tile-frame {
   stroke: var(--accent, #6cf);
 }
 
+.ld-live {
+  fill: var(--mint, #7fd);
+  font-size: 9px;
+}
+
+.ld-wire.sel polyline {
+  stroke: var(--accent, #6cf);
+}
+
+.ld-wire-end {
+  fill: var(--bg, #111);
+  stroke: var(--accent, #6cf);
+  stroke-width: 1.5;
+  cursor: crosshair;
+}
+
+.ld-marquee {
+  fill: var(--accent, #6cf);
+  fill-opacity: 0.08;
+  stroke: var(--accent, #6cf);
+  stroke-dasharray: 4 3;
+}
+
+.ld-pending {
+  pointer-events: none;
+}
+
 .fbd-rect {
   fill: var(--glass-1);
   stroke: var(--glass-border);
@@ -2153,3 +2180,114 @@ tile-frame {
   height: 100%;
   display: block;
 }
+
+/* wire-end reconnect handles (selected FBD/LD wire) */
+.fbd-wire-end {
+  fill: var(--bg, #111);
+  stroke: var(--mint, #7fd);
+  stroke-width: 1.5;
+  cursor: crosshair;
+}
+.fbd-wire-end:hover {
+  fill: var(--mint, #7fd);
+}
+
+/* selected annotation nodes */
+.fbd-note-g.sel .fbd-note {
+  stroke: var(--mint, #7fd);
+  stroke-width: 2;
+}
+.fbd-label.sel {
+  fill: var(--mint, #7fd);
+  font-weight: 700;
+}
+
+/* print: diagram/documentation output — hide chrome, keep the canvas */
+@media print {
+  .fbd-palette,
+  .fbd-status,
+  .fbd-props,
+  .fbd-devdlg,
+  .ld-toolbar,
+  .plc-nav,
+  .plc-toolbar,
+  .plc-explorer,
+  .status-strip,
+  .board-tabs,
+  .tile-head {
+    display: none !important;
+  }
+  .fbd-canvas svg,
+  .ld-svg {
+    border: none;
+    background: #fff;
+  }
+  .fbd-canvas,
+  .ld-canvas {
+    overflow: visible;
+  }
+}
+
+/* ---- HMI screen designer ---- */
+.hmi-designer {
+  display: flex;
+  gap: 8px;
+  height: 100%;
+  min-height: 0;
+}
+.hmi-designer:focus { outline: none; }
+.hmi-d-left { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.hmi-d-palette { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 0; }
+.hmi-d-outer {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: #0d1117;
+  border: 1px solid #33404d;
+  border-radius: 4px;
+}
+.hmi-d-layer {
+  position: relative;
+  transform-origin: top left;
+  background: #0d1117;
+}
+.hmi-d-wdg {
+  position: absolute;
+  border: 1px dashed transparent;
+  cursor: move;
+}
+.hmi-d-wdg.sel { border-color: #6ab0ff; }
+.hmi-d-wdg .hmi-scene-svg { display: block; width: 100%; height: 100%; }
+.hmi-d-rsz {
+  position: absolute;
+  right: -4px; bottom: -4px;
+  width: 10px; height: 10px;
+  background: #6ab0ff;
+  border-radius: 2px;
+  cursor: nwse-resize;
+}
+.hmi-d-props {
+  width: 220px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  font-size: 12px;
+}
+.hmi-d-props h4 { margin: 4px 0; display: flex; justify-content: space-between; align-items: center; }
+.hmi-d-props label { display: block; margin: 6px 0; color: #8b98a5; }
+.hmi-d-props input, .hmi-d-props select {
+  display: block; width: 100%; margin-top: 2px;
+  background: #1d242c; color: #d7dee8;
+  border: 1px solid #33404d; border-radius: 3px; padding: 3px 5px;
+  font: inherit;
+}
+.hmi-d-pos { color: #8b98a5; font-size: 11px; margin-top: 8px; }
+.plc-tree-lib { cursor: pointer; }
+.plc-tree-lib:hover { background: #1d242c; }
+.plc-usages {
+  border-top: 1px solid #33404d;
+  max-height: 140px; overflow-y: auto;
+  font-size: 12px;
+}
+.plc-usages-head { padding: 4px 8px; color: #8b98a5; }
+.plc-usage { padding: 2px 12px; cursor: pointer; color: #6ab0ff; }
+.plc-usage:hover { background: #1d242c; }
