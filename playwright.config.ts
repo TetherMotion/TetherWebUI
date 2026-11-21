@@ -38,7 +38,9 @@ const tplcImage = abs(process.env.TPLC_IMAGE ?? `${tplcRoot}/build/tplc-image`);
    receives must be absolute */
 const libdirs = (
   process.env.TPLC_LIBDIRS ??
-  '../TetherPLC/libraries/tempctrl:../TetherPLC/compat/tc2:../TetherPLC/compat/tc3'
+  '../TetherPLC/libraries/tempctrl:../TetherPLC/libraries/homeassistant:' +
+    '../TetherPLC/libraries/iolink:../TetherPLC/libraries/profinet:' +
+    '../TetherPLC/libraries/canopen:../TetherPLC/compat/tc2:../TetherPLC/compat/tc3'
 )
   .split(':')
   .filter(Boolean)
