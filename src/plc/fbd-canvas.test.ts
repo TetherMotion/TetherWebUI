@@ -797,3 +797,61 @@ describe('fbd-canvas annotations + wire reconnect', () => {
     cv.remove();
   });
 });
+
+describe('fbd-canvas wire-drop block picker', () => {
+  function mount2(): { cv: FbdCanvas; pou: Pou } {
+    const pou = makePou();
+    const cv = document.createElement('fbd-canvas') as FbdCanvas;
+    cv.pou = pou;
+    cv.pous = [pou];
+    document.body.appendChild(cv);
+    return { cv, pou };
+  }
+
+  it('releasing a wire on empty canvas arms the picker; palette pick places + wires', async () => {
+    const { cv, pou } = mount2();
+    await cv.updateComplete;
+    const outPin = cv.querySelectorAll('.fbd-block')[0]!.querySelector('.fbd-pin.out')!;
+    const svg = cv.querySelector('svg')!;
+    outPin.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, clientX: 10, clientY: 10 }),
+    );
+    svg.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 300, clientY: 200 }));
+    await cv.updateComplete;
+    expect(cv.wirePick).toBeDefined();
+    expect(cv.querySelector('.fbd-wirepick')).toBeTruthy();
+    // pick AND from the palette — block lands at drop point, wire lands on input 0
+    const btn = [...cv.querySelectorAll<HTMLElement>('.fbd-pitem')]
+      .find((b) => b.textContent === 'AND')!;
+    btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await cv.updateComplete;
+    expect(cv.wirePick).toBeUndefined();
+    const net = pou.networks[0]!;
+    expect(net.blocks).toHaveLength(3);
+    const added = net.blocks[2]!;
+    expect(added.kind).toBe('operator');
+    expect(added.type_ref).toBe('AND');
+    const w = net.wires.find((x) => x.src.block === 1)!;
+    expect(w).toBeDefined();
+    expect(w.dsts).toContainEqual({ block: added.id, port: 0 });
+    cv.remove();
+  });
+
+  it('Escape cancels the picker without placing anything', async () => {
+    const { cv, pou } = mount2();
+    await cv.updateComplete;
+    const outPin = cv.querySelectorAll('.fbd-block')[0]!.querySelector('.fbd-pin.out')!;
+    const svg = cv.querySelector('svg')!;
+    outPin.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, clientX: 10, clientY: 10 }),
+    );
+    svg.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 300, clientY: 200 }));
+    await cv.updateComplete;
+    expect(cv.wirePick).toBeDefined();
+    cv.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await cv.updateComplete;
+    expect(cv.wirePick).toBeUndefined();
+    expect(pou.networks[0]!.blocks).toHaveLength(2);
+    cv.remove();
+  });
+});

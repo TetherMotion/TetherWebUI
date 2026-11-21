@@ -27,7 +27,7 @@ import {
   type PaletteGroup,
   type PaletteItem,
 } from './palette';
-import { inferNetwork, tyName, type Inference, type TypeIssue } from './types';
+import { coerce, declaredPins, inferNetwork, tyName, type Inference, type Ty, type TypeIssue } from './types';
 import {
   deviceStDecls,
   nextFreeBaseFor,
@@ -138,6 +138,7 @@ export class FbdCanvas extends LitElement {
     pending: { state: true },
     pendingRec: { state: true },
     placing: { state: true },
+    wirePick: { state: true },
     marquee: { state: true },
     vb: { state: true },
   };
@@ -170,6 +171,14 @@ export class FbdCanvas extends LitElement {
   declare pendingRec?: PendingRec;
   /** annotation placement mode: next canvas click drops a node of this kind. */
   declare placing?: SelNote['kind'];
+  /** wire dropped on empty canvas → pick a block to receive it */
+  declare wirePick?: {
+    srcBlock: number;
+    srcPort: PortSel;
+    gx: number;
+    gy: number;
+    ty: Ty;
+  };
   declare marquee?: Marquee;
   declare vb: { x: number; y: number; s: number };
 
@@ -301,13 +310,18 @@ export class FbdCanvas extends LitElement {
     return right + 2;
   }
 
-  private addBlock(kind: Block['kind'], typeRef: string, role?: Block['role']): void {
+  private addBlock(
+    kind: Block['kind'],
+    typeRef: string,
+    role?: Block['role'],
+    pos?: { x: number; y: number },
+  ): void {
     this.mutate((net) => {
       net.blocks.push({
         id: nextNodeId(this.pou!),
         kind,
         type_ref: typeRef,
-        pos: { x: this.nextBlockX(net, kind), y: 2 },
+        pos: pos ?? { x: this.nextBlockX(net, kind), y: 2 },
         params: {},
         exec_order: 0,
         negated: [],
@@ -639,6 +653,7 @@ export class FbdCanvas extends LitElement {
       this.pending = undefined;
       this.pendingRec = undefined;
       this.placing = undefined;
+      this.wirePick = undefined;
       this.selIds = new Set();
       this.selWire = undefined;
       this.selNote = undefined;
@@ -978,6 +993,33 @@ export class FbdCanvas extends LitElement {
       ) {
         return;
       }
+      /* released over empty canvas: arm the block picker so the
+         wire can land on a freshly placed block (event triggers,
+         coils, any consumer) — the standard FBD drop-to-function
+         gesture */
+      const srcBlk = this.net?.blocks.find((x) => x.id === pend.block);
+      if (srcBlk) {
+        const p = this.svgPt(e);
+        const net = this.net!;
+        const sig = blockSig(srcBlk, this.pous);
+        const oi = outIndex(srcBlk, pend.port, this.pous);
+        const sel: PortSel =
+          srcBlk.kind === 'fb' || srcBlk.kind === 'function' ||
+          srcBlk.kind === 'device' || srcBlk.kind === 'st'
+            ? (sig.outs[oi] ?? pend.port)
+            : pend.port;
+        const ty =
+          (this.inf ?? inferNetwork(net, this.pou!, this.pous)).pin.get(
+            `${srcBlk.id}:out:${oi}`,
+          ) ?? { k: 'unknown' } as Ty;
+        this.wirePick = {
+          srcBlock: srcBlk.id,
+          srcPort: sel,
+          gx: Math.round(p.x / GX),
+          gy: Math.round(p.y / GX),
+          ty,
+        };
+      }
       this.pending = undefined;
       return;
     }
@@ -1264,12 +1306,39 @@ export class FbdCanvas extends LitElement {
           }),
         );
       }
+      /* wire-drop armed: any pickable block lands at the drop point
+         with the pending wire auto-connected to a compatible input */
+      if (
+        this.wirePick &&
+        (i.kind === 'fb' || i.kind === 'function' || i.kind === 'operator')
+      ) {
+        this.addFromPalette(
+          i.type,
+          i.kind === 'function' ? 'function' : undefined,
+        );
+        return;
+      }
       if (i.kind === 'fb' || i.kind === 'function') this.addFb(i.type, i.kind);
       else if (i.kind === 'device') this.openDeviceWizard(i.template);
       else this.addOperator(i.type);
     };
     return html`
       <div class="fbd-palette">
+        ${
+          this.wirePick
+            ? html`<div class="fbd-wirepick">
+                wire ${tyName(this.wirePick.ty)} → pick a block to catch it
+                <button
+                  class="chip-btn"
+                  title="cancel"
+                  @click=${() => {
+                    this.wirePick = undefined;
+                    this.requestUpdate();
+                  }}
+                >✕</button>
+              </div>`
+            : nothing
+        }
         <input
           class="fbd-in fbd-palette-q"
           placeholder="find block…"
@@ -1600,27 +1669,101 @@ export class FbdCanvas extends LitElement {
     return out;
   }
 
-  private addFromPalette(t: string): void {
+  /** Construct the block a palette token denotes (no mutation). */
+  private mkPaletteBlock(
+    t: string,
+    net: Network,
+    pos?: { x: number; y: number },
+    fnKind?: 'fb' | 'function',
+  ): Block {
+    const at = pos ?? { x: this.nextBlockX(net, 'fb'), y: 2 };
+    const base = {
+      pos: at,
+      params: {} as Record<string, string>,
+      exec_order: 0,
+      negated: [] as number[],
+      comment: '',
+    };
+    if (t === 'var-in' || t === 'var-out')
+      return {
+        ...base,
+        id: nextNodeId(this.pou!),
+        kind: 'variable',
+        type_ref: '',
+        role: t === 'var-in' ? 'in' : 'out',
+        name: `v${net.blocks.length}`,
+      };
+    if (t === 'ST')
+      return {
+        ...base,
+        id: nextNodeId(this.pou!),
+        kind: 'st',
+        type_ref: 'ST',
+        params: { CODE: 'OUT := IN;\n' },
+        pins: [
+          { name: 'IN', kind: 'var_input', type: 'REAL' },
+          { name: 'OUT', kind: 'var_output', type: 'REAL' },
+        ],
+      };
+    if (
+      [
+        'AND', 'OR', 'XOR', 'NOT', 'ADD', 'SUB', 'MUL', 'DIV',
+        'GT', 'GE', 'LT', 'LE', 'EQ', 'NE', 'SEL', 'LIMIT', 'MUX',
+        'MOVE', 'MIN', 'MAX', 'ABS', 'MOD', 'SHL', 'SHR',
+      ].includes(t)
+    )
+      return { ...base, id: nextNodeId(this.pou!), kind: 'operator', type_ref: t };
+    return { ...base, id: nextNodeId(this.pou!), kind: fnKind ?? 'fb', type_ref: t };
+  }
+
+  private addFromPalette(t: string, fnKind?: 'fb' | 'function'): void {
+    /* wire-drop mode: a pending out-pin was released on empty
+       canvas — place the picked block at the drop point and land
+       the wire on its first type-compatible input */
+    const wp = this.wirePick;
+    this.wirePick = undefined;
+    const net = this.net;
+    const pou = this.pou;
+    if (wp && net && pou) {
+      this.mutate((n) => {
+        const b = this.mkPaletteBlock(t, n, { x: wp.gx, y: wp.gy }, fnKind);
+        n.blocks.push(b);
+        const d = declaredPins(b, pou, this.pous);
+        const rank = (l: string) =>
+          l === 'exact' ? 3 : l === 'ok' ? 2 : l === 'narrow' ? 1 : 0;
+        let best = -1;
+        let bestRank = 0;
+        d.ins.forEach((ty, i) => {
+          const r = rank(coerce(wp.ty, ty));
+          if (r > bestRank) { best = i; bestRank = r; }
+        });
+        if (best < 0) return;   /* no compatible input — block stays unwired */
+        const srcBlk = n.blocks.find((x) => x.id === wp.srcBlock);
+        const sel: PortSel =
+          srcBlk &&
+          (srcBlk.kind === 'fb' || srcBlk.kind === 'function' ||
+           srcBlk.kind === 'device' || srcBlk.kind === 'st')
+            ? (blockSig(srcBlk, this.pous).outs[
+                outIndex(srcBlk, wp.srcPort, this.pous)
+              ] ?? wp.srcPort)
+            : wp.srcPort;
+        const dst = { block: b.id, port: best as PortSel };
+        const existing = n.wires.find(
+          (w) => w.src.block === wp.srcBlock && samePort(w.src.port, sel),
+        );
+        if (existing) existing.dsts.push(dst);
+        else
+          n.wires.push({
+            id: nextNodeId(pou),
+            src: { block: wp.srcBlock, port: sel },
+            dsts: [dst],
+          });
+      });
+      return;
+    }
     if (t === 'var-in') this.addBlock('variable', '', 'in');
     else if (t === 'var-out') this.addBlock('variable', '', 'out');
-    else if (t === 'ST') {
-      this.mutate((net) => {
-        net.blocks.push({
-          id: nextNodeId(this.pou!),
-          kind: 'st',
-          type_ref: 'ST',
-          pos: { x: this.nextBlockX(net, 'st'), y: 2 },
-          params: { CODE: 'OUT := IN;\n' },
-          exec_order: 0,
-          negated: [],
-          comment: '',
-          pins: [
-            { name: 'IN', kind: 'var_input', type: 'REAL' },
-            { name: 'OUT', kind: 'var_output', type: 'REAL' },
-          ],
-        });
-      });
-    } else if (
+    else if (
       [
         'AND',
         'OR',
@@ -1649,7 +1792,24 @@ export class FbdCanvas extends LitElement {
       ].includes(t)
     )
       this.addBlock('operator', t);
-    else this.addBlock('fb', t);
+    else if (t === 'ST') {
+      this.mutate((n) => {
+        n.blocks.push({
+          id: nextNodeId(this.pou!),
+          kind: 'st',
+          type_ref: 'ST',
+          pos: { x: this.nextBlockX(n, 'st'), y: 2 },
+          params: { CODE: 'OUT := IN;\n' },
+          exec_order: 0,
+          negated: [],
+          comment: '',
+          pins: [
+            { name: 'IN', kind: 'var_input', type: 'REAL' },
+            { name: 'OUT', kind: 'var_output', type: 'REAL' },
+          ],
+        });
+      });
+    } else this.addBlock('fb', t);
   }
 
   private selProps(): TemplateResult | typeof nothing {

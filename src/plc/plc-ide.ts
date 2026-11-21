@@ -15,7 +15,7 @@ import './ld-canvas';
 import './st-editor';
 import './tempcurve';
 import './temp-tune';
-import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgStateDiff, DbgSym, DbgTraceFrame, DbgTraceStatus, DbgWatchEntry, EV, EvlogInfo, EvlogRecord, EvlogStats, HistChannel, OdEntry, OdValue, PlcCtl, ProgStatus, RetainStatus, RtStatus, ShadowDiff, ShadowStatus } from './ctl';
+import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgStateDiff, DbgSym, DbgTraceFrame, DbgTraceStatus, DbgWatchEntry, EV, EvlogInfo, EvlogRecord, EvlogStats, HistChannel, MqttConn, MqttJournalEntry, OdEntry, OdValue, PlcCtl, ProgStatus, RetainStatus, RtStatus, ShadowDiff, ShadowStatus } from './ctl';
 import { byteToOffset, compileProject, CompileDiag, diagsForFile, injectDeployMap } from './build';
 import {
   atCollisions,
@@ -66,7 +66,7 @@ import {
   type ProjectTemplate,
 } from './templates';
 
-type Pane = 'explorer' | 'st' | 'fbd' | 'curves' | 'tasks' | 'watch' | 'alarms' | 'deploy';
+type Pane = 'explorer' | 'st' | 'fbd' | 'curves' | 'tasks' | 'watch' | 'alarms' | 'events' | 'deploy';
 
 /** migrate rule kinds shared with the runtime's MIGD encoding */
 const DBG_DIFF_KIND = ['copy', 'xform', 'init', 'drop', 'deny', 'alias'];
@@ -89,6 +89,7 @@ const PANES: { id: Pane; label: string }[] = [
   { id: 'tasks', label: 'Tasks' },
   { id: 'watch', label: 'Watch' },
   { id: 'alarms', label: 'Alarms' },
+  { id: 'events', label: 'Events' },
   { id: 'deploy', label: 'Deploy' },
 ];
 
@@ -433,6 +434,11 @@ export class TetherPlcIde extends LitElement {
   private alarmStats?: EvlogStats;
   private alarmHist?: EvlogRecord[];
   private histChans?: HistChannel[];
+  /* events pane: MQTT broker connections + receive journals */
+  private mqttConns?: MqttConn[];
+  private mqttJournals = new Map<number,
+    { total: number; entries: MqttJournalEntry[] }>();
+  private mqttTimer?: number;
   private histNamesInput = '';
   private trendCh = 0;
   private trendCodecLabel?: string;
@@ -650,6 +656,10 @@ export class TetherPlcIde extends LitElement {
     if (this.trendTimer !== undefined) {
       clearInterval(this.trendTimer);
       this.trendTimer = undefined;
+    }
+    if (this.mqttTimer !== undefined) {
+      clearInterval(this.mqttTimer);
+      this.mqttTimer = undefined;
     }
     super.disconnectedCallback();
   }
@@ -1084,7 +1094,8 @@ export class TetherPlcIde extends LitElement {
                 @click=${() => {
                   this.flushStEditors();
                   this.pane = p.id;
-                  if (p.id === 'deploy') void this.refreshCtl();
+                  if (p.id === 'deploy' || p.id === 'events')
+                    void this.refreshCtl();
                 }}
               >
                 ${p.label}
@@ -1206,6 +1217,9 @@ export class TetherPlcIde extends LitElement {
       case 'alarms':
         this.ensureTrendTimer();
         return this.alarmsPane();
+      case 'events':
+        this.ensureMqttTimer();
+        return this.eventsPane();
       case 'deploy':
         return this.deployPane();
     }
@@ -2521,6 +2535,145 @@ export class TetherPlcIde extends LitElement {
         }
       </div>
     `;
+  }
+
+  // ---- events (MQTT/HA message feed + history) ------------------------
+
+  private mqttTransportName(t: number): string {
+    return ['auto', 'tcp', 'ssl', 'ws', 'wss'][t] ?? `t${t}`;
+  }
+
+  private mqttConnLabel(c: MqttConn): string {
+    const scheme =
+      c.transport === 3 ? 'ws' : c.transport === 4 ? 'wss'
+      : c.transport === 1 ? 'tcp' : c.transport === 2 ? 'ssl'
+      : c.tls ? 'ssl' : 'tcp';
+    return `${scheme}://${c.host}:${c.port}`;
+  }
+
+  /** payload as display text: UTF-8 when printable, hex otherwise. */
+  private mqttPayloadText(p: Uint8Array): string {
+    if (!p.length) return '—';
+    try {
+      const s = new TextDecoder('utf-8', { fatal: true }).decode(p);
+      if (/^[\x20-\x7e\t\r\n]*$/.test(s)) return s;
+      return hex(p.subarray(0, 48)) + (p.length > 48 ? '…' : '');
+    } catch {
+      return hex(p.subarray(0, 48)) + (p.length > 48 ? '…' : '');
+    }
+  }
+
+  private fmtMs(tsMs: bigint): string {
+    const d = new Date(Number(tsMs));
+    const p = (n: number, w = 2) => String(n).padStart(w, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+  }
+
+  /** merged journal view: newest first across all connections. */
+  private mqttFeed(): { conn: MqttConn; e: MqttJournalEntry }[] {
+    const rows: { conn: MqttConn; e: MqttJournalEntry }[] = [];
+    for (const c of this.mqttConns ?? []) {
+      for (const e of this.mqttJournals.get(c.handle)?.entries ?? [])
+        rows.push({ conn: c, e });
+    }
+    rows.sort((a, b) => (a.e.tsMs < b.e.tsMs ? 1 : -1));
+    return rows.slice(0, 200);
+  }
+
+  private eventsPane(): TemplateResult {
+    const conns = this.mqttConns ?? [];
+    const feed = this.mqttFeed();
+    const anyConn = conns.length > 0;
+    const live = conns.filter((c) => c.state === 2).length;
+    return html`
+      <div class="tile-scroll">
+        <h3>
+          Events
+          <span class="plc-dim">
+            MQTT message feed · ${live}/${conns.length} broker${conns.length === 1 ? '' : 's'} connected
+          </span>
+        </h3>
+        ${
+          this.ctlOk === false
+            ? html`<p class="plc-dim">ctl unreachable — connect on the Deploy pane.</p>`
+            : nothing
+        }
+        <h4>Brokers</h4>
+        ${
+          anyConn
+            ? html`
+                <table class="plc-table">
+                  <thead>
+                    <tr>
+                      <th>hdl</th><th>broker</th><th>transport</th>
+                      <th>state</th><th>journaled</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${conns.map(
+                      (c) => html`
+                        <tr>
+                          <td>#${c.handle}</td>
+                          <td>${this.mqttConnLabel(c)}<br /><span class="plc-dim">${c.clientId || '—'}</span></td>
+                          <td>${this.mqttTransportName(c.transport)}${c.tls ? ' 🔒' : ''} · mqtt${c.mqttVersion}</td>
+                          <td>${c.state === 2 ? 'connected' : c.state === 1 ? 'connecting' : 'down'}</td>
+                          <td>${this.mqttJournals.get(c.handle)?.total ?? 0}</td>
+                        </tr>
+                      `,
+                    )}
+                  </tbody>
+                </table>
+              `
+            : html`<p class="plc-dim">no MQTT brokers connected — the journal fills when a program polls FB_MqttRx / FB_Mqtt / FB_HaEntity.</p>`
+        }
+        <h4>Message history <span class="plc-dim">inbound PUBLISH, newest first · 64/conn</span></h4>
+        ${
+          feed.length
+            ? html`
+                <table class="plc-table">
+                  <thead>
+                    <tr>
+                      <th>time</th><th>broker</th><th>topic</th>
+                      <th>payload</th><th>qos</th><th>ret</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${feed.map(
+                      ({ conn, e }) => html`
+                        <tr>
+                          <td>${this.fmtMs(e.tsMs)}</td>
+                          <td class="plc-dim">#${conn.handle}</td>
+                          <td>${e.topic}</td>
+                          <td class="plc-mono">${this.mqttPayloadText(e.payload)}</td>
+                          <td>${e.qos}</td>
+                          <td>${e.retain ? 'R' : ''}</td>
+                        </tr>
+                      `,
+                    )}
+                  </tbody>
+                </table>
+              `
+            : html`<p class="plc-dim">${anyConn ? 'no messages journaled yet' : '—'}</p>`
+        }
+      </div>
+    `;
+  }
+
+  /** ~1.5 s poll while the Events pane is open. */
+  private mqttTick = async (): Promise<void> => {
+    if (this.pane !== 'events' || !this.ctlOk) {
+      if (this.mqttTimer !== undefined) {
+        clearInterval(this.mqttTimer);
+        this.mqttTimer = undefined;
+      }
+      return;
+    }
+    await this.refreshCtl();
+  };
+
+  private ensureMqttTimer(): void {
+    if (this.mqttTimer !== undefined) return;
+    this.mqttTimer = window.setInterval(() => void this.mqttTick(), 1500);
   }
 
   // ---- deploy --------------------------------------------------------
@@ -4145,7 +4298,7 @@ export class TetherPlcIde extends LitElement {
         [this.prog, this.rt, this.retain, this.dbg, this.forces,
           this.breaks, this.trace, this.watches, this.shadow,
           this.alarms, this.alarmStats, this.alarmHist,
-          this.histChans] =
+          this.histChans, this.mqttConns] =
           await Promise.all([
             this.ctl.progStatus().catch(() => undefined),
             this.ctl.rtStatus().catch(() => undefined),
@@ -4160,10 +4313,24 @@ export class TetherPlcIde extends LitElement {
             this.ctl.evlogStats().catch(() => undefined),
             this.ctl.evlogHistory(24).catch(() => undefined),
             this.ctl.histList().catch(() => undefined),
+            this.ctl.mqttStatus().catch(() => undefined),
           ]);
         this.shadowDiffs = this.shadow?.loaded
           ? await this.ctl.shadowCompare().catch(() => undefined)
           : undefined;
+        /* journal fetch only pays off while the Events pane is
+           open — keep the map warm otherwise cheaply            */
+        if (this.pane === 'events' && this.mqttConns?.length) {
+          const conns = this.mqttConns.slice(0, 8);
+          const jr = await Promise.all(
+            conns.map((c) =>
+              this.ctl.mqttJournal(c.handle, 0, 64)
+                .catch(() => undefined)));
+          jr.forEach((j, i) => {
+            const c = conns[i];
+            if (j && c) this.mqttJournals.set(c.handle, j);
+          });
+        }
       } catch (e) {
         this.ctlErr = e instanceof Error ? e.message : String(e);
       }

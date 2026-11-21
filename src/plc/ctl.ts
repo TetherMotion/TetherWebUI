@@ -78,6 +78,8 @@ export const CTL = {
   EVTLOG_CONFIRM: 0x0f05,
   HIST_CONF: 0x0f10,
   HIST_LIST: 0x0f11,
+  MQTT_STATUS: 0x0f20,
+  MQTT_JOURNAL: 0x0f21,
 } as const;
 
 const F_ERROR = 1 << 15;
@@ -232,6 +234,31 @@ export interface HistChannel {
   name: string;
   off: bigint;
   len: number;
+}
+
+/** MQTT broker connection (MQTT_STATUS row).  state: 0 down,
+    1 connecting, 2 connected.  journalCount = retained inbound
+    messages on this handle's ring (≤64). */
+export interface MqttConn {
+  handle: number;
+  state: number;
+  journalCount: number;
+  port: number;
+  transport: number;   // 0 auto 1 tcp 2 ssl 3 ws 4 wss
+  tls: number;
+  mqttVersion: number;
+  host: string;
+  clientId: string;
+}
+
+/** one journaled inbound MQTT message (MQTT_JOURNAL entry) */
+export interface MqttJournalEntry {
+  tsMs: bigint;        // wall-clock ms since epoch
+  qos: number;
+  retain: number;
+  msgid: number;
+  topic: string;
+  payload: Uint8Array;
 }
 
 /** one object-dictionary row (OD_LIST) — access 0 ro, 1 rw, 2 wo */
@@ -1248,6 +1275,80 @@ export class PlcCtl {
         o += nl + 12;
       }
       return out;
+    });
+  }
+
+  // ---- mqtt journal (0x0F2x) ------------------------------------------
+
+  /** allocated MQTT broker connections + journal depths.  Empty
+      array when the runtime has no MQTT connections (feature
+      compiled out or program never connected). */
+  mqttStatus(): Promise<MqttConn[]> {
+    return this.call(CTL.MQTT_STATUS).then((r) => {
+      const d = new DataView(r.payload.buffer, r.payload.byteOffset);
+      const n = d.getUint32(0, true);
+      const out: MqttConn[] = [];
+      let o = 4;
+      const dec = new TextDecoder();
+      for (let i = 0; i < n && o + 32 <= r.payload.length; i++) {
+        const handle = d.getUint32(o, true);
+        const state = d.getUint32(o + 4, true);
+        const journalCount = d.getUint32(o + 8, true);
+        const port = d.getUint32(o + 12, true);
+        const transport = d.getUint32(o + 16, true);
+        const tls = d.getUint32(o + 20, true);
+        const mqttVersion = d.getUint32(o + 24, true);
+        o += 28;
+        const hl = d.getUint16(o, true); o += 2;
+        if (o + hl + 2 > r.payload.length) break;
+        const host = dec.decode(r.payload.subarray(o, o + hl));
+        o += hl;
+        const cl = d.getUint16(o, true); o += 2;
+        if (o + cl > r.payload.length) break;
+        const clientId = dec.decode(r.payload.subarray(o, o + cl));
+        o += cl;
+        out.push({ handle, state, journalCount, port, transport,
+                   tls, mqttVersion, host, clientId });
+      }
+      return out;
+    });
+  }
+
+  /** inbound-message journal for one connection, oldest→newest.
+      idx = first logical index (0 = oldest retained), max ≤ 64. */
+  mqttJournal(handle: number, idx = 0, max = 64):
+      Promise<{ total: number; entries: MqttJournalEntry[] }> {
+    const p = new Uint8Array(12);
+    const d = new DataView(p.buffer);
+    d.setUint32(0, handle, true);
+    d.setUint32(4, idx, true);
+    d.setUint32(8, max, true);
+    return this.call(CTL.MQTT_JOURNAL, p).then((r) => {
+      const dv = new DataView(r.payload.buffer, r.payload.byteOffset);
+      const total = dv.getInt32(0, true);
+      const n = dv.getUint32(4, true);
+      const dec = new TextDecoder();
+      const entries: MqttJournalEntry[] = [];
+      let o = 8;
+      for (let i = 0; i < n && o + 30 <= r.payload.length; i++) {
+        const tsMs = dv.getBigUint64(o, true);
+        const qos = dv.getUint32(o + 8, true);
+        const retain = dv.getUint32(o + 12, true);
+        const msgid = dv.getUint32(o + 16, true);
+        const tl = dv.getUint16(o + 20, true);
+        if (o + 22 + tl + 4 > r.payload.length) break;
+        const topic = dec.decode(
+          r.payload.subarray(o + 22, o + 22 + tl));
+        let q = o + 22 + tl;
+        const plen = dv.getUint32(q, true); q += 4;
+        if (q + plen > r.payload.length) break;
+        entries.push({
+          tsMs, qos, retain, msgid, topic,
+          payload: r.payload.slice(q, q + plen),
+        });
+        o = q + plen;
+      }
+      return { total, entries };
     });
   }
 }

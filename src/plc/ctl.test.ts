@@ -265,3 +265,79 @@ describe('PlcCtl program ops', () => {
     expect([...lastReq!.subarray(16)]).toEqual(want);
   });
 });
+
+describe('PlcCtl mqtt ops', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('mqttStatus decodes broker rows', async () => {
+    // {u32 n, {u32 h,state,jcount,port,transport,tls,mver, str host, str cid}*}
+    const p = new Uint8Array(256);
+    const d = new DataView(p.buffer);
+    d.setUint32(0, 1, true);
+    let o = 4;
+    d.setUint32(o, 3, true); o += 4;   // handle
+    d.setUint32(o, 2, true); o += 4;   // state connected
+    d.setUint32(o, 7, true); o += 4;   // journal count
+    d.setUint32(o, 8883, true); o += 4;
+    d.setUint32(o, 4, true); o += 4;   // wss
+    d.setUint32(o, 1, true); o += 4;   // tls
+    d.setUint32(o, 5, true); o += 4;   // mqtt5
+    const host = new TextEncoder().encode('broker.example.com/mqtt');
+    d.setUint16(o, host.length, true); o += 2;
+    p.set(host, o); o += host.length;
+    const cid = new TextEncoder().encode('plc-1');
+    d.setUint16(o, cid.length, true); o += 2;
+    p.set(cid, o); o += cid.length;
+    mock(p.subarray(0, o));
+    const conns = await new PlcCtl().mqttStatus();
+    expect(conns).toHaveLength(1);
+    expect(conns[0]).toMatchObject({
+      handle: 3, state: 2, journalCount: 7, port: 8883,
+      transport: 4, tls: 1, mqttVersion: 5,
+      host: 'broker.example.com/mqtt', clientId: 'plc-1',
+    });
+  });
+
+  it('mqttJournal decodes entries oldest→newest', async () => {
+    // reply {i32 total, u32 n, {u64 ts,u32 qos,u32 ret,u32 msgid,
+    //   str topic, u32 plen, bytes payload}*}
+    const p = new Uint8Array(512);
+    const d = new DataView(p.buffer);
+    d.setInt32(0, 12, true);           // total retained
+    d.setUint32(4, 2, true);           // n returned
+    let o = 8;
+    const topic = new TextEncoder().encode('tether/boiler/temp');
+    const payload = new TextEncoder().encode('72.5');
+    d.setBigUint64(o, 1_700_000_000_000n, true); o += 8;
+    d.setUint32(o, 1, true); o += 4;   // qos
+    d.setUint32(o, 0, true); o += 4;   // retain
+    d.setUint32(o, 42, true); o += 4;  // msgid
+    d.setUint16(o, topic.length, true); o += 2;
+    p.set(topic, o); o += topic.length;
+    d.setUint32(o, payload.length, true); o += 4;
+    p.set(payload, o); o += payload.length;
+    // second entry, binary payload
+    const topic2 = new TextEncoder().encode('x/y');
+    d.setBigUint64(o, 1_700_000_001_000n, true); o += 8;
+    d.setUint32(o, 0, true); o += 4;
+    d.setUint32(o, 1, true); o += 4;
+    d.setUint32(o, 7, true); o += 4;
+    d.setUint16(o, topic2.length, true); o += 2;
+    p.set(topic2, o); o += topic2.length;
+    d.setUint32(o, 3, true); o += 4;
+    p.set([0xde, 0xad, 0xbe], o); o += 3;
+    mock(p.subarray(0, o));
+    const r = await new PlcCtl().mqttJournal(3, 5, 2);
+    expect(r.total).toBe(12);
+    expect(r.entries).toHaveLength(2);
+    expect(r.entries[0]!.topic).toBe('tether/boiler/temp');
+    expect(new TextDecoder().decode(r.entries[0]!.payload)).toBe('72.5');
+    expect(r.entries[0]!.msgid).toBe(42);
+    expect([...r.entries[1]!.payload]).toEqual([0xde, 0xad, 0xbe]);
+    // request frame carries {handle, idx, max}
+    const q = new DataView(lastReq!.buffer, 16);
+    expect(q.getUint32(0, true)).toBe(3);
+    expect(q.getUint32(4, true)).toBe(5);
+    expect(q.getUint32(8, true)).toBe(2);
+  });
+});

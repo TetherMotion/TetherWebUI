@@ -1049,6 +1049,11 @@ tile-frame {
   font-size: 11px;
 }
 
+.plc-mono {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+}
+
 .plc-detail {
   flex: 1;
   min-width: 0;
@@ -1751,6 +1756,18 @@ tile-frame {
 .fbd-pitem {
   font-size: 10px;
   padding: 1px 5px;
+}
+
+.fbd-wirepick {
+  flex-basis: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--accent, #6cf);
+  padding: 2px 6px;
+  border: 1px dashed var(--glass-border);
+  border-radius: 6px;
 }
 
 /* ---- FBD typing + live pin values ---- */
