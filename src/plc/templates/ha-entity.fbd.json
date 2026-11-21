@@ -1,0 +1,83 @@
+{
+ "schema": "fbd.v1",
+ "project": "ha_entity_demo",
+ "data_types": [],
+ "global_vars": [],
+ "pous": [
+  {
+   "id": "p1",
+   "name": "Main",
+   "kind": "program",
+   "en_eno": "off",
+   "interface": [
+    {"name": "PumpState", "kind": "var_output", "type": "BOOL"},
+    {"name": "HaConnected", "kind": "var_output", "type": "BOOL"}
+   ],
+   "networks": [
+    {
+     "id": "n1",
+     "kind": "fbd",
+     "label": "",
+     "comments": [],
+     "assocs": [],
+     "labels": [],
+     "jumps": [],
+     "returns": [],
+     "blocks": [
+      {
+       "id": 1,
+       "kind": "fb",
+       "type_ref": "FB_HaEntity",
+       "instance": "ha",
+       "pos": {"x": 10, "y": 4},
+       "params": {
+        "Execute": "TRUE",
+        "CycleTime": "0.1",
+        "En": "TRUE",
+        "Dev": "'oven'",
+        "Host": "'homeassistant.local'",
+        "Port": "1883",
+        "Kind": "2",
+        "ObjId": "'circ_pump'",
+        "Name": "'Circulation pump'",
+        "DevCls": "'switch'",
+        "AutoWr": "TRUE"
+       },
+       "exec_order": 0,
+       "negated": [],
+       "comment": "HA switch entity — pump; HA commands latch BVal via AutoWr"
+      },
+      {
+       "id": 10,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {"x": 0, "y": 2},
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "out",
+       "name": "PumpState"
+      },
+      {
+       "id": 11,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {"x": 0, "y": 8},
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "out",
+       "name": "HaConnected"
+      }
+     ],
+     "wires": [
+      {"id": 1, "src": {"block": 1, "port": "OutBVal"}, "dsts": [{"block": 10, "port": 0}]},
+      {"id": 2, "src": {"block": 1, "port": "Connected"}, "dsts": [{"block": 11, "port": 0}]}
+     ]
+    }
+   ]
+  }
+ ]
+}

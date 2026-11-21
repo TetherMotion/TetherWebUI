@@ -9,6 +9,8 @@ import { importFbdJson, type PlcProject } from './store';
 import atcRecipe from './templates/atc-recipe.fbd.json';
 import deviceTerminals from './templates/device-terminals.fbd.json';
 import haBridge from './templates/ha-bridge.fbd.json';
+import haEntity from './templates/ha-entity.fbd.json';
+import mqttLink from './templates/mqtt-link.fbd.json';
 import motorControl from './templates/motor-control.fbd.json';
 import profileLoop from './templates/profile-loop.fbd.json';
 import safetyCircuit from './templates/safety-circuit.fbd.json';
@@ -77,6 +79,20 @@ export const PROJECT_TEMPLATES: readonly ProjectTemplate[] = [
     desc: 'FB_HaBridge — MQTT entities in/out + event triggers',
     project: 'HA bridge',
     doc: haBridge,
+  },
+  {
+    id: 'ha-entity',
+    name: 'HA entity (FBD)',
+    desc: 'FB_HaEntity — one pin-wired Home Assistant switch/sensor',
+    project: 'HA entity',
+    doc: haEntity,
+  },
+  {
+    id: 'mqtt-link',
+    name: 'MQTT link (FBD)',
+    desc: 'FB_MqttLink + Sub/Tx/Rx — broker link with Hdl fan-out',
+    project: 'MQTT link',
+    doc: mqttLink,
   },
   {
     id: 'atc-recipe',

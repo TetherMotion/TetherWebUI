@@ -1,0 +1,133 @@
+{
+ "schema": "fbd.v1",
+ "project": "mqtt_link_demo",
+ "data_types": [],
+ "global_vars": [],
+ "pous": [
+  {
+   "id": "p1",
+   "name": "Main",
+   "kind": "program",
+   "en_eno": "off",
+   "interface": [
+    {"name": "Run", "kind": "var_input", "type": "BOOL"},
+    {"name": "MqttOk", "kind": "var_output", "type": "BOOL"},
+    {"name": "MsgCnt", "kind": "var_output", "type": "UDINT"}
+   ],
+   "networks": [
+    {
+     "id": "n1",
+     "kind": "fbd",
+     "label": "",
+     "comments": [],
+     "assocs": [],
+     "labels": [],
+     "jumps": [],
+     "returns": [],
+     "blocks": [
+      {
+       "id": 1,
+       "kind": "fb",
+       "type_ref": "FB_MqttLink",
+       "instance": "lk",
+       "pos": {"x": 4, "y": 2},
+       "params": {
+        "Host": "'broker.local'",
+        "Port": "1883",
+        "ClientId": "'plc-demo'",
+        "ConnectMs": "5000",
+        "BackoffMin": "1000",
+        "BackoffMax": "30000"
+       },
+       "exec_order": 0,
+       "negated": [],
+       "comment": "broker link — Execute is the run level"
+      },
+      {
+       "id": 2,
+       "kind": "fb",
+       "type_ref": "FB_MqttSub",
+       "instance": "sub",
+       "pos": {"x": 14, "y": 0},
+       "params": {
+        "Filter": "'demo/#'",
+        "Qos": "0"
+       },
+       "exec_order": 0,
+       "negated": [],
+       "comment": "subscribe once on Run rising edge"
+      },
+      {
+       "id": 3,
+       "kind": "fb",
+       "type_ref": "FB_MqttTx",
+       "instance": "tx",
+       "pos": {"x": 14, "y": 6},
+       "params": {
+        "Topic": "'demo/hello'",
+        "Payload": "'PING'",
+        "Qos": "0"
+       },
+       "exec_order": 0,
+       "negated": [],
+       "comment": "publish once on Run rising edge"
+      },
+      {
+       "id": 4,
+       "kind": "fb",
+       "type_ref": "FB_MqttRx",
+       "instance": "rx",
+       "pos": {"x": 24, "y": 3},
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "every-scan poll — HasMsg pulses per message"
+      },
+      {
+       "id": 10,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {"x": 0, "y": 0},
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "in",
+       "name": "Run"
+      },
+      {
+       "id": 11,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {"x": 0, "y": 4},
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "out",
+       "name": "MqttOk"
+      },
+      {
+       "id": 12,
+       "kind": "variable",
+       "type_ref": "",
+       "pos": {"x": 0, "y": 8},
+       "params": {},
+       "exec_order": 0,
+       "negated": [],
+       "comment": "",
+       "role": "out",
+       "name": "MsgCnt"
+      }
+     ],
+     "wires": [
+      {"id": 1, "src": {"block": 10, "port": 0}, "dsts": [{"block": 1, "port": "Execute"}, {"block": 2, "port": "Execute"}, {"block": 3, "port": "Execute"}]},
+      {"id": 2, "src": {"block": 1, "port": "Hdl"}, "dsts": [{"block": 2, "port": "Hdl"}, {"block": 3, "port": "Hdl"}, {"block": 4, "port": "Hdl"}]},
+      {"id": 3, "src": {"block": 1, "port": "Connected"}, "dsts": [{"block": 11, "port": 0}]},
+      {"id": 4, "src": {"block": 4, "port": "MsgCnt"}, "dsts": [{"block": 12, "port": 0}]}
+     ]
+    }
+   ]
+  }
+ ]
+}
