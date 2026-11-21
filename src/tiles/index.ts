@@ -9,3 +9,4 @@ import './faceplate';
 import './profile';
 import './hmi';
 import './hmiw';
+import './hmi-screen';
