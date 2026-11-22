@@ -12,7 +12,7 @@ import { renderAlarms, renderOperations } from '../views/motion';
 import { loadVolcanoPlot, VolcanoPlotCanvas } from '../vendor/volcanoplot';
 import '../components';
 import { icon } from '../icons';
-import { optString, TileElement } from './base';
+import { bindingKeysOf, optString, TileElement } from './base';
 
 type ScopeElement = HTMLElement & {
   setChannels(channels: { name: string; color: [number, number, number] }[]): void;
@@ -177,8 +177,11 @@ export class TileScope extends TileElement {
     this.resubscribe();
   }
 
-  /** Signal names bound on this tile (options.signals: one name per line). */
+  /** Signal names bound on this tile — def.bindings (config form) or
+      options.signals (template-authored defs), one name per line. */
   private signalNames(): string[] {
+    const bound = bindingKeysOf(this.def);
+    if (bound.length) return bound;
     const raw = optString(this.def, 'signals') ?? '';
     return raw
       .split('\n')
@@ -193,16 +196,27 @@ export class TileScope extends TileElement {
     const names = this.hub.signals
       .filter((s) => pattern!.test(s.name) || pattern!.test(s.group))
       .map((s) => s.name);
-    this.updateDef({ signals: names.join('\n'), preset: '' });
-  }
-
-  /** Persist an options change back through the frame (immutable def swap). */
-  private updateDef(options: Record<string, unknown>): void {
+    if (!names.length) return;
+    const def = this.def;
+    if (!def) return;
+    const bindings = names.map((n) => {
+      const dot = n.lastIndexOf('.');
+      return dot > 0
+        ? { entry: n.slice(0, dot), field: n.slice(dot + 1) }
+        : { entry: n };
+    });
+    const options: Record<string, unknown> = {
+      ...(def.options ?? {}),
+      signals: names.join('\n'),
+    };
+    delete options['preset'];
+    // board-view's onTileConfig replaces the tile def wholesale, so the
+    // detail must carry the full def — an options-only patch is dropped.
     this.dispatchEvent(
       new CustomEvent('tile-config', {
         bubbles: true,
         composed: true,
-        detail: { options },
+        detail: { def: { ...def, bindings, options } },
       }),
     );
   }

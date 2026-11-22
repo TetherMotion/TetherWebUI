@@ -278,7 +278,10 @@ export class TileFrame extends TileElement {
                               type="button"
                               class="icon-btn"
                               title="Configure tile"
-                              @click=${() => (this.configOpen = !this.configOpen)}
+                              @click=${() => {
+                                this.configOpen = !this.configOpen;
+                                this.requestUpdate();
+                              }}
                             >
                               ${icon('settings-2')}
                             </button>`
@@ -321,7 +324,15 @@ export class TileFrame extends TileElement {
               ${spec.fields.map((f) => this.renderField(f))}
               <div class="cfg-actions">
                 <button type="submit" class="primary">Apply</button>
-                <button type="button" @click=${() => (this.configOpen = false)}>Cancel</button>
+                <button
+                  type="button"
+                  @click=${() => {
+                    this.configOpen = false;
+                    this.requestUpdate();
+                  }}
+                >
+                  Cancel
+                </button>
               </div>
             </form>`
           : nothing

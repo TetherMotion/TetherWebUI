@@ -732,7 +732,9 @@ tether-value-card .value {
   pointer-events: none;
 }
 
-.toast {
+/* scoped under .toast-host — the boards shell's .toasts/.toast stack is a
+   separate component and must not inherit the fade-in default opacity:0 */
+.toast-host .toast {
   pointer-events: auto;
   max-width: min(420px, 90vw);
   padding: 0.8rem 1rem;
@@ -753,19 +755,19 @@ tether-value-card .value {
     transform 0.25s ease;
 }
 
-.toast-visible {
+.toast-host .toast-visible {
   opacity: 1;
   transform: translateY(0);
 }
 
-.toast-error {
+.toast-host .toast-error {
   border-color: var(--status-offline);
   box-shadow:
     0 12px 40px rgba(214, 85, 85, 0.25),
     0 2px 8px var(--glass-shadow-deep);
 }
 
-[data-theme='dark'] .toast-error {
+[data-theme='dark'] .toast-host .toast-error {
   border-color: var(--status-offline);
   box-shadow:
     0 12px 40px rgba(255, 183, 183, 0.18),
@@ -2129,7 +2131,8 @@ tr.diag-row-fault td {
 }
 
 /* VolcanoPlot figure overlay (FFT spectrum etc.) */
-.trend-plot-overlay {
+.trend-plot-overlay,
+.scope-plot-overlay {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.55);
@@ -2137,26 +2140,31 @@ tr.diag-row-fault td {
   place-items: center;
   z-index: 100;
 }
-.trend-plot-overlay[hidden] {
+.trend-plot-overlay[hidden],
+.scope-plot-overlay[hidden] {
   display: none;
 }
-.trend-plot-dialog {
+.trend-plot-dialog,
+.scope-plot-dialog {
   background: var(--surface, #1a1a1e);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 1rem;
   width: min(900px, 90vw);
 }
-.trend-plot-head {
+.trend-plot-head,
+.scope-plot-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 0.5rem;
 }
-.trend-plot-head h3 {
+.trend-plot-head h3,
+.scope-plot-head h3 {
   margin: 0;
 }
-#trend-plot-canvas {
+#trend-plot-canvas,
+.scope-plot-canvas {
   width: 100%;
   height: 480px;
   display: block;
