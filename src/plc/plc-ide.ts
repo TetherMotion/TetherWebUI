@@ -639,9 +639,19 @@ export class TetherPlcIde extends LitElement {
   private imgOut?: Uint8Array;
   /** Discovery: GET /bus artifacts (.topology/.fleet/.bus) + scan state. */
   private busData?: { simdir: string; topology?: string; fleet?: string; bus?: string };
+  /** link transport — '' until the iface list resolves a smart default. */
+  private busLink: '' | 'udp' | 'raw' = '';
   private busPeer = '127.0.0.1';
   private busPort = 34980;
   private busIface = '';
+  /** iface_list result — host NICs for the raw-NIC select. */
+  private busIfaces?: { name: string; kind: string; state: string; mac: string; mtu: string }[];
+  private busIfaceAuto = '';
+  private busIfacesFetched = false;
+  /** 'other…' picked in the NIC select — show the free-text fallback. */
+  private busIfaceCustom = false;
+  /** recent UDP peers — filled after each successful scan request. */
+  private busPeerRecent: string[] = [];
   private busScanBusy = false;
   private busScanLog = '';
   /** Debug → Simulate: steps text + last run output. */
@@ -1347,10 +1357,25 @@ export class TetherPlcIde extends LitElement {
 
   // ---- render --------------------------------------------------------
 
+  /** Catalog names for datalist-driven symbol/signal fields (watch add,
+      alarm rules, debug symbol reads): every ctl-exported signal/param,
+      offered both bare and with the `plc.` prefix the watch API uses. */
+  private sigNameOptions(): string[] {
+    const names = new Set<string>();
+    for (const e of [...(this.hub?.signals ?? []), ...(this.hub?.params ?? [])]) {
+      names.add(`plc.${e.name}`);
+      names.add(e.name);
+    }
+    return [...names];
+  }
+
   render(): TemplateResult {
     const fbd = this.project.fbd;
     return html`
       <div class="plc-ide">
+        <datalist id="plc-sig-names">
+          ${this.sigNameOptions().map((n) => html`<option value=${n}></option>`)}
+        </datalist>
         <div class="plc-toolbar">
           <span class="plc-brand">TetherPLC</span>
           <span class="plc-proj">${fbd.project}</span>
@@ -2814,6 +2839,7 @@ export class TetherPlcIde extends LitElement {
             ? html`<div class="plc-ops">
                 <input
                   class="fbd-in wide"
+                  list="plc-sig-names"
                   placeholder="expression e.g. plc.POU1.sp - plc.POU1.pv"
                   .value=${this.watchExprInput}
                   @input=${(e: Event) =>
@@ -3305,6 +3331,7 @@ export class TetherPlcIde extends LitElement {
                         <input
                           class="plc-mapcell"
                           style="width:12ch"
+                          list="plc-sig-names"
                           .value=${r.signal}
                           placeholder="%IX0.0 / var"
                           @change=${(e: Event) => this.setAlarmRule(i, 'signal', (e.target as HTMLInputElement).value)}
@@ -3814,6 +3841,7 @@ export class TetherPlcIde extends LitElement {
   /** Discovery — what the project talks to + bus-scan status. */
   private discoverySection(): TemplateResult {
     if (!this.busData) void this.refreshBus();
+    if (!this.busIfacesFetched) void this.refreshIfaces();
     const devices = this.project.fbd.pous.flatMap((p) =>
       p.networks.flatMap((n) =>
         n.blocks
@@ -3855,40 +3883,7 @@ export class TetherPlcIde extends LitElement {
           live bus
           <span class="plc-dim">ecpump artifacts in ${this.busData?.simdir ?? '…'}</span>
         </h4>
-        <div class="plc-ops">
-          <input
-            class="fbd-in"
-            style="width:110px"
-            title="UDP peer hosting the slave chain"
-            placeholder="peer"
-            .value=${this.busPeer}
-            @input=${(e: Event) => (this.busPeer = (e.target as HTMLInputElement).value)}
-          />
-          <input
-            class="fbd-in"
-            style="width:70px"
-            title="UDP port"
-            type="number"
-            .value=${String(this.busPort)}
-            @input=${(e: Event) => (this.busPort = parseInt((e.target as HTMLInputElement).value, 10) || 34980)}
-          />
-          <input
-            class="fbd-in"
-            style="width:90px"
-            title="raw NIC name — overrides peer/port"
-            placeholder="iface"
-            .value=${this.busIface}
-            @input=${(e: Event) => (this.busIface = (e.target as HTMLInputElement).value)}
-          />
-          <button
-            class="chip-btn"
-            ?disabled=${this.busScanBusy}
-            @click=${() => void this.onBusScan()}
-          >
-            ${this.busScanBusy ? 'scanning…' : 'scan bus'}
-          </button>
-          <button class="chip-btn" @click=${() => void this.refreshBus()}>refresh</button>
-        </div>
+        ${this.busLinkRow()}
         ${this.busScanLog ? html`<pre class="plc-dim plc-simlog">${this.busScanLog}</pre>` : nothing}
         ${this.busTopologyTable()}
         ${
@@ -3927,22 +3922,154 @@ export class TetherPlcIde extends LitElement {
     this.requestUpdate();
   }
 
+  /** `iface_list` meta-op — host NICs for the raw-NIC select. Applies the
+      sole-physical-NIC auto-pick (same rule the Tether examples use) as
+      the transport default only while the user hasn't picked one. */
+  private async refreshIfaces(): Promise<void> {
+    this.busIfacesFetched = true;
+    try {
+      const r = await this.ctl.meta<{
+        ifaces: { name: string; kind: string; state: string; mac: string; mtu: string }[];
+        auto: string;
+      }>('iface_list');
+      this.busIfaces = r.ifaces ?? [];
+      this.busIfaceAuto = r.auto ?? '';
+      if (!this.busLink) this.busLink = this.busIfaceAuto ? 'raw' : 'udp';
+      if (this.busIfaceAuto && !this.busIface) this.busIface = this.busIfaceAuto;
+    } catch {
+      /* no backend or op missing — UDP stays the default, NIC input
+         falls back to free text */
+      if (!this.busLink) this.busLink = 'udp';
+    }
+    this.requestUpdate();
+  }
+
+  /** Link picker — transport first (EtherCAT over UDP vs raw NIC), then
+      only the fields that transport needs. Defaults resolve from the
+      iface_list meta-op exactly like the Tether examples' auto-select. */
+  private busLinkRow(): TemplateResult {
+    const link = this.busLink || 'udp';
+    const seg = (v: 'udp' | 'raw', label: string, title: string) => html`
+      <button
+        class="chip-btn ${link === v ? 'active' : ''}"
+        title=${title}
+        @click=${() => {
+          this.busLink = v;
+          this.requestUpdate();
+        }}
+      >
+        ${label}
+      </button>`;
+    return html`
+      <div class="plc-ops">
+        ${seg('udp', 'EtherCAT/UDP', 'UDP datagrams carrying Ethernet frames — no raw-socket privileges needed (slave-chain emulator, remote labs)')}
+        ${seg('raw', 'raw NIC', 'AF_PACKET master on a physical NIC — the real EtherCAT path (needs CAP_NET_RAW / runec)')}
+        ${link === 'udp' ? this.busUdpFields() : this.busRawFields()}
+        <button
+          class="chip-btn"
+          ?disabled=${this.busScanBusy}
+          @click=${() => void this.onBusScan()}
+        >
+          ${this.busScanBusy ? 'scanning…' : 'scan bus'}
+        </button>
+        <button class="chip-btn" @click=${() => void this.refreshBus()}>refresh</button>
+      </div>`;
+  }
+
+  private busUdpFields(): TemplateResult {
+    return html`
+      <input
+        class="fbd-in"
+        style="width:110px"
+        list="plc-bus-peers"
+        title="UDP peer hosting the slave chain"
+        placeholder="peer"
+        .value=${this.busPeer}
+        @input=${(e: Event) => (this.busPeer = (e.target as HTMLInputElement).value)}
+      />
+      <datalist id="plc-bus-peers">
+        <option value="127.0.0.1"></option>
+        <option value="::1"></option>
+        ${this.busPeerRecent.map((p) => html`<option value=${p}></option>`)}
+      </datalist>
+      <input
+        class="fbd-in"
+        style="width:70px"
+        title="UDP port"
+        type="number"
+        .value=${String(this.busPort)}
+        @input=${(e: Event) => (this.busPort = parseInt((e.target as HTMLInputElement).value, 10) || 34980)}
+      />`;
+  }
+
+  private busRawFields(): TemplateResult {
+    const ifs = this.busIfaces;
+    if (!ifs?.length || this.busIfaceCustom)
+      return html`<input
+          class="fbd-in"
+          style="width:110px"
+          title="raw NIC name (e.g. enp3s0)"
+          placeholder="iface"
+          .value=${this.busIface}
+          @input=${(e: Event) => (this.busIface = (e.target as HTMLInputElement).value)}
+        />${ifs?.length ? html`<button
+            class="chip-btn"
+            title="back to detected NICs"
+            @click=${() => {
+              this.busIfaceCustom = false;
+              this.requestUpdate();
+            }}
+          >
+            list
+          </button>` : nothing}`;
+    const opt = (i: (typeof ifs)[number]) => html`<option
+      value=${i.name}
+      ?selected=${i.name === this.busIface}
+    >
+      ${i.name} · ${i.kind} · ${i.state}${i.name === this.busIfaceAuto ? ' · auto' : ''} · ${i.mac}
+    </option>`;
+    const phys = ifs.filter((i) => i.kind === 'ethernet' || i.kind === 'wireless');
+    const virt = ifs.filter((i) => i.kind !== 'ethernet' && i.kind !== 'wireless');
+    return html`<select
+        class="fbd-in"
+        title="raw NIC — AF_PACKET EtherCAT master"
+        @change=${(e: Event) => {
+          const v = (e.target as HTMLSelectElement).value;
+          if (v === '__custom') this.busIfaceCustom = true;
+          else this.busIface = v;
+          this.requestUpdate();
+        }}
+      >
+        <option value="" ?selected=${!this.busIface}>pick NIC…</option>
+        ${phys.length ? html`<optgroup label="physical">${phys.map(opt)}</optgroup>` : nothing}
+        ${virt.length ? html`<optgroup label="virtual">${virt.map(opt)}</optgroup>` : nothing}
+        <option value="__custom">other…</option>
+      </select>`;
+  }
+
   private async onBusScan(): Promise<void> {
+    const link = this.busLink || 'udp';
+    if (link === 'raw' && !this.busIface.trim()) {
+      this.busScanLog = 'pick an interface first (or switch to EtherCAT/UDP)';
+      this.requestUpdate();
+      return;
+    }
     this.busScanBusy = true;
     this.busScanLog = '';
     this.requestUpdate();
     try {
       const r = await this.ctl.meta<{ exit: number; stderr: string; fleet: string }>(
         'bus_scan',
-        {
-          peer: this.busPeer,
-          port: this.busPort,
-          ...(this.busIface.trim() ? { iface: this.busIface.trim() } : {}),
-        },
+        link === 'raw'
+          ? { iface: this.busIface.trim() }
+          : { peer: this.busPeer, port: this.busPort },
       );
       this.busScanLog = r.stderr?.trim() ?? '';
       if (r.exit !== 0)
         this.busScanLog += `${this.busScanLog ? '\n' : ''}(scan exited ${r.exit} — EtherCAT discovery needs a live bus or UDP slave chain)`;
+      if (link === 'udp' && this.busPeer.trim() && !this.busPeerRecent.includes(this.busPeer.trim())) {
+        this.busPeerRecent = [this.busPeer.trim(), ...this.busPeerRecent].slice(0, 6);
+      }
       await this.refreshBus();
     } catch (e) {
       this.busScanLog = `bus scan failed: ${e instanceof Error ? e.message : e}`;
@@ -4678,6 +4805,7 @@ export class TetherPlcIde extends LitElement {
       <div class="plc-ops">
         <input
           class="fbd-in"
+          list="plc-sig-names"
           placeholder="symbol name (e.g. ctu1.CV, SHADOW.cnt)"
           .value=${this.dbgSymName}
           @input=${(e: Event) => (this.dbgSymName = (e.target as HTMLInputElement).value)}

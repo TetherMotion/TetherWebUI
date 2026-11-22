@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, vi } from 'vitest';
 import './plc-ide';
 import { emptyProject } from './model';
 import type { PlcProject } from './store';
@@ -209,6 +209,173 @@ describe('plc-ide workbench (program activity)', () => {
     el.querySelector<HTMLElement>('.plc-tab-x')!.click();
     await el.updateComplete;
     expect(el.querySelectorAll('.plc-tab').length).toBe(1);
+    el.remove();
+  });
+});
+
+describe('plc-ide discovery card', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    document.body.innerHTML = '';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({ ok: false }) as Response),
+    );
+  });
+
+  const showDiscovery = async (el: TetherPlcIde) => {
+    el.activity = 'configure';
+    await el.updateComplete;
+    navTo(el, 'Discovery');
+    await el.updateComplete;
+    // refreshIfaces resolves a meta-op promise — let microtasks settle
+    await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+  };
+
+  const stubCtl = (
+    el: TetherPlcIde,
+    meta: (op: string, fields: Record<string, unknown>) => Promise<unknown>,
+  ) => {
+    (el as unknown as { ctl: { meta: typeof meta } }).ctl = { meta };
+  };
+
+  it('auto-picks raw NIC transport when iface_list yields a sole physical NIC', async () => {
+    seed();
+    const el = await mount();
+    const meta = vi.fn(async (op: string, _fields: Record<string, unknown> = {}) => {
+      if (op === 'iface_list')
+        return {
+          ifaces: [
+            { name: 'enp6s0', kind: 'ethernet', state: 'up', mac: '9c:6b:00:11:22:33', mtu: '1500' },
+            { name: 'lo', kind: 'loopback', state: 'unknown', mac: '00:00:00:00:00:00', mtu: '65536' },
+            { name: 'veth0', kind: 'virtual', state: 'up', mac: 'aa:bb:cc:dd:ee:ff', mtu: '1500' },
+          ],
+          auto: 'enp6s0',
+        };
+      return { exit: 0, stderr: '', fleet: '' };
+    });
+    stubCtl(el, meta);
+    await showDiscovery(el);
+
+    // transport picker rendered, raw auto-selected
+    const segs = [...el.querySelectorAll<HTMLButtonElement>('.plc-ops .chip-btn')].map((b) =>
+      b.textContent?.trim(),
+    );
+    expect(segs).toContain('EtherCAT/UDP');
+    expect(segs).toContain('raw NIC');
+    const active = el.querySelector<HTMLButtonElement>('.plc-ops .chip-btn.active');
+    expect(active?.textContent?.trim()).toBe('raw NIC');
+
+    // NIC select shows the auto-picked physical NIC, peer field hidden
+    const sel = el.querySelector<HTMLSelectElement>('select.fbd-in');
+    expect(sel).toBeTruthy();
+    expect(sel!.value).toBe('enp6s0');
+    expect([...sel!.querySelectorAll('option')].some((o) => o.textContent?.includes('auto'))).toBe(
+      true,
+    );
+    const inputs = [...el.querySelectorAll<HTMLInputElement>('input.fbd-in')].map(
+      (i) => i.placeholder,
+    );
+    expect(inputs).not.toContain('peer');
+
+    // scan sends iface only (no peer/port leakage)
+    meta.mockClear();
+    [...el.querySelectorAll<HTMLButtonElement>('.plc-ops .chip-btn')]
+      .find((b) => b.textContent?.trim() === 'scan bus')!
+      .click();
+    await new Promise((r) => setTimeout(r, 0));
+    const scan = meta.mock.calls.find(([op]) => op === 'bus_scan');
+    expect(scan?.[1]).toEqual({ iface: 'enp6s0' });
+    el.remove();
+  });
+
+  it('defaults to UDP with peer/port when no NIC can be auto-selected', async () => {
+    seed();
+    const el = await mount();
+    const meta = vi.fn(async (op: string, _fields: Record<string, unknown> = {}) => {
+      if (op === 'iface_list')
+        return {
+          ifaces: [
+            { name: 'eth0', kind: 'ethernet', state: 'up', mac: 'aa:00:00:00:00:01', mtu: '1500' },
+            { name: 'eth1', kind: 'ethernet', state: 'down', mac: 'aa:00:00:00:00:02', mtu: '1500' },
+          ],
+          auto: '',
+        };
+      return { exit: 0, stderr: '', fleet: '' };
+    });
+    stubCtl(el, meta);
+    await showDiscovery(el);
+
+    const active = el.querySelector<HTMLButtonElement>('.plc-ops .chip-btn.active');
+    expect(active?.textContent?.trim()).toBe('EtherCAT/UDP');
+    const peer = el.querySelector<HTMLInputElement>('input[list="plc-bus-peers"]');
+    expect(peer).toBeTruthy();
+    expect(peer!.value).toBe('127.0.0.1');
+    expect(el.querySelector('datalist#plc-bus-peers')).toBeTruthy();
+
+    meta.mockClear();
+    [...el.querySelectorAll<HTMLButtonElement>('.plc-ops .chip-btn')]
+      .find((b) => b.textContent?.trim() === 'scan bus')!
+      .click();
+    await new Promise((r) => setTimeout(r, 0));
+    const scan = meta.mock.calls.find(([op]) => op === 'bus_scan');
+    expect(scan?.[1]).toEqual({ peer: '127.0.0.1', port: 34980 });
+    el.remove();
+  });
+
+  it('switches contextual fields when the transport changes', async () => {
+    seed();
+    const el = await mount();
+    stubCtl(el, async (op) =>
+      op === 'iface_list'
+        ? { ifaces: [{ name: 'eth0', kind: 'ethernet', state: 'up', mac: 'aa', mtu: '1500' }], auto: 'eth0' }
+        : { exit: 0, stderr: '', fleet: '' },
+    );
+    await showDiscovery(el);
+
+    // raw → select; switch to udp → peer input appears, select gone
+    expect(el.querySelector('select.fbd-in')).toBeTruthy();
+    [...el.querySelectorAll<HTMLButtonElement>('.plc-ops .chip-btn')]
+      .find((b) => b.textContent?.trim() === 'EtherCAT/UDP')!
+      .click();
+    await el.updateComplete;
+    expect(el.querySelector('select.fbd-in')).toBeFalsy();
+    expect(el.querySelector('input[list="plc-bus-peers"]')).toBeTruthy();
+
+    // back to raw → select again; 'other…' yields the manual fallback
+    [...el.querySelectorAll<HTMLButtonElement>('.plc-ops .chip-btn')]
+      .find((b) => b.textContent?.trim() === 'raw NIC')!
+      .click();
+    await el.updateComplete;
+    const sel = el.querySelector<HTMLSelectElement>('select.fbd-in')!;
+    sel.value = '__custom';
+    sel.dispatchEvent(new Event('change'));
+    await el.updateComplete;
+    const manual = el.querySelector<HTMLInputElement>('input.fbd-in[placeholder="iface"]');
+    expect(manual).toBeTruthy();
+    el.remove();
+  });
+
+  it('blocks a raw scan until an interface is chosen', async () => {
+    seed();
+    const el = await mount();
+    const meta = vi.fn(async (_op: string, _fields: Record<string, unknown> = {}) => ({
+      exit: 0,
+      stderr: '',
+      fleet: '',
+    }));
+    stubCtl(el, meta);
+    // force raw mode with no iface_list data and no iface picked
+    (el as unknown as { busLink: string }).busLink = 'raw';
+    await showDiscovery(el);
+
+    [...el.querySelectorAll<HTMLButtonElement>('.plc-ops .chip-btn')]
+      .find((b) => b.textContent?.trim() === 'scan bus')!
+      .click();
+    await el.updateComplete;
+    expect(meta.mock.calls.some(([op]) => op === 'bus_scan')).toBe(false);
+    expect(el.textContent).toContain('pick an interface first');
     el.remove();
   });
 });

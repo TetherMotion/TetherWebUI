@@ -82,7 +82,7 @@ const QUALITY_STALE = 1;
 export class DataHub extends EventTarget {
   readonly client = new TetherIOClient();
 
-  prefs = { url: '', pollMs: 1000, streamMs: 10 };
+  prefs = { url: '', pollMs: 1000, streamMs: 10, recent: [] as string[] };
 
   // ---- Catalog -------------------------------------------------------------
   params: CatalogEntry[] = [];

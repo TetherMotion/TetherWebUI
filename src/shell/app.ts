@@ -1013,10 +1013,18 @@ export class TetherShell extends TileElement {
             >Server URL
             <input
               id="conn-url"
+              list="conn-url-presets"
               .value=${this.urlInput}
               placeholder="ws://host:port/tether-io"
               @input=${(e: Event) => (this.urlInput = (e.target as HTMLInputElement).value)}
           /></label>
+          <datalist id="conn-url-presets">
+            <option value="ws://127.0.0.1:8099/tether-io">dashboard sim</option>
+            <option value="ws://127.0.0.1:8090/tether-io">tplc-io bridge</option>
+            ${(this.hub?.prefs.recent ?? []).map(
+              (u) => html`<option value=${u}>recent</option>`,
+            )}
+          </datalist>
           <label
             >Access token (not saved)
             <input
@@ -1046,9 +1054,11 @@ export class TetherShell extends TileElement {
   private doConnect(): void {
     const hub = this.hub;
     if (!hub) return;
-    hub.prefs.url = this.urlInput.trim();
+    const url = this.urlInput.trim();
+    hub.prefs.url = url;
+    if (url) hub.prefs.recent = [url, ...hub.prefs.recent.filter((u) => u !== url)].slice(0, 8);
     hub.savePrefs();
-    void hub.connect(this.urlInput.trim() || undefined, this.tokenInput || undefined);
+    void hub.connect(url || undefined, this.tokenInput || undefined);
     this.tokenInput = '';
     this.overlay = undefined;
     this.requestUpdate();
