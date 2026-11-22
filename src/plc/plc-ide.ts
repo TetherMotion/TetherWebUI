@@ -1357,14 +1357,27 @@ export class TetherPlcIde extends LitElement {
 
   // ---- render --------------------------------------------------------
 
-  /** Catalog names for datalist-driven symbol/signal fields (watch add,
-      alarm rules, debug symbol reads): every ctl-exported signal/param,
-      offered both bare and with the `plc.` prefix the watch API uses. */
+  /** Catalog + project names for datalist-driven symbol/signal fields
+      (watch, alarm rules, task triggers, debug reads, historian): every
+      ctl-exported signal/param as `plc.<name>` plus project-side names —
+      `GVL.<var>`, `<POU>.<var>`, and located `%I/%Q/%M` addresses. */
   private sigNameOptions(): string[] {
     const names = new Set<string>();
     for (const e of [...(this.hub?.signals ?? []), ...(this.hub?.params ?? [])]) {
       names.add(`plc.${e.name}`);
       names.add(e.name);
+    }
+    const f = this.project.fbd;
+    for (const v of f.global_vars) {
+      names.add(`GVL.${v.name}`);
+      names.add(v.name);
+      if (v.at) names.add(v.at);
+    }
+    for (const p of f.pous) {
+      for (const v of p.interface) {
+        names.add(`${p.name}.${v.name}`);
+        if (v.at) names.add(v.at);
+      }
     }
     return [...names];
   }
@@ -2260,6 +2273,7 @@ export class TetherPlcIde extends LitElement {
                 <td>
                   <input
                     class="fbd-in"
+                    list="plc-sig-names"
                     .value=${v.at ?? ''}
                     placeholder="%MW0 / %QX0.0"
                     @change=${(e: Event) =>
@@ -2686,6 +2700,7 @@ export class TetherPlcIde extends LitElement {
                                     (t.trigger?.type ?? 'rise') !== 'manual'
                                       ? html`<input
                                           class="fbd-in"
+                                          list="plc-sig-names"
                                           placeholder="GVL.sig / PROG.var / %IX0.0"
                                           .value=${t.trigger?.signal ?? ''}
                                           @change=${(e: Event) =>
@@ -3447,6 +3462,7 @@ export class TetherPlcIde extends LitElement {
       <div class="plc-ops">
         <input
           class="fbd-in wide"
+          list="plc-sig-names"
           placeholder="symbols e.g. temp.sp, pv, cnt"
           .value=${this.histNamesInput}
           @input=${(e: Event) => (this.histNamesInput = (e.target as HTMLInputElement).value)}
