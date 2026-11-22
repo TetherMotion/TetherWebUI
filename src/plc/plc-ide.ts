@@ -4042,7 +4042,7 @@ export class TetherPlcIde extends LitElement {
         ? html`<span
             class="plc-warn"
             style="align-self:center;cursor:help"
-            title=${'raw EtherCAT (AF_PACKET) needs CAP_NET_RAW — run: sudo setcap cap_net_raw+ep tplc-ec-pump — or switch to EtherCAT/UDP'}
+            title=${'raw EtherCAT (AF_PACKET) needs CAP_NET_RAW. Options: (a) install runec (github.com/ulikoehler/runec) — scans auto-elevate once it is on PATH; (b) run tplc serve via sudo; (c) sudo setcap cap_net_raw+ep tplc-ec-pump; or use EtherCAT/UDP'}
           >
             ⚠ no CAP_NET_RAW
           </span>`
