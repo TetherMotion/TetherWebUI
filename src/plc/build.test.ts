@@ -3,47 +3,16 @@ import {
   byteToOffset,
   compileProject,
   diagsForFile,
-  encodeSrcFrame,
   projectSources,
+  type MetaChannel,
 } from './build';
 import type { PlcProject } from './store';
 import { emptyProject } from './model';
-
-const dec = new TextDecoder();
-
-function decodeSrcFrame(buf: ArrayBuffer): { name: string; content: string }[] {
-  const b = new Uint8Array(buf);
-  const dv = new DataView(buf);
-  const count = dv.getUint16(0, true);
-  let o = 2;
-  const out = [];
-  for (let i = 0; i < count; i++) {
-    const nl = dv.getUint16(o, true);
-    o += 2;
-    const name = dec.decode(b.subarray(o, o + nl));
-    o += nl;
-    const len = dv.getUint32(o, true);
-    o += 4;
-    out.push({ name, content: dec.decode(b.subarray(o, o + len)) });
-    o += len;
-  }
-  return out;
-}
 
 const proj = (over: Partial<PlcProject> = {}): PlcProject => ({
   fbd: emptyProject('demo'),
   stSources: {},
   ...over,
-});
-
-describe('encodeSrcFrame', () => {
-  it('round-trips file names and utf8 contents', () => {
-    const files = [
-      { name: 'a.st', content: 'PROGRAM A\nEND_PROGRAM\n' },
-      { name: 'b.st', content: 'x := 16#FF; (* ünïcode *)' },
-    ];
-    expect(decodeSrcFrame(encodeSrcFrame(files))).toEqual(files);
-  });
 });
 
 describe('byteToOffset / diagsForFile', () => {
@@ -185,21 +154,13 @@ describe('projectSources', () => {
 });
 
 describe('compileProject', () => {
-  afterEach(() => vi.unstubAllGlobals());
-
-  const mockFetch = (payload: unknown, status = 200) => {
-    const f = vi.fn(async () => ({
-      ok: status < 300,
-      status,
-      text: async () => 'err',
-      json: async () => payload,
-    }));
-    vi.stubGlobal('fetch', f);
-    return f;
+  const mockMeta = (payload: unknown) => {
+    const meta = vi.fn(async <T>() => payload as T);
+    return { meta: meta as MetaChannel['meta'] & ReturnType<typeof vi.fn> };
   };
 
-  it('posts to /compile and maps the envelope', async () => {
-    const f = mockFetch({
+  it('sends a compile meta-op and maps the envelope', async () => {
+    const ch = mockMeta({
       compile: {
         ok: false,
         errors: 1,
@@ -209,10 +170,10 @@ describe('compileProject', () => {
       },
       exit: 1,
     });
-    const r = await compileProject('http://p:8089', proj({ stSources: { a: 'x' } }));
-    expect(f).toHaveBeenCalledWith(
-      'http://p:8089/compile',
-      expect.objectContaining({ method: 'POST' }),
+    const r = await compileProject(ch, proj({ stSources: { a: 'x' } }));
+    expect(ch.meta).toHaveBeenCalledWith(
+      'compile',
+      expect.objectContaining({ build: false, files: expect.any(Array) }),
     );
     expect(r.ok).toBe(false);
     expect(r.diags[0]!.file).toBe('a.st');
@@ -220,19 +181,23 @@ describe('compileProject', () => {
   });
 
   it('decodes the base64 package in build mode', async () => {
-    const f = mockFetch({
+    const ch = mockMeta({
       compile: { ok: true, errors: 0, diags: [] },
       exit: 0,
       package: btoa('\x01\x02\x03'),
     });
-    const r = await compileProject('http://p:8089', proj(), true);
-    expect(f).toHaveBeenCalledWith('http://p:8089/compile?build', expect.anything());
+    const r = await compileProject(ch, proj(), true);
+    expect(ch.meta).toHaveBeenCalledWith('compile', expect.objectContaining({ build: true }));
     expect(r.ok).toBe(true);
     expect(r.package).toEqual(new Uint8Array([1, 2, 3]));
   });
 
-  it('throws on HTTP errors', async () => {
-    mockFetch({}, 502);
-    await expect(compileProject('http://p:8089', proj())).rejects.toThrow('HTTP 502');
+  it('propagates meta-op errors', async () => {
+    const ch = {
+      meta: vi.fn(async () => {
+        throw new Error('ws down');
+      }),
+    };
+    await expect(compileProject(ch, proj())).rejects.toThrow('ws down');
   });
 });

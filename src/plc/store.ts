@@ -8,6 +8,8 @@
  */
 import { CurveProfile } from './curve';
 import { emptyProject, FbdProject, isFbdProject } from './model';
+import type { MetaChannel } from './build';
+import * as pa from './projectapi';
 import { TuneCfg } from './tune';
 import type { AlarmRule } from './alarms';
 
@@ -58,6 +60,71 @@ export function loadProject(): PlcProject {
 
 export function saveProject(p: PlcProject): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(p));
+}
+
+/* ---- backend project persistence (tplc serve project meta-ops) ----
+   The canonical store is the project directory's `.tplc/project.json`
+   (`manifest.ui` holds this PlcProject document).  localStorage stays
+   as the offline fallback / pre-project cache. */
+
+/** Parse a persisted UI document (manifest.ui or localStorage value). */
+function plcProjectFromJson(parsed: unknown): PlcProject | undefined {
+  if (parsed && typeof parsed === 'object') {
+    const u = parsed as Record<string, unknown>;
+    if (u.fbd && isFbdProject(u.fbd)) {
+      return {
+        fbd: u.fbd,
+        stSources:
+          u.stSources && typeof u.stSources === 'object'
+            ? (u.stSources as Record<string, string>)
+            : {},
+        curves: u.curves && typeof u.curves === 'object' ? (u.curves as never) : undefined,
+        tunes: u.tunes && typeof u.tunes === 'object' ? (u.tunes as never) : undefined,
+        deployMap: typeof u.deployMap === 'string' ? u.deployMap : undefined,
+        alarms: Array.isArray(u.alarms) ? (u.alarms as never) : undefined,
+      };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Push the working document into the backend project manifest
+ * (`manifest.ui`).  Best-effort: resolves false when no project is
+ * open or the backend is unreachable — callers ignore the result.
+ */
+export async function saveProjectRemote(ch: MetaChannel, p: PlcProject): Promise<boolean> {
+  try {
+    const info = await pa.projectGet(ch);
+    if (!info) return false;
+    const manifest: pa.ProjectManifest = {
+      ...(info.manifest ?? {}),
+      name: info.name || p.fbd.project || 'project',
+      ui: p,
+    };
+    await pa.projectSave(ch, manifest);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Hydrate the working document from the backend project manifest.
+ * Returns undefined when no project is open or it has no `ui` doc.
+ */
+export async function loadRemoteProject(ch: MetaChannel): Promise<PlcProject | undefined> {
+  try {
+    const info = await pa.projectGet(ch);
+    return info ? plcProjectFromJson(info.manifest?.ui) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Current backend project info for the Project pane (undefined = none). */
+export async function remoteProjectInfo(ch: MetaChannel): Promise<pa.ProjectInfo | undefined> {
+  return pa.projectGet(ch);
 }
 
 /** Parse an imported .fbd.json document into a PlcProject. */

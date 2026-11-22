@@ -156,7 +156,7 @@ export class FbdCanvas extends LitElement {
   /** every `at` binding in the project — address allocation + collision
       checks in the device wizard (image space is project-wide). */
   declare ioBindings?: ProjectBinding[];
-  /** installed-library palette groups (from the proxy /blocks catalog). */
+  /** installed-library palette groups (from the /ws blocks catalog). */
   declare catalog?: PaletteGroup[];
   /** palette search filter. */
   declare paletteQ: string;
@@ -1296,7 +1296,7 @@ export class FbdCanvas extends LitElement {
       .filter((g): g is NonNullable<typeof g> => !!g);
     const add = (i: PaletteItem) => {
       // catalog blocks need their library source attached to compile —
-      // the host fetches /libsrc and stores it in stSources
+      // the host fetches the libsrc meta-op and stores it in stSources
       if (i.lib && i.srcFile) {
         this.dispatchEvent(
           new CustomEvent('need-libsrc', {

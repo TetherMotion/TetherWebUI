@@ -1,27 +1,48 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { PlcCtl } from './ctl';
 
-/* reply frame: {u16 type, u16 flags, u32 len, u64 req} + payload */
-function reply(type: number, payload: Uint8Array): Response {
-  const b = new Uint8Array(16 + payload.length);
-  const d = new DataView(b.buffer);
-  d.setUint16(0, type, true);
-  d.setUint32(4, payload.length, true);
-  b.set(payload, 16);
-  return new Response(b, { status: 200 });
+/* fake /ws socket: binary sends get a canned ctl-frame reply with the
+   request's req_id echoed; text sends get a JSON meta reply. */
+let lastReq: Uint8Array | undefined;
+let canned: Uint8Array = new Uint8Array();
+let cannedMeta: unknown = { ok: true };
+
+class FakeWS {
+  static OPEN = 1;
+  readyState = 1;
+  onopen?: () => void;
+  onmessage?: (m: { data: ArrayBuffer | string }) => void;
+  onclose?: () => void;
+  onerror?: () => void;
+  constructor(public url: string) {
+    queueMicrotask(() => this.onopen?.());
+  }
+  send(data: ArrayBuffer | Uint8Array | string): void {
+    if (typeof data === 'string') {
+      const j = JSON.parse(data) as { id: number };
+      const rep = JSON.stringify({ id: j.id, ok: true, data: cannedMeta });
+      queueMicrotask(() => this.onmessage?.({ data: rep }));
+      return;
+    }
+    const req = new Uint8Array(data instanceof Uint8Array ? data : new Uint8Array(data));
+    lastReq = req;
+    const d = new DataView(req.buffer, req.byteOffset);
+    const id = d.getBigUint64(8, true);
+    const b = new Uint8Array(16 + canned.length);
+    const rd = new DataView(b.buffer);
+    rd.setUint16(0, 0, true);
+    rd.setUint32(4, canned.length, true);
+    rd.setBigUint64(8, id, true);
+    b.set(canned, 16);
+    queueMicrotask(() => this.onmessage?.({ data: b.buffer }));
+  }
+  close(): void {}
 }
 
-/* capture the last request body while returning a canned payload */
-let lastReq: Uint8Array | undefined;
 function mock(payload: Uint8Array): void {
   lastReq = undefined;
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (_u: string, init: RequestInit) => {
-      lastReq = new Uint8Array(await new Response(init.body).arrayBuffer());
-      return reply(0x0000, payload);
-    }),
-  );
+  canned = payload;
+  vi.stubGlobal('WebSocket', FakeWS);
 }
 
 function cstr(b: Uint8Array, s: string, off = 0): void {
@@ -275,26 +296,43 @@ describe('PlcCtl mqtt ops', () => {
     const d = new DataView(p.buffer);
     d.setUint32(0, 1, true);
     let o = 4;
-    d.setUint32(o, 3, true); o += 4;   // handle
-    d.setUint32(o, 2, true); o += 4;   // state connected
-    d.setUint32(o, 7, true); o += 4;   // journal count
-    d.setUint32(o, 8883, true); o += 4;
-    d.setUint32(o, 4, true); o += 4;   // wss
-    d.setUint32(o, 1, true); o += 4;   // tls
-    d.setUint32(o, 5, true); o += 4;   // mqtt5
+    d.setUint32(o, 3, true);
+    o += 4; // handle
+    d.setUint32(o, 2, true);
+    o += 4; // state connected
+    d.setUint32(o, 7, true);
+    o += 4; // journal count
+    d.setUint32(o, 8883, true);
+    o += 4;
+    d.setUint32(o, 4, true);
+    o += 4; // wss
+    d.setUint32(o, 1, true);
+    o += 4; // tls
+    d.setUint32(o, 5, true);
+    o += 4; // mqtt5
     const host = new TextEncoder().encode('broker.example.com/mqtt');
-    d.setUint16(o, host.length, true); o += 2;
-    p.set(host, o); o += host.length;
+    d.setUint16(o, host.length, true);
+    o += 2;
+    p.set(host, o);
+    o += host.length;
     const cid = new TextEncoder().encode('plc-1');
-    d.setUint16(o, cid.length, true); o += 2;
-    p.set(cid, o); o += cid.length;
+    d.setUint16(o, cid.length, true);
+    o += 2;
+    p.set(cid, o);
+    o += cid.length;
     mock(p.subarray(0, o));
     const conns = await new PlcCtl().mqttStatus();
     expect(conns).toHaveLength(1);
     expect(conns[0]).toMatchObject({
-      handle: 3, state: 2, journalCount: 7, port: 8883,
-      transport: 4, tls: 1, mqttVersion: 5,
-      host: 'broker.example.com/mqtt', clientId: 'plc-1',
+      handle: 3,
+      state: 2,
+      journalCount: 7,
+      port: 8883,
+      transport: 4,
+      tls: 1,
+      mqttVersion: 5,
+      host: 'broker.example.com/mqtt',
+      clientId: 'plc-1',
     });
   });
 
@@ -303,29 +341,45 @@ describe('PlcCtl mqtt ops', () => {
     //   str topic, u32 plen, bytes payload}*}
     const p = new Uint8Array(512);
     const d = new DataView(p.buffer);
-    d.setInt32(0, 12, true);           // total retained
-    d.setUint32(4, 2, true);           // n returned
+    d.setInt32(0, 12, true); // total retained
+    d.setUint32(4, 2, true); // n returned
     let o = 8;
     const topic = new TextEncoder().encode('tether/boiler/temp');
     const payload = new TextEncoder().encode('72.5');
-    d.setBigUint64(o, 1_700_000_000_000n, true); o += 8;
-    d.setUint32(o, 1, true); o += 4;   // qos
-    d.setUint32(o, 0, true); o += 4;   // retain
-    d.setUint32(o, 42, true); o += 4;  // msgid
-    d.setUint16(o, topic.length, true); o += 2;
-    p.set(topic, o); o += topic.length;
-    d.setUint32(o, payload.length, true); o += 4;
-    p.set(payload, o); o += payload.length;
+    d.setBigUint64(o, 1_700_000_000_000n, true);
+    o += 8;
+    d.setUint32(o, 1, true);
+    o += 4; // qos
+    d.setUint32(o, 0, true);
+    o += 4; // retain
+    d.setUint32(o, 42, true);
+    o += 4; // msgid
+    d.setUint16(o, topic.length, true);
+    o += 2;
+    p.set(topic, o);
+    o += topic.length;
+    d.setUint32(o, payload.length, true);
+    o += 4;
+    p.set(payload, o);
+    o += payload.length;
     // second entry, binary payload
     const topic2 = new TextEncoder().encode('x/y');
-    d.setBigUint64(o, 1_700_000_001_000n, true); o += 8;
-    d.setUint32(o, 0, true); o += 4;
-    d.setUint32(o, 1, true); o += 4;
-    d.setUint32(o, 7, true); o += 4;
-    d.setUint16(o, topic2.length, true); o += 2;
-    p.set(topic2, o); o += topic2.length;
-    d.setUint32(o, 3, true); o += 4;
-    p.set([0xde, 0xad, 0xbe], o); o += 3;
+    d.setBigUint64(o, 1_700_000_001_000n, true);
+    o += 8;
+    d.setUint32(o, 0, true);
+    o += 4;
+    d.setUint32(o, 1, true);
+    o += 4;
+    d.setUint32(o, 7, true);
+    o += 4;
+    d.setUint16(o, topic2.length, true);
+    o += 2;
+    p.set(topic2, o);
+    o += topic2.length;
+    d.setUint32(o, 3, true);
+    o += 4;
+    p.set([0xde, 0xad, 0xbe], o);
+    o += 3;
     mock(p.subarray(0, o));
     const r = await new PlcCtl().mqttJournal(3, 5, 2);
     expect(r.total).toBe(12);

@@ -13,12 +13,13 @@ import { defineConfig } from '@playwright/test';
  *
  * The PLC IDE specs additionally need the TetherPLC toolchain:
  *
- *   cmake --build build -j8 && cargo build                   (in TetherPLC)
+ *   cmake --build build -j8 && cargo build -p tplc -p tplcc  (in TetherPLC)
  *
- * which provides `tplc-ctl-proxy` (HTTP compile/catalog service) and
- * `tplcc` (compiler). Paths resolve relative to this repo's parent
- * (`../Tether`, `../TetherPLC`) and can be overridden with env vars:
- *   WEB_DASHBOARD_EXAMPLE, TPLC_PROXY, TPLCC, TPLC_LIBDIRS (colon-separated)
+ * which provides `tplc serve` (the /ws backend: ctl frames + compile/
+ * catalog meta-ops) and `tplcc` (compiler). Paths resolve relative to
+ * this repo's parent (`../Tether`, `../TetherPLC`) and can be overridden
+ * with env vars: WEB_DASHBOARD_EXAMPLE, TPLC, TPLCC, TPLC_LIBDIRS
+ * (colon-separated)
  *
  * Playwright's bundled Chromium is used (install with
  * `npx playwright install chromium`); set PW_CHANNEL=chrome to use a
@@ -29,13 +30,13 @@ const abs = (p: string) => (isAbsolute(p) ? p : resolve(repoRoot, p));
 const webDashboard = abs(
   process.env.WEB_DASHBOARD_EXAMPLE ?? '../Tether/build/bin/web_dashboard_example',
 );
-const proxy = abs(process.env.TPLC_PROXY ?? '../TetherPLC/build/tplc-ctl-proxy');
+const tplc = abs(process.env.TPLC ?? '../TetherPLC/compiler/target/debug/tplc');
 const tplcc = abs(process.env.TPLCC ?? '../TetherPLC/compiler/target/debug/tplcc');
 const tplcRoot = abs(process.env.TPLC_ROOT ?? '../TetherPLC');
 const tetherPlc = abs(process.env.TPLC_HOST ?? `${tplcRoot}/build/tether-plc`);
 const tplcImage = abs(process.env.TPLC_IMAGE ?? `${tplcRoot}/build/tplc-image`);
-/* the proxy cd's into a temp dir before invoking tplcc — every path it
-   receives must be absolute */
+const tplcIo = abs(process.env.TPLC_IO ?? `${tplcRoot}/build/tplc-io`);
+/* every path tplc/tplcc receives must be absolute */
 const libdirs = (
   process.env.TPLC_LIBDIRS ??
   '../TetherPLC/libraries/tempctrl:../TetherPLC/libraries/homeassistant:' +
@@ -47,9 +48,9 @@ const libdirs = (
   .filter(Boolean)
   .flatMap((d) => ['--libdir', abs(d)]);
 
-const plcE2E = existsSync(webDashboard) && existsSync(proxy) && existsSync(tplcc);
-/* live-runtime stack: real tether-plc + ctl proxy on :8090 (plc-live.spec) */
-const liveE2E = plcE2E && existsSync(tetherPlc) && existsSync(tplcImage);
+const plcE2E = existsSync(webDashboard) && existsSync(tplc) && existsSync(tplcc);
+/* live-runtime stack: real tether-plc + tplc serve on :8090 (plc-live.spec) */
+const liveE2E = plcE2E && existsSync(tetherPlc) && existsSync(tplcImage) && existsSync(tplcIo);
 
 export default defineConfig({
   testDir: './e2e',
@@ -72,10 +73,10 @@ export default defineConfig({
     ...(plcE2E
       ? [
           {
-            command: `${proxy} --port 8089 --tplcc ${tplcc} ${libdirs.join(' ')}`,
-            /* /health is 503 until a tplccd backend attaches; /blocks is
-               200 as soon as the proxy is serving (catalog is lazy). */
-            url: 'http://127.0.0.1:8089/blocks',
+            /* compile/catalog-only backend: no runtime attached, so the
+               ctl socket is a dead path — meta-ops still work. */
+            command: `${tplc} serve --port 8089 --ctl ${tplcRoot}/build/.e2e-no-runtime.ctl --tplcc ${tplcc} --tplccd "" --no-webui ${libdirs.join(' ')}`,
+            url: 'http://127.0.0.1:8089/health',
             timeout: 20_000,
             reuseExistingServer: !process.env.CI,
           },
@@ -84,9 +85,10 @@ export default defineConfig({
     ...(liveE2E
       ? [
           {
-            /* e2e/live-stack.sh: image + tether-plc + proxy --socket ctl.sock.
-               /health is 200 only once the runtime's ctl socket answers. */
-            command: `TPLC_ROOT=${tplcRoot} TPLC_HOST=${tetherPlc} TPLC_IMAGE=${tplcImage} TPLCC=${tplcc} TPLC_PROXY=${proxy} bash ${repoRoot}e2e/live-stack.sh`,
+            /* e2e/live-stack.sh: image + tether-plc + tplc-io + `tplc
+               serve` on :8090 (/ws + /tether-io). /health is always 200
+               once serving; the spec skips if the stack isn't up. */
+            command: `TPLC_ROOT=${tplcRoot} TPLC=${tplc} TPLC_HOST=${tetherPlc} TPLC_IMAGE=${tplcImage} TPLC_IO=${tplcIo} TPLCC=${tplcc} TPLC_LIBDIRS=${process.env.TPLC_LIBDIRS ?? ''} bash ${repoRoot}e2e/live-stack.sh`,
             url: 'http://127.0.0.1:8090/health',
             timeout: 30_000,
             reuseExistingServer: !process.env.CI,

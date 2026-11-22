@@ -1,11 +1,11 @@
 import { expect, type Locator, type Page } from '@playwright/test';
 
 export const WS_URL = 'ws://127.0.0.1:8099/tether-io';
-/** ctl proxy spawned by playwright.config.ts webServer. */
+/** `tplc serve` backend spawned by playwright.config.ts webServer. */
 export const CTL_URL = 'http://127.0.0.1:8089';
 
 /**
- * Fresh PLC project + proxy endpoint, installed before app scripts run.
+ * Fresh PLC project + backend endpoint, installed before app scripts run.
  * Must be called before page.goto().
  */
 export async function freshPlcProject(page: Page, ctl = CTL_URL): Promise<void> {
@@ -110,7 +110,7 @@ export async function dragWire(
   await page.mouse.up();
 }
 
-/** Toolbar "check" — runs tplcc check through the ctl proxy. */
+/** Toolbar "check" — runs tplcc check through the /ws compile meta-op. */
 export async function runCheck(page: Page): Promise<void> {
   await page.locator('.plc-toolbar button', { hasText: 'check' }).click();
 }

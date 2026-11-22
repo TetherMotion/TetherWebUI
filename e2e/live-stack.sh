@@ -3,40 +3,41 @@
 #   tplc-image + tether-plc (real scan loop, pre-deployed LiveDemo pkg)
 #   → tplc-io (tether_io catalog/functions over TCP, dynamic plc.*
 #     field entries from the running program)
-#   → tplc-ctl-proxy :$LIVE_PORT with --socket → ctl.sock (POST /ctl,
-#     GET /events) and --tplc-io → the provider, whose /tether-io
-#     WebSocket endpoint gives browsers the live catalog + values.
-#     /compile still goes through tplcc (popen).
+#   → `tplc serve` :$LIVE_PORT with --ctl → ctl.sock (/ws carries the
+#     binary ctl frames + compile/catalog meta-ops, F_EVENT pushes)
+#     and --tplc-io → the provider, whose /tether-io WebSocket endpoint
+#     gives browsers the live catalog + values.
 #
 # Env: TPLC_ROOT (default ../TetherPLC), LIVE_PORT (default 8090),
-#      TPLC_LIBDIRS (colon-separated, same default as playwright.config).
+#      TPLC (tplc binary), TPLC_LIBDIRS (colon-separated, same default
+#      as playwright.config).
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
-TPLC=${TPLC_ROOT:-$ROOT/../TetherPLC}
+TPLC_ROOT=${TPLC_ROOT:-$ROOT/../TetherPLC}
 PORT=${LIVE_PORT:-8090}
 IMG=/tplc_pw_live_$$
 W=$(mktemp -d /tmp/tplc-live-stack.XXXXXX)
-RT_PID="" PROXY_PID="" IO_PID=""
+RT_PID="" SRV_PID="" IO_PID=""
 
 cleanup() {
-    [ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null || true
+    [ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null || true
     [ -n "$IO_PID" ] && kill "$IO_PID" 2>/dev/null || true
     [ -n "$RT_PID" ] && kill "$RT_PID" 2>/dev/null || true
     [ -n "$RT_PID" ] && wait "$RT_PID" 2>/dev/null || true
-    "$TPLC/build/tplc-image" unlink "$IMG" >/dev/null 2>&1 || true
+    "$TPLC_ROOT/build/tplc-image" unlink "$IMG" >/dev/null 2>&1 || true
     rm -f /tmp/tplc-live-shadow-cand.tplc /tmp/tplc-live-demo.tplc
     rm -rf "$W"
 }
 trap cleanup EXIT INT TERM
 
-TPLCC=${TPLCC:-$TPLC/compiler/target/debug/tplcc}
-PROXY=${TPLC_PROXY:-$TPLC/build/tplc-ctl-proxy}
-IMAGE_CLI=${TPLC_IMAGE:-$TPLC/build/tplc-image}
-PLC=${TPLC_HOST:-$TPLC/build/tether-plc}
-IO=${TPLC_IO:-$TPLC/build/tplc-io}
-for b in "$TPLCC" "$PROXY" "$IMAGE_CLI" "$PLC" "$IO"; do
+TPLC=${TPLC:-$TPLC_ROOT/compiler/target/debug/tplc}
+TPLCC=${TPLCC:-$TPLC_ROOT/compiler/target/debug/tplcc}
+IMAGE_CLI=${TPLC_IMAGE:-$TPLC_ROOT/build/tplc-image}
+PLC=${TPLC_HOST:-$TPLC_ROOT/build/tether-plc}
+IO=${TPLC_IO:-$TPLC_ROOT/build/tplc-io}
+for b in "$TPLC" "$TPLCC" "$IMAGE_CLI" "$PLC" "$IO"; do
     [ -x "$b" ] || { echo "live-stack: missing $b" >&2; exit 1; }
 done
 
@@ -87,7 +88,7 @@ done
 [ -S "$W/ctl.sock" ] || { echo "live-stack: ctl.sock never appeared" >&2; exit 1; }
 
 LIBDIRS=""
-IFS=':' read -ra dirs <<< "${TPLC_LIBDIRS:-$TPLC/libraries/tempctrl:$TPLC/compat/tc2:$TPLC/compat/tc3}"
+IFS=':' read -ra dirs <<< "${TPLC_LIBDIRS:-$TPLC_ROOT/libraries/tempctrl:$TPLC_ROOT/compat/tc2:$TPLC_ROOT/compat/tc3}"
 for d in "${dirs[@]}"; do LIBDIRS="$LIBDIRS --libdir $d"; done
 
 # tplc-io: tether_io provider on a free TCP port. --pkg covers the
@@ -110,13 +111,13 @@ for _ in $(seq 100); do
     sleep 0.1
 done
 
-"$PROXY" --port "$PORT" --socket "$W/ctl.sock" --tplccd "" \
-    --tplcc "$TPLCC" --tplc-io "127.0.0.1:$IO_PORT" $LIBDIRS \
-    >"$W/proxy.log" 2>&1 &
-PROXY_PID=$!
+"$TPLC" serve --port "$PORT" --ctl "$W/ctl.sock" --tplcc "$TPLCC" \
+    --tplccd "" --tplc-io "127.0.0.1:$IO_PORT" $LIBDIRS \
+    >"$W/serve.log" 2>&1 &
+SRV_PID=$!
 for _ in $(seq 100); do
-    curl -sf -m 1 "http://127.0.0.1:$PORT/blocks" >/dev/null 2>&1 && break
+    curl -sf -m 1 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
     sleep 0.1
 done
-echo "live-stack: proxy :$PORT → $W/ctl.sock, /tether-io → tplc-io :$IO_PORT (workdir $W)" >&2
-wait "$PROXY_PID"
+echo "live-stack: tplc serve :$PORT → $W/ctl.sock (/ws), /tether-io → tplc-io :$IO_PORT (workdir $W)" >&2
+wait "$SRV_PID"

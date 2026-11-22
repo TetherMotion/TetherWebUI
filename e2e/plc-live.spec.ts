@@ -18,7 +18,7 @@ import {
 
 /**
  * Live-runtime E2E: e2e/live-stack.sh runs a real tether-plc (pre-deployed
- * LiveDemo package, free-running counter) behind tplc-ctl-proxy on :8090.
+ * LiveDemo package, free-running counter) behind `tplc serve` on :8090.
  * These tests drive the IDE's Deploy pane so every button is a real ctl
  * round-trip: PROG_STATUS, PROG_START/STOP, TASK_SUSPEND/RESUME/STEP,
  * DEPLOY_BEGIN/CHUNK/COMMIT.
@@ -300,7 +300,7 @@ test.describe('TetherPLC IDE — live runtime', () => {
   test('live catalog: plc.* program values stream into the watch pane', async ({
     page,
   }) => {
-    /* the dashboard's data connection goes to the live proxy's
+    /* the dashboard's data connection goes to the live backend's
        /tether-io WebSocket → tplc-io → ctl.sock, so hub.params/signals
        are the runtime's real plc.* catalog, not the simulator's */
     await freshPlcProject(page, LIVE_CTL);

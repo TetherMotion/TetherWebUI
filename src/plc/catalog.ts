@@ -1,7 +1,7 @@
 /**
- * Library block catalog — client for the ctl proxy's `GET /blocks`
- * (a merged `tplcc blocks --json` over every --libdir) and `GET
- * /libsrc` (embedded ST source for auto-attach).
+ * Library block catalog — client for the /ws `blocks` and `libsrc`
+ * meta-ops (a merged `tplcc blocks --json` over every --libdir, plus
+ * embedded ST source for auto-attach).
  *
  * The catalog turns installed libraries (tempctrl, TC2/TC3 compat
  * packs, .tplc packages) into first-class FBD blocks: typed pins for
@@ -10,6 +10,7 @@
  */
 import { IfaceKind, IfaceVar, Pou } from './model';
 import type { PaletteGroup, PaletteItem } from './palette';
+import type { MetaChannel } from './build';
 
 export interface CatalogPin {
   name: string;
@@ -50,12 +51,10 @@ export function libStem(file: string): string {
   return srcBase(file).replace(/\.(st|ST)$/, '');
 }
 
-/** Fetch the merged catalog; [] when the proxy has no --libdir. */
-export async function fetchCatalog(base: string): Promise<CatalogLib[]> {
+/** Fetch the merged catalog; [] when the backend has no --libdir. */
+export async function fetchCatalog(ch: MetaChannel): Promise<CatalogLib[]> {
   try {
-    const r = await fetch(`${base}/blocks`);
-    if (!r.ok) return [];
-    const d = (await r.json()) as { libs?: CatalogLib[] };
+    const d = await ch.meta<{ libs?: CatalogLib[] }>('blocks');
     return Array.isArray(d.libs) ? d.libs : [];
   } catch {
     return [];
@@ -63,11 +62,14 @@ export async function fetchCatalog(base: string): Promise<CatalogLib[]> {
 }
 
 /** Fetch one library source for auto-attach; undefined on failure. */
-export async function fetchLibSrc(base: string, lib: string, file: string): Promise<string | undefined> {
+export async function fetchLibSrc(
+  ch: MetaChannel,
+  lib: string,
+  file: string,
+): Promise<string | undefined> {
   try {
-    const r = await fetch(`${base}/libsrc?lib=${encodeURIComponent(lib)}&file=${encodeURIComponent(file)}`);
-    if (!r.ok) return undefined;
-    return await r.text();
+    const d = await ch.meta<{ text?: string }>('libsrc', { lib, file });
+    return typeof d.text === 'string' ? d.text : undefined;
   } catch {
     return undefined;
   }
@@ -154,11 +156,13 @@ export function catalogGroups(libs: CatalogLib[]): PaletteGroup[] {
 }
 
 /** Look up which library/file a block name came from (for auto-attach). */
-export function blockSource(libs: CatalogLib[], name: string): { lib: string; file: string } | undefined {
+export function blockSource(
+  libs: CatalogLib[],
+  name: string,
+): { lib: string; file: string } | undefined {
   const up = name.toUpperCase();
   for (const l of libs)
     for (const b of l.catalog.blocks)
-      if (b.name.toUpperCase() === up && b.file)
-        return { lib: l.name, file: srcBase(b.file) };
+      if (b.name.toUpperCase() === up && b.file) return { lib: l.name, file: srcBase(b.file) };
   return undefined;
 }

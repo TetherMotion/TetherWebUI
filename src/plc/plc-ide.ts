@@ -5,8 +5,9 @@
  * Sub-views: explorer tree, ST source editor (CodeMirror 6 with
  * completion, lint, signature help, go-to-def/usages/rename), FBD and
  * LD network inspectors, task table, watch (live plc.* catalog values),
- * deploy/debug via the tplc-ctl-proxy (compile, deploy, shadow runs,
- * breakpoints, forces, retain, traces, alarms, historians).
+ * deploy/debug via `tplc serve`'s /ws backend (compile/catalog meta-ops,
+ * binary ctl frames for deploy, shadow runs, breakpoints, forces,
+ * retain, traces, alarms, historians).
  */
 import { html, LitElement, nothing, TemplateResult } from 'lit';
 import { DataHub } from '../data/hub';
@@ -15,7 +16,33 @@ import './ld-canvas';
 import './st-editor';
 import './tempcurve';
 import './temp-tune';
-import { CtlError, DBG_CMP, DbgBreak, DbgForce, DbgState, DbgStateDiff, DbgSym, DbgTraceFrame, DbgTraceStatus, DbgWatchEntry, EV, EvlogInfo, EvlogRecord, EvlogStats, HistChannel, MqttConn, MqttJournalEntry, OdEntry, OdValue, PlcCtl, ProgStatus, RetainStatus, RtStatus, ShadowDiff, ShadowStatus } from './ctl';
+import {
+  CtlError,
+  DBG_CMP,
+  DbgBreak,
+  DbgForce,
+  DbgState,
+  DbgStateDiff,
+  DbgSym,
+  DbgTraceFrame,
+  DbgTraceStatus,
+  DbgWatchEntry,
+  EV,
+  EvlogInfo,
+  EvlogRecord,
+  EvlogStats,
+  HistChannel,
+  MqttConn,
+  MqttJournalEntry,
+  OdEntry,
+  OdValue,
+  PlcCtl,
+  ProgStatus,
+  RetainStatus,
+  RtStatus,
+  ShadowDiff,
+  ShadowStatus,
+} from './ctl';
 import { byteToOffset, compileProject, CompileDiag, diagsForFile, injectDeployMap } from './build';
 import {
   atCollisions,
@@ -42,13 +69,32 @@ import type { DefTarget, StWorld, Usage } from './stnav';
 import { ALARM_OPS, buildAlarmPou, defaultRule, ruleStem, type AlarmRule } from './alarms';
 import { FbdProject, IfaceKind, IfaceVar, Pou, Task } from './model';
 import { entryWritable, writeScalar } from './mon';
-import { codecFromSchema, codecsForSize, defaultCodec, hex, odDecode, odEncode, odTypeName, parseHex, type ScalarCodec } from './typedval';
+import {
+  codecFromSchema,
+  codecsForSize,
+  defaultCodec,
+  hex,
+  odDecode,
+  odEncode,
+  odTypeName,
+  parseHex,
+  type ScalarCodec,
+} from './typedval';
 import { exportPlcopenXml, importPlcopenXml } from './plcopen';
 import type { CatalogEntry } from '../protocol';
-import { exportFbdJson, importFbdJson, loadProject, PlcProject, saveProject } from './store';
+import { exportFbdJson, importFbdJson, loadProject, loadRemoteProject, PlcProject, remoteProjectInfo, saveProject, saveProjectRemote } from './store';
+import * as pa from './projectapi';
 import { deleteSnapshot, diffSummary, getSnapshot, historyIndex, pushSnapshot } from './history';
 import { parseStInterfaces } from './stiface';
-import { blockSource, catalogGroups, catalogPous, fetchCatalog, fetchLibSrc, libStem, type CatalogLib } from './catalog';
+import {
+  blockSource,
+  catalogGroups,
+  catalogPous,
+  fetchCatalog,
+  fetchLibSrc,
+  libStem,
+  type CatalogLib,
+} from './catalog';
 import {
   CurveProfile,
   defaultProfile,
@@ -66,7 +112,8 @@ import {
   type ProjectTemplate,
 } from './templates';
 
-type Pane = 'explorer' | 'st' | 'fbd' | 'curves' | 'tasks' | 'watch' | 'alarms' | 'events' | 'deploy';
+type Pane =
+  | 'explorer' | 'st' | 'fbd' | 'curves' | 'tasks' | 'watch' | 'alarms' | 'events' | 'deploy' | 'project';
 
 /** migrate rule kinds shared with the runtime's MIGD encoding */
 const DBG_DIFF_KIND = ['copy', 'xform', 'init', 'drop', 'deny', 'alias'];
@@ -91,6 +138,7 @@ const PANES: { id: Pane; label: string }[] = [
   { id: 'alarms', label: 'Alarms' },
   { id: 'events', label: 'Events' },
   { id: 'deploy', label: 'Deploy' },
+  { id: 'project', label: 'Project' },
 ];
 
 /** codec for a resolved symbol — prefer the user-picked label when it
@@ -115,12 +163,16 @@ function safeDecode(c: ScalarCodec, b: Uint8Array): string {
 /** inline SVG sparkline for a numeric history sample. */
 function sparkline(samples: number[], w = 90, h = 22): TemplateResult {
   if (samples.length < 2) return html`<span class="plc-dim">·</span>`;
-  let lo = Infinity, hi = -Infinity;
+  let lo = Infinity,
+    hi = -Infinity;
   for (const v of samples) {
     if (v < lo) lo = v;
     if (v > hi) hi = v;
   }
-  if (lo === hi) { lo -= 1; hi += 1; }
+  if (lo === hi) {
+    lo -= 1;
+    hi += 1;
+  }
   const pts = samples
     .map((v, i) => {
       const x = (i / (samples.length - 1)) * (w - 2) + 1;
@@ -135,7 +187,10 @@ function sparkline(samples: number[], w = 90, h = 22): TemplateResult {
 
 /** safe arithmetic evaluator for watch expressions: numbers, plc.*
     identifiers, + - * / % ( ) and unary minus. No eval(). */
-function evalWatchExpr(expr: string, lookup: (name: string) => number | undefined): number | undefined {
+function evalWatchExpr(
+  expr: string,
+  lookup: (name: string) => number | undefined,
+): number | undefined {
   const tokens = expr.match(/(?:plc\.[A-Za-z0-9_.]+|[A-Za-z_][A-Za-z0-9_.]*|\d+\.?\d*|[-+*/%()])/g);
   if (!tokens || tokens.join('').replace(/\s+/g, '') !== expr.replace(/\s+/g, '')) return undefined;
   let pos = 0;
@@ -166,10 +221,25 @@ function evalWatchExpr(expr: string, lookup: (name: string) => number | undefine
   function parseFactor(): number | undefined {
     const t = peek();
     if (t === undefined) return undefined;
-    if (t === '-') { eat(); const v = parseFactor(); return v === undefined ? undefined : -v; }
-    if (t === '+') { eat(); return parseFactor(); }
-    if (t === '(') { eat(); const v = parseExpr(); if (eat() !== ')') return undefined; return v; }
-    if (/^\d/.test(t)) { eat(); return parseFloat(t); }
+    if (t === '-') {
+      eat();
+      const v = parseFactor();
+      return v === undefined ? undefined : -v;
+    }
+    if (t === '+') {
+      eat();
+      return parseFactor();
+    }
+    if (t === '(') {
+      eat();
+      const v = parseExpr();
+      if (eat() !== ')') return undefined;
+      return v;
+    }
+    if (/^\d/.test(t)) {
+      eat();
+      return parseFloat(t);
+    }
     if (/^[A-Za-z_]/.test(t)) {
       eat();
       /* strip a leading "plc." the lexer may have split oddly — names
@@ -349,7 +419,7 @@ export class TetherPlcIde extends LitElement {
     trace: { state: true },
     traceLines: { state: true },
     tplPicker: { state: true },
-  historyOpen: { state: true },
+    historyOpen: { state: true },
   };
 
   declare pane: Pane;
@@ -367,7 +437,7 @@ export class TetherPlcIde extends LitElement {
   declare diags?: CompileDiag[];
   /** memoized synthetic POU decls from attached library sources. */
   private libCache?: { key: string; pous: Pou[] };
-  /** installed-library block catalog (proxy /blocks), fetched once. */
+  /** installed-library block catalog (/ws blocks meta-op), fetched once. */
   declare catalogLibs?: CatalogLib[];
   /** memoized palette groups for catalogLibs. */
   private catGroups: ReturnType<typeof catalogGroups> = [];
@@ -399,7 +469,8 @@ export class TetherPlcIde extends LitElement {
   declare mapViolations?: MapViolation[];
   /** graphical channel/binding editor state (parsed from mapEdit draft) */
   declare mapRows?: {
-    inSize?: number; outSize?: number;
+    inSize?: number;
+    outSize?: number;
     channels: DeployMapChannel[];
     bindings: DeployMapBinding[];
   };
@@ -413,10 +484,10 @@ export class TetherPlcIde extends LitElement {
   private dbgSymShadow = false;
   private dbgWriteHex = '';
   private dbgMaskHex = '';
-  private dbgCodec = '';           // ScalarCodec.label for the resolved sym
-  private dbgTypedVal = '';        // typed text input alongside hex
-  private dbgTypedDirty = false;   // user edited typed field → it wins over hex
-  private dbgRawVal = '';          // decoded typed display of last read
+  private dbgCodec = ''; // ScalarCodec.label for the resolved sym
+  private dbgTypedVal = ''; // typed text input alongside hex
+  private dbgTypedDirty = false; // user edited typed field → it wins over hex
+  private dbgRawVal = ''; // decoded typed display of last read
   private brkTask = '0';
   private brkCmp = '4';
   private brkVal = '';
@@ -436,8 +507,7 @@ export class TetherPlcIde extends LitElement {
   private histChans?: HistChannel[];
   /* events pane: MQTT broker connections + receive journals */
   private mqttConns?: MqttConn[];
-  private mqttJournals = new Map<number,
-    { total: number; entries: MqttJournalEntry[] }>();
+  private mqttJournals = new Map<number, { total: number; entries: MqttJournalEntry[] }>();
   private mqttTimer?: number;
   private histNamesInput = '';
   private trendCh = 0;
@@ -447,10 +517,26 @@ export class TetherPlcIde extends LitElement {
   private trendTimer?: number;
   private stateDiff: DbgStateDiff | undefined;
   private odWriteHex: Record<string, string> = {};
-  private evSrc?: EventSource;
+  private evOff?: () => void;
   private evTimer?: number;
 
   private project: PlcProject = loadProject();
+  /* backend project persistence: remote doc wins once per session
+     (unless the user already edited locally); localStorage is the
+     offline fallback. */
+  private remoteLoaded = false;
+  private localDirty = false;
+  /* project pane state */
+  private projInfo?: pa.ProjectInfo;
+  private projFiles: pa.ProjectFile[] = [];
+  private projRecent: string[] = [];
+  private projOpenPath = '';
+  private gitEntries: pa.GitStatusEntry[] = [];
+  private gitCommits: pa.GitCommit[] = [];
+  private gitBranch = '';
+  private gitMsg = '';
+  private gitDiffText?: string | null;
+  private projBusy = false;
   private unsubs: (() => void)[] = [];
   private bindingRelease?: () => void;
 
@@ -475,10 +561,7 @@ export class TetherPlcIde extends LitElement {
     void this.loadCatalog();
     /* first-run guidance: offer project templates on a fresh empty
        project until the user picks one, starts blank, or opts out */
-    if (
-      this.project.fbd.pous.length === 0 &&
-      tplPickerWanted(sessionStorage, localStorage)
-    ) {
+    if (this.project.fbd.pous.length === 0 && tplPickerWanted(sessionStorage, localStorage)) {
       this.tplPicker = true;
     }
   }
@@ -503,12 +586,17 @@ export class TetherPlcIde extends LitElement {
   private historyDialog(): unknown {
     const items = historyIndex();
     return html`
-      <div class="plc-tpl-overlay" @click=${(e: Event) => {
+      <div
+        class="plc-tpl-overlay"
+        @click=${(e: Event) => {
         if (e.target === e.currentTarget) this.historyOpen = false;
-      }}>
+      }}
+      >
         <div class="plc-tpl-dialog" style="max-width:34rem">
           <div class="plc-tpl-title">Project history</div>
-          <div class="plc-tpl-sub">${items.length} snapshots · auto-saved on edits (30s throttle)</div>
+          <div class="plc-tpl-sub">
+            ${items.length} snapshots · auto-saved on edits (30s throttle)
+          </div>
           <div class="plc-tpl-grid" style="grid-template-columns:1fr;max-height:50vh;overflow:auto">
             ${items.map(
               (h) => html`
@@ -516,8 +604,18 @@ export class TetherPlcIde extends LitElement {
                   <span class="plc-tpl-name">${new Date(h.ts).toLocaleString()}</span>
                   <span class="plc-tpl-desc">${h.label} · id ${h.id}</span>
                   <span style="display:flex;gap:.4rem;margin-top:.3rem">
-                    <button class="chip-btn" @click=${() => this.restoreSnapshot(h.id)}>restore</button>
-                    <button class="chip-btn" @click=${() => { deleteSnapshot(h.id); this.requestUpdate(); }}>delete</button>
+                    <button class="chip-btn" @click=${() => this.restoreSnapshot(h.id)}>
+                      restore
+                    </button>
+                    <button
+                      class="chip-btn"
+                      @click=${() => {
+                      deleteSnapshot(h.id);
+                      this.requestUpdate();
+                    }}
+                    >
+                      delete
+                    </button>
                   </span>
                 </div>
               `,
@@ -525,11 +623,23 @@ export class TetherPlcIde extends LitElement {
             ${items.length ? nothing : html`<p class="plc-dim">no snapshots yet — edits auto-snapshot after the first save.</p>`}
           </div>
           <div class="plc-tpl-foot">
-            <button class="chip-btn" @click=${() => {
+            <button
+              class="chip-btn"
+              @click=${() => {
               pushSnapshot(this.project, 'manual', false);
               this.requestUpdate();
-            }}>snapshot now</button>
-            <button class="chip-btn" @click=${() => { this.historyOpen = false; }}>close</button>
+            }}
+            >
+              snapshot now
+            </button>
+            <button
+              class="chip-btn"
+              @click=${() => {
+              this.historyOpen = false;
+            }}
+            >
+              close
+            </button>
           </div>
         </div>
       </div>
@@ -550,9 +660,12 @@ export class TetherPlcIde extends LitElement {
   /** Template-picker dialog — cards + blank/never-show row. */
   private templatePicker(): unknown {
     return html`
-      <div class="plc-tpl-overlay" @click=${(e: Event) => {
+      <div
+        class="plc-tpl-overlay"
+        @click=${(e: Event) => {
         if (e.target === e.currentTarget) this.dismissTplPicker(false);
-      }}>
+      }}
+      >
         <div class="plc-tpl-dialog">
           <div class="plc-tpl-title">Start a project</div>
           <div class="plc-tpl-sub">Pick a template or start blank.</div>
@@ -579,9 +692,9 @@ export class TetherPlcIde extends LitElement {
     `;
   }
 
-  /** Fetch the proxy's library block catalog once (no-op without proxy/libs). */
+  /** Fetch the library block catalog once (no-op without backend/libs). */
   private async loadCatalog(): Promise<void> {
-    const libs = await fetchCatalog(this.ctl.url);
+    const libs = await fetchCatalog(this.ctl);
     if (libs.length && JSON.stringify(libs) !== JSON.stringify(this.catalogLibs ?? [])) {
       this.catalogLibs = libs;
       this.catGroups = catalogGroups(libs);
@@ -613,7 +726,7 @@ export class TetherPlcIde extends LitElement {
         (k) => k.toUpperCase() === stem.toUpperCase(),
       );
       if (have) continue;
-      const text = await fetchLibSrc(this.ctl.url, src.lib, src.file);
+      const text = await fetchLibSrc(this.ctl, src.lib, src.file);
       if (text) {
         this.project.stSources[stem] = text;
         changed = true;
@@ -633,9 +746,9 @@ export class TetherPlcIde extends LitElement {
       (k) => k.toUpperCase() === stem.toUpperCase(),
     );
     if (have) return;
-    void fetchLibSrc(this.ctl.url, lib, file).then((src) => {
+    void fetchLibSrc(this.ctl, lib, file).then((src) => {
       if (!src) {
-        this.flash(`library source ${file} not available from proxy`);
+        this.flash(`library source ${file} not available from backend`);
         return;
       }
       this.project.stSources[stem] = src;
@@ -650,8 +763,8 @@ export class TetherPlcIde extends LitElement {
     this.unsubs = [];
     this.bindingRelease?.();
     this.bindingRelease = undefined;
-    this.evSrc?.close();
-    this.evSrc = undefined;
+    this.evOff?.();
+    this.evOff = undefined;
     if (this.evTimer !== undefined) clearTimeout(this.evTimer);
     if (this.trendTimer !== undefined) {
       clearInterval(this.trendTimer);
@@ -680,10 +793,12 @@ export class TetherPlcIde extends LitElement {
         this.requestUpdate();
       }),
     );
-    this.unsubs.push(this.hub.on('values', () => {
-      this.sampleExprs();
-      this.requestUpdate();
-    }));
+    this.unsubs.push(
+      this.hub.on('values', () => {
+        this.sampleExprs();
+        this.requestUpdate();
+      }),
+    );
     this.rebind();
   }
 
@@ -702,6 +817,10 @@ export class TetherPlcIde extends LitElement {
   private save(): void {
     pushSnapshot(this.project, `auto ${new Date().toLocaleTimeString()}`, true);
     saveProject(this.project);
+    this.localDirty = true;
+    /* persist into the backend project manifest (best-effort,
+       fire-and-forget — no project open / backend down = no-op) */
+    void saveProjectRemote(this.ctl, this.project).catch(() => {});
     this.requestUpdate();
   }
 
@@ -805,22 +924,17 @@ export class TetherPlcIde extends LitElement {
 
   private onStNav(e: CustomEvent<StNavEvent>): void {
     const d = e.detail;
-    const pou =
-      this.project.fbd.pous.find((p) => p.id === this.selPou) ??
-      this.project.fbd.pous[0];
+    const pou = this.project.fbd.pous.find((p) => p.id === this.selPou) ?? this.project.fbd.pous[0];
     if (!pou) return;
     if (d.action === 'goto' && d.target) void this.stGoto(d.target, pou);
-    else if (d.action === 'usages')
-      this.usagesPanel = { name: d.name ?? '', list: d.usages ?? [] };
+    else if (d.action === 'usages') this.usagesPanel = { name: d.name ?? '', list: d.usages ?? [] };
     else if (d.action === 'rename' && d.name !== undefined && d.from !== undefined)
       this.stRename(d.name, pou, d.from);
   }
 
   /** open `pouName`'s ST source (fbd POU or attached lib file) at `off`. */
   private async openStSource(pouName: string, off?: number): Promise<boolean> {
-    const pou = this.project.fbd.pous.find(
-      (p) => p.name.toUpperCase() === pouName.toUpperCase(),
-    );
+    const pou = this.project.fbd.pous.find((p) => p.name.toUpperCase() === pouName.toUpperCase());
     if (pou) {
       this.selPou = pou.id;
       this.selLib = undefined;
@@ -896,9 +1010,7 @@ export class TetherPlcIde extends LitElement {
         const fsrc = this.project.stSources[key]!;
         const decl = stVarSections(fsrc)
           .flatMap((s) => s.decls)
-          .find((d) =>
-            d.names.some((n) => n.toUpperCase() === t.member.toUpperCase()),
-          );
+          .find((d) => d.names.some((n) => n.toUpperCase() === t.member.toUpperCase()));
         await this.openStSource(key, decl?.offset);
         return;
       }
@@ -940,29 +1052,29 @@ export class TetherPlcIde extends LitElement {
     }
 
     /* var or member: declaring POU = target pou (or current for locals) */
-    const pouName = t?.kind === 'member' ? this.memberPouName(pou, t.instance, t.member) : (t?.kind === 'var' ? t.pou : pou.name);
+    const pouName =
+      t?.kind === 'member'
+        ? this.memberPouName(pou, t.instance, t.member)
+        : t?.kind === 'var'
+          ? t.pou
+          : pou.name;
     if (!pouName) {
       this.status = 'rename: could not resolve declaring POU';
       return;
     }
     const sym = t?.kind === 'member' ? t.member : name;
     /* source key: fbd pou name, or the lib file declaring it */
-    const key =
-      this.project.stSources[pouName]
-        ? pouName
-        : Object.keys(this.project.stSources).find(
-            (k) =>
-              k.toUpperCase() === pouName.toUpperCase() ||
-              declaredPousIn(this.project.stSources[k]!).some(
-                (d) => d.name.toUpperCase() === pouName.toUpperCase(),
-              ),
-          );
+    const key = this.project.stSources[pouName]
+      ? pouName
+      : Object.keys(this.project.stSources).find(
+          (k) =>
+            k.toUpperCase() === pouName.toUpperCase() ||
+            declaredPousIn(this.project.stSources[k]!).some(
+              (d) => d.name.toUpperCase() === pouName.toUpperCase(),
+            ),
+        );
     if (key) {
-      this.project.stSources[key] = renameInSource(
-        this.project.stSources[key]!,
-        sym,
-        nw,
-      );
+      this.project.stSources[key] = renameInSource(this.project.stSources[key]!, sym, nw);
     }
     /* member accesses in every other source */
     for (const [k, v] of Object.entries(this.project.stSources)) {
@@ -970,16 +1082,12 @@ export class TetherPlcIde extends LitElement {
       this.project.stSources[k] = renameMemberAccesses(v, pouName, sym, nw);
     }
     /* fbd.v1 interface + variable blocks of the declaring POU */
-    const dp = this.project.fbd.pous.find(
-      (p) => p.name.toUpperCase() === pouName.toUpperCase(),
-    );
+    const dp = this.project.fbd.pous.find((p) => p.name.toUpperCase() === pouName.toUpperCase());
     if (dp) {
-      for (const v of dp.interface)
-        if (v.name.toUpperCase() === sym.toUpperCase()) v.name = nw;
+      for (const v of dp.interface) if (v.name.toUpperCase() === sym.toUpperCase()) v.name = nw;
       for (const net of dp.networks)
         for (const b of net.blocks)
-          if (b.kind === 'variable' && b.name?.toUpperCase() === sym.toUpperCase())
-            b.name = nw;
+          if (b.kind === 'variable' && b.name?.toUpperCase() === sym.toUpperCase()) b.name = nw;
     }
     this.save();
     this.status = `renamed ${sym} → ${nw} in ${pouName}`;
@@ -1050,9 +1158,11 @@ export class TetherPlcIde extends LitElement {
     /* accept BOOL spellings as well as numbers */
     const lower = text.toLowerCase();
     const v =
-      lower === 'true' || lower === 'on' ? 1
-      : lower === 'false' || lower === 'off' ? 0
-      : Number(text);
+      lower === 'true' || lower === 'on'
+        ? 1
+        : lower === 'false' || lower === 'off'
+          ? 0
+          : Number(text);
     if (!Number.isFinite(v)) {
       this.flash(`${entry.name}: not a number`);
       return;
@@ -1077,9 +1187,23 @@ export class TetherPlcIde extends LitElement {
           <span class="plc-proj">${fbd.project}</span>
           <span class="spacer"></span>
           <button class="chip-btn" @click=${this.onImport}>Import…</button>
-          <button class="chip-btn" @click=${() => { this.tplPicker = true; }}>Templates…</button>
+          <button
+            class="chip-btn"
+            @click=${() => {
+            this.tplPicker = true;
+          }}
+          >
+            Templates…
+          </button>
           <button class="chip-btn" @click=${this.onExport}>Export .fbd.json</button>
-          <button class="chip-btn" @click=${() => { this.historyOpen = true; }}>History</button>
+          <button
+            class="chip-btn"
+            @click=${() => {
+            this.historyOpen = true;
+          }}
+          >
+            History
+          </button>
           <button class="chip-btn" @click=${this.onExportXml}>Export .xml</button>
           <button class="chip-btn" ?disabled=${this.compiling} @click=${() => void this.onCheck()}>
             ${this.compiling ? 'checking…' : 'check'}
@@ -1094,8 +1218,7 @@ export class TetherPlcIde extends LitElement {
                 @click=${() => {
                   this.flushStEditors();
                   this.pane = p.id;
-                  if (p.id === 'deploy' || p.id === 'events')
-                    void this.refreshCtl();
+                  if (p.id === 'deploy' || p.id === 'events') void this.refreshCtl();
                 }}
               >
                 ${p.label}
@@ -1104,8 +1227,7 @@ export class TetherPlcIde extends LitElement {
           )}
         </div>
         <div class="plc-main">${this.paneBody()}</div>
-        ${this.diagsStrip()}
-        ${this.tplPicker ? this.templatePicker() : nothing}
+        ${this.diagsStrip()} ${this.tplPicker ? this.templatePicker() : nothing}
         ${this.historyOpen ? this.historyDialog() : nothing}
       </div>
     `;
@@ -1183,14 +1305,14 @@ export class TetherPlcIde extends LitElement {
     );
   }
 
-  /** run `tplcc check` through the ctl proxy; results land in the diags strip. */
+  /** run `tplcc check` through the /ws compile meta-op; results land in the diags strip. */
   private async onCheck(): Promise<void> {
     if (this.compiling) return;
     this.compiling = true;
     this.flushStEditors();
     try {
       await this.ensureLibSources();
-      const r = await compileProject(this.ctl.url, this.project);
+      const r = await compileProject(this.ctl, this.project);
       this.diags = r.diags;
       this.flash(r.ok ? 'check ok' : `${r.errors} error(s)`);
     } catch (e) {
@@ -1222,6 +1344,8 @@ export class TetherPlcIde extends LitElement {
         return this.eventsPane();
       case 'deploy':
         return this.deployPane();
+      case 'project':
+        return this.projectPane();
     }
   }
 
@@ -1302,16 +1426,24 @@ export class TetherPlcIde extends LitElement {
             if (!libs.length) return nothing;
             return html`<div class="plc-tree-head"><span>Libraries</span></div>
               ${libs.map(
-                (n) => html`<div class="plc-tree-net plc-tree-lib" @click=${() => {
-                  this.selLib = n;
-                  this.selPou = '';
-                  this.pane = 'st';
-                }}>
-                  ${n} <span class="plc-dim">${this.project.stSources[n]!.length} B</span>
-                  <button class="chip-btn" title="detach source" @click=${() => this.detachSource(n)}>
-                    ✕
-                  </button>
-                </div>`,
+                (n) =>
+                  html`<div
+                    class="plc-tree-net plc-tree-lib"
+                    @click=${() => {
+                      this.selLib = n;
+                      this.selPou = '';
+                      this.pane = 'st';
+                    }}
+                  >
+                    ${n} <span class="plc-dim">${this.project.stSources[n]!.length} B</span>
+                    <button
+                      class="chip-btn"
+                      title="detach source"
+                      @click=${() => this.detachSource(n)}
+                    >
+                      ✕
+                    </button>
+                  </div>`,
               )}`;
           })()}
         </div>
@@ -1473,36 +1605,61 @@ export class TetherPlcIde extends LitElement {
       </h4>
       <table class="plc-table">
         <thead>
-          <tr><th>name</th><th>type</th><th>init</th><th>at</th><th>retain</th><th></th></tr>
+          <tr>
+            <th>name</th>
+            <th>type</th>
+            <th>init</th>
+            <th>at</th>
+            <th>retain</th>
+            <th></th>
+          </tr>
         </thead>
         <tbody>
           ${gvars.map(
             (v, vi) => html`
               <tr>
                 <td>
-                  <input class="fbd-in" .value=${v.name}
+                  <input
+                    class="fbd-in"
+                    .value=${v.name}
                     @change=${(e: Event) =>
-                      this.editGlobalVar(vi, { name: (e.target as HTMLInputElement).value })} />
+                      this.editGlobalVar(vi, { name: (e.target as HTMLInputElement).value })}
+                  />
                 </td>
                 <td>
-                  <input class="fbd-in" .value=${v.type}
+                  <input
+                    class="fbd-in"
+                    .value=${v.type}
                     @change=${(e: Event) =>
-                      this.editGlobalVar(vi, { type: (e.target as HTMLInputElement).value })} />
+                      this.editGlobalVar(vi, { type: (e.target as HTMLInputElement).value })}
+                  />
                 </td>
                 <td>
-                  <input class="fbd-in" .value=${v.init ?? ''}
+                  <input
+                    class="fbd-in"
+                    .value=${v.init ?? ''}
                     @change=${(e: Event) =>
-                      this.editGlobalVar(vi, { init: (e.target as HTMLInputElement).value })} />
+                      this.editGlobalVar(vi, { init: (e.target as HTMLInputElement).value })}
+                  />
                 </td>
                 <td>
-                  <input class="fbd-in" .value=${v.at ?? ''} placeholder="%MW0 / %QX0.0"
+                  <input
+                    class="fbd-in"
+                    .value=${v.at ?? ''}
+                    placeholder="%MW0 / %QX0.0"
                     @change=${(e: Event) =>
-                      this.editGlobalVar(vi, { at: (e.target as HTMLInputElement).value })} />
+                      this.editGlobalVar(vi, { at: (e.target as HTMLInputElement).value })}
+                  />
                 </td>
                 <td>
-                  <input type="checkbox" .checked=${v.retain === true}
+                  <input
+                    type="checkbox"
+                    .checked=${v.retain === true}
                     @change=${(e: Event) =>
-                      this.editGlobalVar(vi, { retain: (e.target as HTMLInputElement).checked || undefined })} />
+                      this.editGlobalVar(vi, {
+                        retain: (e.target as HTMLInputElement).checked || undefined,
+                      })}
+                  />
                 </td>
                 <td>
                   <button class="chip-btn" @click=${() => this.delGlobalVar(vi)}>✕</button>
@@ -1510,7 +1667,13 @@ export class TetherPlcIde extends LitElement {
               </tr>
             `,
           )}
-          ${gvars.length ? nothing : html`<tr><td colspan="6" class="plc-dim">No globals — add shared variables here.</td></tr>`}
+          ${
+            gvars.length
+              ? nothing
+              : html`<tr>
+                  <td colspan="6" class="plc-dim">No globals — add shared variables here.</td>
+                </tr>`
+          }
         </tbody>
       </table>
     `;
@@ -1576,20 +1739,25 @@ export class TetherPlcIde extends LitElement {
                     @change=${(e: CustomEvent<string>) => this.onStEdit(pou, e.detail)}
                     @st-nav=${(e: CustomEvent<StNavEvent>) => this.onStNav(e)}
                   ></st-editor>
-                  ${this.usagesPanel
-                    ? html`<div class="plc-usages">
-                        <div class="plc-usages-head">
-                          <b>${this.usagesPanel.list.length}</b> use(s) of
-                          <b>${this.usagesPanel.name}</b>
-                          <button class="chip-btn" @click=${() => (this.usagesPanel = undefined)}>✕</button>
-                        </div>
-                        ${this.usagesPanel.list.map(
-                          (u) => html`<div class="plc-usage" @click=${() => this.onUsageClick(u)}>
-                            ${u.where.replace(/^st:/, '')}:${u.line}:${u.col}
-                          </div>`,
+                  ${
+                    this.usagesPanel
+                      ? html`<div class="plc-usages">
+                          <div class="plc-usages-head">
+                            <b>${this.usagesPanel.list.length}</b> use(s) of
+                            <b>${this.usagesPanel.name}</b>
+                            <button class="chip-btn" @click=${() => (this.usagesPanel = undefined)}>
+                              ✕
+                            </button>
+                          </div>
+                          ${this.usagesPanel.list.map(
+                          (u) =>
+                            html`<div class="plc-usage" @click=${() => this.onUsageClick(u)}>
+                              ${u.where.replace(/^st:/, '')}:${u.line}:${u.col}
+                            </div>`,
                         )}
-                      </div>`
-                    : nothing}
+                        </div>`
+                      : nothing
+                  }
                 `
               : html`<p class="plc-dim">No POU selected.</p>`
           }
@@ -1609,11 +1777,15 @@ export class TetherPlcIde extends LitElement {
           ${Object.keys(this.project.stSources)
             .filter((n) => this.project.stSources[n]!.trim())
             .map(
-              (n) => html`<div class="plc-tree-net ${n === name ? 'sel' : ''}" @click=${() => {
-                this.selLib = n;
-              }}>
-                ${n} <span class="plc-dim">${this.project.stSources[n]!.length} B</span>
-              </div>`,
+              (n) =>
+                html`<div
+                  class="plc-tree-net ${n === name ? 'sel' : ''}"
+                  @click=${() => {
+                    this.selLib = n;
+                  }}
+                >
+                  ${n} <span class="plc-dim">${this.project.stSources[n]!.length} B</span>
+                </div>`,
             )}
         </div>
         <div class="plc-detail">
@@ -1729,8 +1901,7 @@ export class TetherPlcIde extends LitElement {
       defaultProfile();
     const hasLib = hasProfileLibrary(Object.values(this.project.stSources));
     const tune =
-      (key ? this.project.tunes?.[key] : undefined) ??
-      (pou ? tunerFromPou(pou) : undefined);
+      (key ? this.project.tunes?.[key] : undefined) ?? (pou ? tunerFromPou(pou) : undefined);
     return html`
       ${
         hasLib
@@ -1972,8 +2143,7 @@ export class TetherPlcIde extends LitElement {
     this.watchExprs.forEach((ex, i) => {
       const v = evalWatchExpr(ex, (n) => {
         const raw = hub.values.get(n);
-        return typeof raw === 'number' ? raw
-          : typeof raw === 'string' ? Number(raw) : undefined;
+        return typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : undefined;
       });
       if (v === undefined || !Number.isFinite(v)) return;
       const h = this.exprHistories[i] ?? (this.exprHistories[i] = []);
@@ -2006,10 +2176,16 @@ export class TetherPlcIde extends LitElement {
       : [];
     /* evaluate watch expressions against live catalog values */
     const exprRows = this.watchExprs.map((ex, i) => {
-      const v = hub ? evalWatchExpr(ex, (n) => {
-        const raw = hub.values.get(n);
-        return typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : undefined;
-      }) : undefined;
+      const v = hub
+        ? evalWatchExpr(ex, (n) => {
+            const raw = hub.values.get(n);
+            return typeof raw === 'number'
+              ? raw
+              : typeof raw === 'string'
+                ? Number(raw)
+                : undefined;
+          })
+        : undefined;
       return { ex, i, v };
     });
     return html`
@@ -2035,21 +2211,36 @@ export class TetherPlcIde extends LitElement {
         ${
           exprRows.length
             ? html`<table class="plc-table">
-                <thead><tr><th>expr</th><th>value</th><th>trend</th><th></th></tr></thead>
+                <thead>
+                  <tr>
+                    <th>expr</th>
+                    <th>value</th>
+                    <th>trend</th>
+                    <th></th>
+                  </tr>
+                </thead>
                 <tbody>
                   ${exprRows.map(
-                    ({ ex, i, v }) => html`<tr>
-                      <td><code>${ex}</code></td>
-                      <td class=${v === undefined ? 'plc-dim' : ''}>
-                        ${v === undefined ? '—' : v}
-                      </td>
-                      <td>${v === undefined ? nothing : sparkline(this.exprHistory(i))}</td>
-                      <td><button class="chip-btn" @click=${() => {
+                    ({ ex, i, v }) =>
+                      html`<tr>
+                        <td><code>${ex}</code></td>
+                        <td class=${v === undefined ? 'plc-dim' : ''}>
+                          ${v === undefined ? '—' : v}
+                        </td>
+                        <td>${v === undefined ? nothing : sparkline(this.exprHistory(i))}</td>
+                        <td>
+                          <button
+                            class="chip-btn"
+                            @click=${() => {
                         this.watchExprs.splice(i, 1);
                         this.exprHistories.splice(i, 1);
                         this.requestUpdate();
-                      }}>×</button></td>
-                    </tr>`,
+                      }}
+                          >
+                            ×
+                          </button>
+                        </td>
+                      </tr>`,
                   )}
                 </tbody>
               </table>`
@@ -2266,7 +2457,8 @@ export class TetherPlcIde extends LitElement {
   private setAlarmRule(i: number, k: keyof AlarmRule, v: string): void {
     const r = this.alarmRules()[i];
     if (!r) return;
-    if (k === 'priority') (r as unknown as Record<string, number>).priority = Math.max(0, Math.min(3, Number(v) || 0));
+    if (k === 'priority')
+      (r as unknown as Record<string, number>).priority = Math.max(0, Math.min(3, Number(v) || 0));
     else if (k === 'op') (r as unknown as Record<string, string>).op = v;
     else (r as unknown as Record<string, string>)[k] = v;
     this.save();
@@ -2314,36 +2506,108 @@ export class TetherPlcIde extends LitElement {
     return html`
       <div class="plc-ops">
         <button class="chip-btn" @click=${() => this.addAlarmRule()}>+ rule</button>
-        <button class="chip-btn primary" ?disabled=${!rules.length} @click=${() => this.buildAlarmProgram()}>build AlarmRules</button>
-        ${rules.length ? html`<button class="chip-btn" @click=${() => { this.project.alarms = []; this.save(); this.requestUpdate(); }}>clear</button>` : nothing}
+        <button
+          class="chip-btn primary"
+          ?disabled=${!rules.length}
+          @click=${() => this.buildAlarmProgram()}
+        >
+          build AlarmRules
+        </button>
+        ${
+          rules.length
+            ? html`<button
+                class="chip-btn"
+                @click=${() => {
+                  this.project.alarms = [];
+                  this.save();
+                  this.requestUpdate();
+                }}
+              >
+                clear
+              </button>`
+            : nothing
+        }
       </div>
       ${
         rules.length
           ? html`<table class="plc-table">
-              <thead><tr><th>name</th><th>signal</th><th>op</th><th>threshold</th><th>pri</th><th>msg</th><th></th></tr></thead>
+              <thead>
+                <tr>
+                  <th>name</th>
+                  <th>signal</th>
+                  <th>op</th>
+                  <th>threshold</th>
+                  <th>pri</th>
+                  <th>msg</th>
+                  <th></th>
+                </tr>
+              </thead>
               <tbody>
                 ${rules.map(
-                  (r, i) => html`<tr>
-                    <td><input class="plc-mapcell" .value=${r.name}
-                      @change=${(e: Event) => this.setAlarmRule(i, 'name', (e.target as HTMLInputElement).value)} /></td>
-                    <td><input class="plc-mapcell" style="width:12ch" .value=${r.signal} placeholder="%IX0.0 / var"
-                      @change=${(e: Event) => this.setAlarmRule(i, 'signal', (e.target as HTMLInputElement).value)} /></td>
-                    <td><select class="plc-mapcell" .value=${r.op}
-                      @change=${(e: Event) => this.setAlarmRule(i, 'op', (e.target as HTMLSelectElement).value)}>
-                      ${ALARM_OPS.map((o) => html`<option value=${o.op}>${o.op}</option>`)}
-                    </select></td>
-                    <td><input class="plc-mapcell" style="width:8ch" .value=${r.threshold}
-                      @change=${(e: Event) => this.setAlarmRule(i, 'threshold', (e.target as HTMLInputElement).value)} /></td>
-                    <td><input class="plc-mapcell" type="number" min="0" max="3" style="width:4ch" .value=${String(r.priority)}
-                      @change=${(e: Event) => this.setAlarmRule(i, 'priority', (e.target as HTMLInputElement).value)} /></td>
-                    <td><input class="plc-mapcell" style="width:14ch" .value=${r.message ?? ''}
-                      @change=${(e: Event) => this.setAlarmRule(i, 'message', (e.target as HTMLInputElement).value)} /></td>
-                    <td><button class="chip-btn" @click=${() => this.delAlarmRule(i)}>✕</button></td>
-                  </tr>`,
+                  (r, i) =>
+                    html`<tr>
+                      <td>
+                        <input
+                          class="plc-mapcell"
+                          .value=${r.name}
+                          @change=${(e: Event) => this.setAlarmRule(i, 'name', (e.target as HTMLInputElement).value)}
+                        />
+                      </td>
+                      <td>
+                        <input
+                          class="plc-mapcell"
+                          style="width:12ch"
+                          .value=${r.signal}
+                          placeholder="%IX0.0 / var"
+                          @change=${(e: Event) => this.setAlarmRule(i, 'signal', (e.target as HTMLInputElement).value)}
+                        />
+                      </td>
+                      <td>
+                        <select
+                          class="plc-mapcell"
+                          .value=${r.op}
+                          @change=${(e: Event) => this.setAlarmRule(i, 'op', (e.target as HTMLSelectElement).value)}
+                        >
+                          ${ALARM_OPS.map((o) => html`<option value=${o.op}>${o.op}</option>`)}
+                        </select>
+                      </td>
+                      <td>
+                        <input
+                          class="plc-mapcell"
+                          style="width:8ch"
+                          .value=${r.threshold}
+                          @change=${(e: Event) => this.setAlarmRule(i, 'threshold', (e.target as HTMLInputElement).value)}
+                        />
+                      </td>
+                      <td>
+                        <input
+                          class="plc-mapcell"
+                          type="number"
+                          min="0"
+                          max="3"
+                          style="width:4ch"
+                          .value=${String(r.priority)}
+                          @change=${(e: Event) => this.setAlarmRule(i, 'priority', (e.target as HTMLInputElement).value)}
+                        />
+                      </td>
+                      <td>
+                        <input
+                          class="plc-mapcell"
+                          style="width:14ch"
+                          .value=${r.message ?? ''}
+                          @change=${(e: Event) => this.setAlarmRule(i, 'message', (e.target as HTMLInputElement).value)}
+                        />
+                      </td>
+                      <td>
+                        <button class="chip-btn" @click=${() => this.delAlarmRule(i)}>✕</button>
+                      </td>
+                    </tr>`,
                 )}
               </tbody>
             </table>`
-          : html`<p class="plc-dim">no rules — define a condition on a signal, then build the AlarmRules program.</p>`
+          : html`<p class="plc-dim">
+              no rules — define a condition on a signal, then build the AlarmRules program.
+            </p>`
       }
     `;
   }
@@ -2360,8 +2624,8 @@ export class TetherPlcIde extends LitElement {
           ${
             st
               ? html`<span class="plc-dim">
-                  live ${st.live} · raised ${st.raised} · cleared ${st.cleared}
-                  · confirmed ${st.confirmed}${st.dropped ? ` · dropped ${st.dropped}` : ''}
+                  live ${st.live} · raised ${st.raised} · cleared ${st.cleared} · confirmed
+                  ${st.confirmed}${st.dropped ? ` · dropped ${st.dropped}` : ''}
                 </span>`
               : nothing
           }
@@ -2380,8 +2644,13 @@ export class TetherPlcIde extends LitElement {
                 <table class="plc-table">
                   <thead>
                     <tr>
-                      <th>id</th><th>sev</th><th>state</th><th>event</th>
-                      <th>text</th><th>raised</th><th>ack</th>
+                      <th>id</th>
+                      <th>sev</th>
+                      <th>state</th>
+                      <th>event</th>
+                      <th>text</th>
+                      <th>raised</th>
+                      <th>ack</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2398,11 +2667,11 @@ export class TetherPlcIde extends LitElement {
                             ${
                               e.state === 1
                                 ? html`<button
-                                      class="chip-btn"
-                                      @click=${() => void this.confirmAlarm(e.id)}
-                                    >
-                                      ack
-                                    </button>`
+                                    class="chip-btn"
+                                    @click=${() => void this.confirmAlarm(e.id)}
+                                  >
+                                    ack
+                                  </button>`
                                 : '—'
                             }
                           </td>
@@ -2421,7 +2690,10 @@ export class TetherPlcIde extends LitElement {
                 <table class="plc-table">
                   <thead>
                     <tr>
-                      <th>time</th><th>id</th><th>state</th><th>sev</th>
+                      <th>time</th>
+                      <th>id</th>
+                      <th>state</th>
+                      <th>sev</th>
                       <th>text</th>
                     </tr>
                   </thead>
@@ -2451,8 +2723,7 @@ export class TetherPlcIde extends LitElement {
             class="fbd-in wide"
             placeholder="symbols e.g. temp.sp, pv, cnt"
             .value=${this.histNamesInput}
-            @input=${(e: Event) =>
-              (this.histNamesInput = (e.target as HTMLInputElement).value)}
+            @input=${(e: Event) => (this.histNamesInput = (e.target as HTMLInputElement).value)}
             @keydown=${(e: KeyboardEvent) => {
               if (e.key === 'Enter') void this.armHist();
             }}
@@ -2471,7 +2742,11 @@ export class TetherPlcIde extends LitElement {
             ? html`
                 <table class="plc-table">
                   <thead>
-                    <tr><th>channel</th><th>off</th><th>len</th></tr>
+                    <tr>
+                      <th>channel</th>
+                      <th>off</th>
+                      <th>len</th>
+                    </tr>
                   </thead>
                   <tbody>
                     ${chans.map(
@@ -2503,10 +2778,7 @@ export class TetherPlcIde extends LitElement {
                     (c) => html`
                       <button
                         class="chip-btn ${
-                          this.trendCodecFor(chans[this.trendCh])
-                            .label === c.label
-                            ? 'active'
-                            : ''
+                          this.trendCodecFor(chans[this.trendCh]).label === c.label ? 'active' : ''
                         }"
                         @click=${() => {
                           this.trendCodecLabel = c.label;
@@ -2524,9 +2796,11 @@ export class TetherPlcIde extends LitElement {
                   ${sparkline(this.trendSamples, 320, 48)}
                   <span class="plc-dim">
                     ${chans[this.trendCh]?.name ?? ''}
-                    ${this.trendSamples.length
-                      ? `= ${this.trendSamples[this.trendSamples.length - 1]}`
-                      : '—'}
+                    ${
+                      this.trendSamples.length
+                        ? `= ${this.trendSamples[this.trendSamples.length - 1]}`
+                        : '—'
+                    }
                     (${this.trendSamples.length} samples)
                   </span>
                 </div>
@@ -2545,9 +2819,17 @@ export class TetherPlcIde extends LitElement {
 
   private mqttConnLabel(c: MqttConn): string {
     const scheme =
-      c.transport === 3 ? 'ws' : c.transport === 4 ? 'wss'
-      : c.transport === 1 ? 'tcp' : c.transport === 2 ? 'ssl'
-      : c.tls ? 'ssl' : 'tcp';
+      c.transport === 3
+        ? 'ws'
+        : c.transport === 4
+          ? 'wss'
+          : c.transport === 1
+            ? 'tcp'
+            : c.transport === 2
+              ? 'ssl'
+              : c.tls
+                ? 'ssl'
+                : 'tcp';
     return `${scheme}://${c.host}:${c.port}`;
   }
 
@@ -2573,8 +2855,7 @@ export class TetherPlcIde extends LitElement {
   private mqttFeed(): { conn: MqttConn; e: MqttJournalEntry }[] {
     const rows: { conn: MqttConn; e: MqttJournalEntry }[] = [];
     for (const c of this.mqttConns ?? []) {
-      for (const e of this.mqttJournals.get(c.handle)?.entries ?? [])
-        rows.push({ conn: c, e });
+      for (const e of this.mqttJournals.get(c.handle)?.entries ?? []) rows.push({ conn: c, e });
     }
     rows.sort((a, b) => (a.e.tsMs < b.e.tsMs ? 1 : -1));
     return rows.slice(0, 200);
@@ -2590,7 +2871,8 @@ export class TetherPlcIde extends LitElement {
         <h3>
           Events
           <span class="plc-dim">
-            MQTT message feed · ${live}/${conns.length} broker${conns.length === 1 ? '' : 's'} connected
+            MQTT message feed · ${live}/${conns.length} broker${conns.length === 1 ? '' : 's'}
+            connected
           </span>
         </h3>
         ${
@@ -2605,8 +2887,11 @@ export class TetherPlcIde extends LitElement {
                 <table class="plc-table">
                   <thead>
                     <tr>
-                      <th>hdl</th><th>broker</th><th>transport</th>
-                      <th>state</th><th>journaled</th>
+                      <th>hdl</th>
+                      <th>broker</th>
+                      <th>transport</th>
+                      <th>state</th>
+                      <th>journaled</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2614,9 +2899,18 @@ export class TetherPlcIde extends LitElement {
                       (c) => html`
                         <tr>
                           <td>#${c.handle}</td>
-                          <td>${this.mqttConnLabel(c)}<br /><span class="plc-dim">${c.clientId || '—'}</span></td>
-                          <td>${this.mqttTransportName(c.transport)}${c.tls ? ' 🔒' : ''} · mqtt${c.mqttVersion}</td>
-                          <td>${c.state === 2 ? 'connected' : c.state === 1 ? 'connecting' : 'down'}</td>
+                          <td>
+                            ${this.mqttConnLabel(c)}<br /><span class="plc-dim"
+                              >${c.clientId || '—'}</span
+                            >
+                          </td>
+                          <td>
+                            ${this.mqttTransportName(c.transport)}${c.tls ? ' 🔒' : ''} ·
+                            mqtt${c.mqttVersion}
+                          </td>
+                          <td>
+                            ${c.state === 2 ? 'connected' : c.state === 1 ? 'connecting' : 'down'}
+                          </td>
                           <td>${this.mqttJournals.get(c.handle)?.total ?? 0}</td>
                         </tr>
                       `,
@@ -2624,17 +2918,26 @@ export class TetherPlcIde extends LitElement {
                   </tbody>
                 </table>
               `
-            : html`<p class="plc-dim">no MQTT brokers connected — the journal fills when a program polls FB_MqttRx / FB_Mqtt / FB_HaEntity.</p>`
+            : html`<p class="plc-dim">
+                no MQTT brokers connected — the journal fills when a program polls FB_MqttRx /
+                FB_Mqtt / FB_HaEntity.
+              </p>`
         }
-        <h4>Message history <span class="plc-dim">inbound PUBLISH, newest first · 64/conn</span></h4>
+        <h4>
+          Message history <span class="plc-dim">inbound PUBLISH, newest first · 64/conn</span>
+        </h4>
         ${
           feed.length
             ? html`
                 <table class="plc-table">
                   <thead>
                     <tr>
-                      <th>time</th><th>broker</th><th>topic</th>
-                      <th>payload</th><th>qos</th><th>ret</th>
+                      <th>time</th>
+                      <th>broker</th>
+                      <th>topic</th>
+                      <th>payload</th>
+                      <th>qos</th>
+                      <th>ret</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2684,7 +2987,7 @@ export class TetherPlcIde extends LitElement {
       <div class="tile-scroll">
         <h3>Deploy</h3>
         <div class="plc-ctlbar">
-          ctl proxy
+          backend
           <input
             class="fbd-in wide"
             .value=${ctl.url}
@@ -2730,18 +3033,263 @@ export class TetherPlcIde extends LitElement {
               : nothing
           }
         </div>
-        ${this.prog ? this.progTable(this.prog) : nothing}
-        ${this.shadowCard()}
+        ${this.prog ? this.progTable(this.prog) : nothing} ${this.shadowCard()}
         ${this.dbg ? this.debugCard(this.dbg) : nothing}
-        ${this.retain ? this.retainCard(this.retain) : nothing}
-        ${this.ioMapCard()}
-        ${this.odCard()}
+        ${this.retain ? this.retainCard(this.retain) : nothing} ${this.ioMapCard()} ${this.odCard()}
         ${this.journalCard()}
         ${this.rt ? html`<p class="plc-dim">rt: up ${this.rt.uptimeS}s · ${this.rt.progCount} progs (${this.rt.runningCount} running) · master ${this.rt.masterStatus} plc ${this.rt.plcStatus}${this.rt.version ? ` · ${this.rt.version}` : ''}</p>` : nothing}
         <p class="plc-dim">
-          Requires <code>tplc-ctl-proxy</code> running on the plc host. Online-change
+          Requires <code>tplc serve</code> running on the plc host. Online-change
           (state-preserving swap + rollback) is live through PROG_SWAP / PROG_ROLLBACK.
         </p>
+      </div>
+    `;
+  }
+
+  /* ---------------- project pane ---------------- */
+
+  private projInfoLoaded = false;
+  private projEdit: Record<string, string> = {};
+
+  private async refreshProjectPane(): Promise<void> {
+    this.projBusy = true;
+    try {
+      const [info, files, entries, commits, recent, branch] = await Promise.all([
+        remoteProjectInfo(this.ctl),
+        pa.projectFiles(this.ctl),
+        pa.gitStatus(this.ctl),
+        pa.gitLog(this.ctl, 30),
+        pa.projectsRecent(this.ctl),
+        pa.gitBranch(this.ctl),
+      ]);
+      this.projInfo = info;
+      this.projFiles = files;
+      this.gitEntries = entries;
+      this.gitCommits = commits;
+      this.projRecent = recent;
+      this.gitBranch = branch;
+      if (info) {
+        const m = info.manifest ?? {};
+        this.projEdit = {
+          name: m.name ?? info.name ?? '',
+          description: m.description ?? '',
+          sources: (m.sources ?? []).join(', '),
+          libs: (m.libs ?? []).join(', '),
+          taskPeriodNs: m.taskPeriodNs?.toString() ?? '',
+          imageIn: m.imageIn?.toString() ?? '',
+          imageOut: m.imageOut?.toString() ?? '',
+        };
+      }
+      this.projInfoLoaded = true;
+    } finally {
+      this.projBusy = false;
+      this.requestUpdate();
+    }
+  }
+
+  private async projOpenDir(path: string): Promise<void> {
+    this.projBusy = true;
+    try {
+      const info = await pa.projectOpen(this.ctl, path);
+      this.projInfo = info;
+      this.flash(`project opened: ${info.root}`);
+      await this.refreshProjectPane();
+    } catch (e) {
+      this.flash(`open failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      this.projBusy = false;
+      this.requestUpdate();
+    }
+  }
+
+  private async projSaveManifest(): Promise<void> {
+    const info = this.projInfo;
+    if (!info) return;
+    const e = this.projEdit;
+    const csv = (s: string) => s.split(',').map((x) => x.trim()).filter(Boolean);
+    const manifest: pa.ProjectManifest = {
+      ...(info.manifest ?? {}),
+      name: e.name || info.name,
+      description: e.description || undefined,
+      sources: csv(e.sources ?? ''),
+      libs: csv(e.libs ?? ''),
+      taskPeriodNs: e.taskPeriodNs ? Number(e.taskPeriodNs) : undefined,
+      imageIn: e.imageIn ? Number(e.imageIn) : undefined,
+      imageOut: e.imageOut ? Number(e.imageOut) : undefined,
+      ui: this.project,
+    };
+    try {
+      await pa.projectSave(this.ctl, manifest);
+      this.flash('project manifest saved');
+    } catch (err) {
+      this.flash(`save failed: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  private async projGitCommit(): Promise<void> {
+    const msg = this.gitMsg.trim();
+    if (!msg) return;
+    try {
+      const short = await pa.gitCommit(this.ctl, msg);
+      this.gitMsg = '';
+      this.flash(short ? `committed ${short}` : 'commit failed');
+      await this.refreshProjectPane();
+    } catch (e) {
+      this.flash(`commit failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  private async projGitDiff(path?: string): Promise<void> {
+    this.gitDiffText = await pa.gitDiff(this.ctl, path);
+    this.requestUpdate();
+  }
+
+  private projectPane(): TemplateResult {
+    if (!this.projInfoLoaded && !this.projBusy) void this.refreshProjectPane();
+    const info = this.projInfo;
+    const e = this.projEdit;
+    const field = (key: string, label: string, ph = '') => html`
+      <label class="plc-projfield"
+        >${label}
+        <input
+          class="fbd-in"
+          .value=${e[key] ?? ''}
+          placeholder=${ph}
+          @input=${(ev: Event) => {
+            this.projEdit = { ...this.projEdit, [key]: (ev.target as HTMLInputElement).value };
+          }}
+      /></label>
+    `;
+    return html`
+      <div class="tile-scroll">
+        <h3>Project</h3>
+        ${
+          info
+            ? html`<div class="plc-dim">
+                <strong>${info.name}</strong> · ${info.root}
+                ${info.git ? html`· git <code>${info.branch || '?'}</code>` : html`· no git`}
+              </div>`
+            : html`<p class="fbd-warn">
+                No project open — the IDE document persists in this browser only.
+                Open a project directory to get file persistence + git versioning.
+              </p>`
+        }
+
+        <h4>Open project</h4>
+        <div class="plc-ctlbar">
+          <input
+            class="fbd-in wide"
+            placeholder="/path/to/project"
+            .value=${this.projOpenPath}
+            @input=${(ev: Event) => {
+              this.projOpenPath = (ev.target as HTMLInputElement).value;
+            }}
+          />
+          <button
+            class="chip-btn"
+            ?disabled=${this.projBusy || !this.projOpenPath.trim()}
+            @click=${() => void this.projOpenDir(this.projOpenPath.trim())}
+            >open</button
+          >
+          <button
+            class="chip-btn"
+            ?disabled=${this.projBusy}
+            @click=${() => void this.refreshProjectPane()}
+            >refresh</button
+          >
+        </div>
+        ${
+          this.projRecent.length
+            ? html`<div class="plc-dim">recent:</div>
+                ${this.projRecent.map(
+                  (r) => html`<div class="plc-projrecent" @click=${() => void this.projOpenDir(r)}>${r}</div>`,
+                )}`
+            : nothing
+        }
+
+        ${
+          info
+            ? html`
+                <h4>Manifest</h4>
+                <div class="plc-projgrid">
+                  ${field('name', 'name')}
+                  ${field('description', 'description')}
+                  ${field('sources', 'sources', 'src/main.st, src/other.st')}
+                  ${field('libs', 'library dirs', 'libs, ../TetherPLC/libraries/tempctrl')}
+                  ${field('taskPeriodNs', 'task period ns', '10000000')}
+                  ${field('imageIn', 'image %I bytes', '64')}
+                  ${field('imageOut', 'image %Q bytes', '64')}
+                </div>
+                <button class="chip-btn" @click=${() => void this.projSaveManifest()}>save manifest</button>
+                <span class="plc-dim"> (ui document is saved automatically on edit)</span>
+
+                <h4>Files (${this.projFiles.length})</h4>
+                <div class="plc-projfiles">
+                  ${this.projFiles.slice(0, 200).map(
+                    (f) => html`<div class="plc-projfile" title=${f.path}>
+                      <code>${f.path}</code> <span class="plc-dim">${f.size} B</span>
+                      <button
+                        class="chip-btn"
+                        @click=${() => void pa.gitDiff(this.ctl, f.path).then((d) => { this.gitDiffText = d; this.requestUpdate(); })}
+                        >diff</button
+                      >
+                    </div>`,
+                  )}
+                </div>
+
+                <h4>Git ${info.git ? html`<code>${this.gitBranch}</code>` : nothing}</h4>
+                ${
+                  this.gitEntries.length
+                    ? html`<div class="plc-projgit">
+                        ${this.gitEntries.map(
+                          (g) => html`<div class="plc-progmeta">
+                            <code>${g.status}</code> ${g.path}
+                            <button
+                              class="chip-btn"
+                              @click=${() => void pa.gitDiff(this.ctl, g.path).then((d) => { this.gitDiffText = d; this.requestUpdate(); })}
+                              >diff</button
+                            >
+                          </div>`,
+                        )}
+                      </div>`
+                    : html`<div class="plc-ok">working tree clean</div>`
+                }
+                <div class="plc-ctlbar">
+                  <input
+                    class="fbd-in wide"
+                    placeholder="commit message"
+                    .value=${this.gitMsg}
+                    @input=${(ev: Event) => {
+                      this.gitMsg = (ev.target as HTMLInputElement).value;
+                    }}
+                    @keydown=${(ev: KeyboardEvent) => {
+                      if (ev.key === 'Enter') void this.projGitCommit();
+                    }}
+                  />
+                  <button
+                    class="chip-btn"
+                    ?disabled=${!this.gitMsg.trim()}
+                    @click=${() => void this.projGitCommit()}
+                    >commit all</button
+                  >
+                </div>
+                ${
+                  this.gitDiffText != null
+                    ? html`<pre class="plc-diff">${this.gitDiffText || '(no diff)'}</pre>`
+                    : nothing
+                }
+                <h4>History</h4>
+                <div class="plc-projgit">
+                  ${this.gitCommits.map(
+                    (c) => html`<div class="plc-progmeta">
+                      <code>${c.short}</code> ${c.message}
+                      <span class="plc-dim">${c.author} · ${new Date(c.time * 1000).toLocaleString()}</span>
+                    </div>`,
+                  )}
+                </div>
+              `
+            : nothing
+        }
       </div>
     `;
   }
@@ -2751,9 +3299,8 @@ export class TetherPlcIde extends LitElement {
       <h4>
         program ${p.name}
         <span class="plc-dim"
-          >${['stopped', 'running', 'fault'][p.state] ?? p.state} · ${p.cycles} cycles${
-            p.epoch !== undefined ? ` · epoch ${p.epoch}` : ''
-          }</span
+          >${['stopped', 'running', 'fault'][p.state] ?? p.state} · ${p.cycles}
+          cycles${p.epoch !== undefined ? ` · epoch ${p.epoch}` : ''}</span
         >
       </h4>
       <table class="plc-table">
@@ -2779,30 +3326,32 @@ export class TetherPlcIde extends LitElement {
                 <td>${t.late}</td>
                 <td>${t.faults}</td>
                 <td class="plc-task-dbg">
-                  ${t.state === 2
-                    ? html`<button
+                  ${
+                    t.state === 2
+                      ? html`<button
+                            class="chip-btn"
+                            @click=${() => this.ctlOp('resume', () => this.ctl.taskResume(i))}
+                          >
+                            resume</button
+                          ><button
+                            class="chip-btn"
+                            @click=${() => this.ctlOp('step', () => this.ctl.taskStep(i, 1))}
+                          >
+                            step</button
+                          ><button
+                            class="chip-btn"
+                            @click=${() => this.ctlOp('step×10', () => this.ctl.taskStep(i, 10))}
+                          >
+                            +10
+                          </button>`
+                      : html`<button
                           class="chip-btn"
-                          @click=${() =>
-                            this.ctlOp('resume', () => this.ctl.taskResume(i))}
-                          >resume</button
-                        ><button
-                          class="chip-btn"
-                          @click=${() =>
-                            this.ctlOp('step', () => this.ctl.taskStep(i, 1))}
-                          >step</button
-                        ><button
-                          class="chip-btn"
-                          @click=${() =>
-                            this.ctlOp('step×10', () => this.ctl.taskStep(i, 10))}
-                          >+10</button
-                        >`
-                    : html`<button
-                        class="chip-btn"
-                        ?disabled=${p.state !== 1}
-                        @click=${() =>
-                          this.ctlOp('suspend', () => this.ctl.taskSuspend(i))}
-                        >suspend</button
-                      >`}
+                          ?disabled=${p.state !== 1}
+                          @click=${() => this.ctlOp('suspend', () => this.ctl.taskSuspend(i))}
+                        >
+                          suspend
+                        </button>`
+                  }
                 </td>
               </tr>`,
           )}
@@ -2818,9 +3367,7 @@ export class TetherPlcIde extends LitElement {
     const parts: string[] = [];
     if (p.version) parts.push(`v${p.version}`);
     if (p.deployedAtNs)
-      parts.push(
-        `deployed ${new Date(Number(p.deployedAtNs / 1000000n)).toLocaleString()}`,
-      );
+      parts.push(`deployed ${new Date(Number(p.deployedAtNs / 1000000n)).toLocaleString()}`);
     if (p.lastFaultCode)
       parts.push(
         `last fault rc=${p.lastFaultCode}` +
@@ -2830,8 +3377,7 @@ export class TetherPlcIde extends LitElement {
     if (p.retainDirtyBytes) parts.push(`retain dirty ${p.retainDirtyBytes} B`);
     if (p.swapStage)
       parts.push(
-        `swap stage ${p.swapStage}` +
-          (p.quarantineLeft ? ` (${p.quarantineLeft} left)` : ''),
+        `swap stage ${p.swapStage}` + (p.quarantineLeft ? ` (${p.quarantineLeft} left)` : ''),
       );
     if (!parts.length) return nothing;
     return html`<div class="plc-dim plc-progmeta">${parts.join(' · ')}</div>`;
@@ -2841,30 +3387,23 @@ export class TetherPlcIde extends LitElement {
     if (!this.ctlOk || !this.prog) return nothing;
     const sh = this.shadow;
     const diffs = this.shadowDiffs ?? [];
-    const hex = (b: Uint8Array) =>
-      [...b].map((x) => x.toString(16).padStart(2, '0')).join(' ');
+    const hex = (b: Uint8Array) => [...b].map((x) => x.toString(16).padStart(2, '0')).join(' ');
     return html`
       <h4>
         shadow run
-        ${sh?.loaded
-          ? html`<span class="plc-dim"
-              >${sh.name} ${sh.uuid?.slice(0, 8)} ·
-              ${['stopped', 'running', 'fault'][sh.state ?? 0] ?? sh.state} ·
-              ${sh.cycles} cycles · ${sh.missed} missed · ${sh.diffCount} diffs
-              ${sh.diffCount
-                ? html`· last @ cycle ${sh.lastDiffCycle}`
-                : nothing}</span
-            >`
-          : html`<span class="plc-dim">none loaded</span>`}
+        ${
+          sh?.loaded
+            ? html`<span class="plc-dim"
+                >${sh.name} ${sh.uuid?.slice(0, 8)} ·
+                ${['stopped', 'running', 'fault'][sh.state ?? 0] ?? sh.state} · ${sh.cycles} cycles
+                · ${sh.missed} missed · ${sh.diffCount} diffs
+                ${sh.diffCount ? html`· last @ cycle ${sh.lastDiffCycle}` : nothing}</span
+              >`
+            : html`<span class="plc-dim">none loaded</span>`
+        }
       </h4>
       <div class="plc-ops">
-        <input
-          type="file"
-          id="plc-shpkg"
-          accept=".tplc"
-          hidden
-          @change=${this.onShadowPkgFile}
-        />
+        <input type="file" id="plc-shpkg" accept=".tplc" hidden @change=${this.onShadowPkgFile} />
         <button
           class="chip-btn"
           ?disabled=${this.prog.state !== 1}
@@ -2873,52 +3412,62 @@ export class TetherPlcIde extends LitElement {
         >
           ${sh?.loaded ? 'reload…' : 'deploy as shadow…'}
         </button>
-        ${sh?.loaded
-          ? html`<button
-                class="chip-btn"
-                title="atomically adopt the shadow program and its live state"
-                @click=${() => this.onShadowPromote()}
-                >promote</button
-              ><button
-                class="chip-btn"
-                title="re-run active→shadow state migration"
-                @click=${() => this.ctlOp('shadow reset', () => this.ctl.shadowReset())}
-                >reset</button
-              ><button
-                class="chip-btn"
-                @click=${() => this.ctlOp('shadow drop', () => this.ctl.shadowDrop())}
-                >drop</button
-              >`
-          : nothing}
+        ${
+          sh?.loaded
+            ? html`<button
+                  class="chip-btn"
+                  title="atomically adopt the shadow program and its live state"
+                  @click=${() => this.onShadowPromote()}
+                >
+                  promote</button
+                ><button
+                  class="chip-btn"
+                  title="re-run active→shadow state migration"
+                  @click=${() => this.ctlOp('shadow reset', () => this.ctl.shadowReset())}
+                >
+                  reset</button
+                ><button
+                  class="chip-btn"
+                  @click=${() => this.ctlOp('shadow drop', () => this.ctl.shadowDrop())}
+                >
+                  drop
+                </button>`
+            : nothing
+        }
       </div>
-      ${sh?.loaded
-        ? html`<p class="plc-dim">
-            outputs private · diffs are post-%Q byte runs · watch a candidate
-            var as <code>SHADOW.&lt;sym&gt;</code>
-          </p>`
-        : nothing}
-      ${diffs.length
-        ? html`<table class="plc-table">
-            <thead>
-              <tr>
-                <th>cycle</th>
-                <th>img+off</th>
-                <th>active</th>
-                <th>shadow</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${diffs.map(
-                (d) => html`<tr>
-                  <td>${d.cycle}</td>
-                  <td>0x${d.imgOff.toString(16)}</td>
-                  <td><code>${hex(d.active)}</code></td>
-                  <td><code>${hex(d.shadow)}</code></td>
-                </tr>`,
+      ${
+        sh?.loaded
+          ? html`<p class="plc-dim">
+              outputs private · diffs are post-%Q byte runs · watch a candidate var as
+              <code>SHADOW.&lt;sym&gt;</code>
+            </p>`
+          : nothing
+      }
+      ${
+        diffs.length
+          ? html`<table class="plc-table">
+              <thead>
+                <tr>
+                  <th>cycle</th>
+                  <th>img+off</th>
+                  <th>active</th>
+                  <th>shadow</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${diffs.map(
+                (d) =>
+                  html`<tr>
+                    <td>${d.cycle}</td>
+                    <td>0x${d.imgOff.toString(16)}</td>
+                    <td><code>${hex(d.active)}</code></td>
+                    <td><code>${hex(d.shadow)}</code></td>
+                  </tr>`,
               )}
-            </tbody>
-          </table>`
-        : nothing}
+              </tbody>
+            </table>`
+          : nothing
+      }
     `;
   }
 
@@ -2977,8 +3526,8 @@ export class TetherPlcIde extends LitElement {
         debug
         <span class="plc-dim">
           blob ${d.blobSize}B · retain
-          ${d.retainLen > 0n ? ` off ${d.retainOff} len ${d.retainLen}` : ' none'} ·
-          ${d.symCount} symbols
+          ${d.retainLen > 0n ? ` off ${d.retainOff} len ${d.retainLen}` : ' none'} · ${d.symCount}
+          symbols
         </span>
       </h4>
       <div class="plc-ops">
@@ -2990,302 +3539,324 @@ export class TetherPlcIde extends LitElement {
           @keydown=${(e: KeyboardEvent) => e.key === 'Enter' && void this.onDbgResolve()}
         />
         <button class="chip-btn" @click=${() => void this.onDbgResolve()}>resolve</button>
-        ${s
-          ? html`<span class="${stale ? 'fbd-warn' : 'plc-dim'}">
-                ${this.dbgSymShadow ? 'shadow ' : ''}sym ${s.symIdx} kind
-                ${s.kind} region ${s.region} access ${s.access} ·
-                off ${s.offset} size ${s.size}B${stale ? ' · STALE epoch' : ''}
-              </span>
-              <button class="chip-btn" @click=${() => void this.onDbgRead()}>read</button>
-              ${!this.dbgSymShadow
-                ? html`<input
-                    class="fbd-in"
-                    placeholder="hex (e.g. 07000000)"
-                    .value=${this.dbgWriteHex}
-                    @input=${(e: Event) =>
+        ${
+          s
+            ? html`<span class="${stale ? 'fbd-warn' : 'plc-dim'}">
+                  ${this.dbgSymShadow ? 'shadow ' : ''}sym ${s.symIdx} kind ${s.kind} region
+                  ${s.region} access ${s.access} · off ${s.offset} size
+                  ${s.size}B${stale ? ' · STALE epoch' : ''}
+                </span>
+                <button class="chip-btn" @click=${() => void this.onDbgRead()}>read</button>
+                ${
+                !this.dbgSymShadow
+                  ? html`<input
+                        class="fbd-in"
+                        placeholder="hex (e.g. 07000000)"
+                        .value=${this.dbgWriteHex}
+                        @input=${(e: Event) =>
                       (this.dbgWriteHex = (e.target as HTMLInputElement).value)}
-                  />
-                  ${this.codecPicker()}
-                  <input
-                    class="fbd-in"
-                    placeholder=${this.dbgCodec ? `${this.dbgCodec} value` : 'typed value'}
-                    .value=${this.dbgTypedVal}
-                    @input=${(e: Event) => {
+                      />
+                      ${this.codecPicker()}
+                      <input
+                        class="fbd-in"
+                        placeholder=${this.dbgCodec ? `${this.dbgCodec} value` : 'typed value'}
+                        .value=${this.dbgTypedVal}
+                        @input=${(e: Event) => {
                       this.dbgTypedVal = (e.target as HTMLInputElement).value;
                       this.dbgTypedDirty = true;
                     }}
-                  />
-                  <button class="chip-btn" @click=${() => void this.onDbgWrite()}>write</button>
-                  <input
-                    class="fbd-in plc-brk-task"
-                    title="optional bit mask (hex, same byte count)"
-                    placeholder="mask"
-                    .value=${this.dbgMaskHex}
-                    @input=${(e: Event) =>
+                      />
+                      <button class="chip-btn" @click=${() => void this.onDbgWrite()}>write</button>
+                      <input
+                        class="fbd-in plc-brk-task"
+                        title="optional bit mask (hex, same byte count)"
+                        placeholder="mask"
+                        .value=${this.dbgMaskHex}
+                        @input=${(e: Event) =>
                       (this.dbgMaskHex = (e.target as HTMLInputElement).value)}
-                  />
-                  <button
-                    class="chip-btn plc-force-btn"
-                    @click=${() => void this.onDbgForce()}
-                    >force</button
-                  >`
-                : html`<span class="plc-dim">shadow blob is read-only</span>`}
-              <button
-                class="chip-btn"
-                title="stage as a flight-recorder channel"
-                @click=${() => this.onTraceChAdd()}
-                >+ rec</button
-              >
-              <button
-                class="chip-btn"
-                title="stage as a watch item"
-                @click=${() => this.onWatchChAdd()}
-                >+ watch</button
-              >`
-          : nothing}
+                      />
+                      <button class="chip-btn plc-force-btn" @click=${() => void this.onDbgForce()}>
+                        force
+                      </button>`
+                  : html`<span class="plc-dim">shadow blob is read-only</span>`
+              }
+                <button
+                  class="chip-btn"
+                  title="stage as a flight-recorder channel"
+                  @click=${() => this.onTraceChAdd()}
+                >
+                  + rec
+                </button>
+                <button
+                  class="chip-btn"
+                  title="stage as a watch item"
+                  @click=${() => this.onWatchChAdd()}
+                >
+                  + watch
+                </button>`
+            : nothing
+        }
       </div>
       ${this.dbgHex ? html`<code class="plc-dbg-hex">${this.dbgHex}</code>` : nothing}
       ${this.dbgRawVal ? html`<code class="plc-dbg-hex">${this.dbgRawVal}</code>` : nothing}
-      ${this.forces && this.forces.length > 0
-        ? html`<div class="plc-forces">
-            ${this.forces.map(
-              (f) => html`<span class="plc-force-tag">
-                off ${f.offset} =
-                ${[...f.bytes].map((b) => b.toString(16).padStart(2, '0')).join('')}
-                ${f.mask && f.mask.some((m) => m !== 0xff)
-                  ? html` & ${[...f.mask].map((m) =>
-                      m.toString(16).padStart(2, '0')).join('')}`
-                  : nothing}
-                <button
-                  class="chip-btn"
-                  @click=${() =>
+      ${
+        this.forces && this.forces.length > 0
+          ? html`<div class="plc-forces">
+              ${this.forces.map(
+              (f) =>
+                html`<span class="plc-force-tag">
+                  off ${f.offset} =
+                  ${[...f.bytes].map((b) => b.toString(16).padStart(2, '0')).join('')}
+                  ${
+                  f.mask && f.mask.some((m) => m !== 0xff)
+                    ? html` & ${[...f.mask].map((m) => m.toString(16).padStart(2, '0')).join('')}`
+                    : nothing
+                }
+                  <button
+                    class="chip-btn"
+                    @click=${() =>
                     this.ctlOp('force clear', () => this.ctl.dbgForceClear(f.handle))}
-                  >×</button
-                >
-              </span>`,
+                  >
+                    ×
+                  </button>
+                </span>`,
             )}
-            <button
-              class="chip-btn"
-              @click=${() => this.ctlOp('force clear', () => this.ctl.dbgForceClear())}
-              >clear all</button
-            >
-          </div>`
-        : nothing}
-      ${s && [1, 2, 4, 8].includes(s.size)
-        ? html`<div class="plc-ops">
-            <select
-              class="fbd-in"
-              .value=${this.brkKind}
-              @change=${(e: Event) =>
-                (this.brkKind = (e.target as HTMLSelectElement).value)}
-            >
-              <option value="0">break task</option>
-              <option value="1">capture on</option>
-            </select>
-            <input
-              class="fbd-in plc-brk-task"
-              .value=${this.brkTask}
-              @input=${(e: Event) =>
-                (this.brkTask = (e.target as HTMLInputElement).value)}
-            />
-            <span class="plc-dim">when ${this.dbgSymName || 'sym'}</span>
-            <select
-              class="fbd-in"
-              .value=${this.brkCmp}
-              @change=${(e: Event) =>
-                (this.brkCmp = (e.target as HTMLSelectElement).value)}
-            >
-              ${DBG_CMP.map((c, i) => html`<option value=${i}>${c}</option>`)}
-            </select>
-            <input
-              class="fbd-in"
-              placeholder="value"
-              .value=${this.brkVal}
-              @input=${(e: Event) =>
-                (this.brkVal = (e.target as HTMLInputElement).value)}
-            />
-            <button class="chip-btn" @click=${() => void this.onDbgBreak()}>arm</button>
-            <input
-              class="fbd-in"
-              placeholder="or expr: counter % 50 == 0 && flag"
-              .value=${this.brkExpr}
-              @input=${(e: Event) =>
-                (this.brkExpr = (e.target as HTMLInputElement).value)}
-            />
-            <button
-              class="chip-btn"
-              title="arm expression trigger (paths resolve at arm time)"
-              @click=${() => void this.onDbgBreakExpr()}
-              >arm expr</button
-            >
-          </div>`
-        : nothing}
-      ${this.breaks && this.breaks.length > 0
-        ? html`<div class="plc-forces">
-            ${this.breaks.map(
-              (b) => html`<span class="plc-force-tag">
-                h${b.handle} ${b.kind ? 'cap' : 'brk'}
-                ${b.stale ? 'stale ' : ''}task ${b.taskIdx}
-                ${b.cmp === 0xff
-                  ? 'expr'
-                  : html`blob[${b.offset}..${b.len}]
-                    ${DBG_CMP[b.cmp] ?? b.cmp} ${b.value}`}
-                · hits ${b.hits}
-                <button
-                  class="chip-btn"
-                  @click=${() =>
+              <button
+                class="chip-btn"
+                @click=${() => this.ctlOp('force clear', () => this.ctl.dbgForceClear())}
+              >
+                clear all
+              </button>
+            </div>`
+          : nothing
+      }
+      ${
+        s && [1, 2, 4, 8].includes(s.size)
+          ? html`<div class="plc-ops">
+              <select
+                class="fbd-in"
+                .value=${this.brkKind}
+                @change=${(e: Event) => (this.brkKind = (e.target as HTMLSelectElement).value)}
+              >
+                <option value="0">break task</option>
+                <option value="1">capture on</option>
+              </select>
+              <input
+                class="fbd-in plc-brk-task"
+                .value=${this.brkTask}
+                @input=${(e: Event) => (this.brkTask = (e.target as HTMLInputElement).value)}
+              />
+              <span class="plc-dim">when ${this.dbgSymName || 'sym'}</span>
+              <select
+                class="fbd-in"
+                .value=${this.brkCmp}
+                @change=${(e: Event) => (this.brkCmp = (e.target as HTMLSelectElement).value)}
+              >
+                ${DBG_CMP.map((c, i) => html`<option value=${i}>${c}</option>`)}
+              </select>
+              <input
+                class="fbd-in"
+                placeholder="value"
+                .value=${this.brkVal}
+                @input=${(e: Event) => (this.brkVal = (e.target as HTMLInputElement).value)}
+              />
+              <button class="chip-btn" @click=${() => void this.onDbgBreak()}>arm</button>
+              <input
+                class="fbd-in"
+                placeholder="or expr: counter % 50 == 0 && flag"
+                .value=${this.brkExpr}
+                @input=${(e: Event) => (this.brkExpr = (e.target as HTMLInputElement).value)}
+              />
+              <button
+                class="chip-btn"
+                title="arm expression trigger (paths resolve at arm time)"
+                @click=${() => void this.onDbgBreakExpr()}
+              >
+                arm expr
+              </button>
+            </div>`
+          : nothing
+      }
+      ${
+        this.breaks && this.breaks.length > 0
+          ? html`<div class="plc-forces">
+              ${this.breaks.map(
+              (b) =>
+                html`<span class="plc-force-tag">
+                  h${b.handle} ${b.kind ? 'cap' : 'brk'} ${b.stale ? 'stale ' : ''}task ${b.taskIdx}
+                  ${
+                  b.cmp === 0xff
+                    ? 'expr'
+                    : html`blob[${b.offset}..${b.len}] ${DBG_CMP[b.cmp] ?? b.cmp} ${b.value}`
+                }
+                  · hits ${b.hits}
+                  <button
+                    class="chip-btn"
+                    @click=${() =>
                     this.ctlOp('break clear', () => this.ctl.dbgBreakClear(b.handle))}
-                  >×</button
-                >
-              </span>`,
+                  >
+                    ×
+                  </button>
+                </span>`,
             )}
-            <button
-              class="chip-btn"
-              @click=${() => this.ctlOp('break clear', () => this.ctl.dbgBreakClear())}
-              >clear all</button
-            >
-          </div>`
-        : nothing}
-      ${this.traceChs.length > 0
-        ? html`<div class="plc-forces">
-            <span class="plc-dim">rec ch:</span>
-            ${this.traceChs.map(
-              (c, i) => html`<span class="plc-force-tag">
-                ${c.name} ${c.off}:${c.len}
-                <button
-                  class="chip-btn"
-                  @click=${() => {
+              <button
+                class="chip-btn"
+                @click=${() => this.ctlOp('break clear', () => this.ctl.dbgBreakClear())}
+              >
+                clear all
+              </button>
+            </div>`
+          : nothing
+      }
+      ${
+        this.traceChs.length > 0
+          ? html`<div class="plc-forces">
+              <span class="plc-dim">rec ch:</span>
+              ${this.traceChs.map(
+              (c, i) =>
+                html`<span class="plc-force-tag">
+                  ${c.name} ${c.off}:${c.len}
+                  <button
+                    class="chip-btn"
+                    @click=${() => {
                     this.traceChs.splice(i, 1);
                     this.requestUpdate();
                   }}
-                  >×</button
-                >
-              </span>`,
+                  >
+                    ×
+                  </button>
+                </span>`,
             )}
-            <button class="chip-btn" @click=${() => void this.onTraceArm()}
-              >record</button
-            >
-            <label class="plc-dim">
-              <input
-                type="checkbox"
-                .checked=${this.traceNoFreeze}
-                @change=${(e: Event) =>
-                  (this.traceNoFreeze =
-                    (e.target as HTMLInputElement).checked)}
-              />
-              nofreeze
-            </label>
-          </div>`
-        : nothing}
-      ${this.trace && this.trace.channels > 0
-        ? html`<div class="plc-forces">
-            <span class="plc-force-tag">
-              rec ${this.trace.written} frames ·
-              ${this.trace.avail} in ring ·
-              ${this.trace.frameLen}B/frame
-              ${this.trace.frozen ? ' · FROZEN' : nothing}
-            </span>
-            <button class="chip-btn" @click=${() => void this.onTraceRead()}
-              >read</button
-            >
-            <button
-              class="chip-btn"
-              @click=${() => this.ctlOp('trace clear', () => this.ctl.dbgTraceClear())}
-              >stop</button
-            >
-          </div>`
-        : nothing}
-      ${this.watchChs.length > 0
-        ? html`<div class="plc-forces">
-            <span class="plc-dim">watch items:</span>
-            ${this.watchChs.map(
-              (c, i) => html`<span class="plc-force-tag">
-                ${c.name} ${c.off}:${c.len}
-                <button
-                  class="chip-btn"
-                  @click=${() => {
+              <button class="chip-btn" @click=${() => void this.onTraceArm()}>record</button>
+              <label class="plc-dim">
+                <input
+                  type="checkbox"
+                  .checked=${this.traceNoFreeze}
+                  @change=${(e: Event) =>
+                  (this.traceNoFreeze = (e.target as HTMLInputElement).checked)}
+                />
+                nofreeze
+              </label>
+            </div>`
+          : nothing
+      }
+      ${
+        this.trace && this.trace.channels > 0
+          ? html`<div class="plc-forces">
+              <span class="plc-force-tag">
+                rec ${this.trace.written} frames · ${this.trace.avail} in ring ·
+                ${this.trace.frameLen}B/frame ${this.trace.frozen ? ' · FROZEN' : nothing}
+              </span>
+              <button class="chip-btn" @click=${() => void this.onTraceRead()}>read</button>
+              <button
+                class="chip-btn"
+                @click=${() => this.ctlOp('trace clear', () => this.ctl.dbgTraceClear())}
+              >
+                stop
+              </button>
+            </div>`
+          : nothing
+      }
+      ${
+        this.watchChs.length > 0
+          ? html`<div class="plc-forces">
+              <span class="plc-dim">watch items:</span>
+              ${this.watchChs.map(
+              (c, i) =>
+                html`<span class="plc-force-tag">
+                  ${c.name} ${c.off}:${c.len}
+                  <button
+                    class="chip-btn"
+                    @click=${() => {
                     this.watchChs.splice(i, 1);
                     this.requestUpdate();
                   }}
-                  >×</button
-                >
-              </span>`,
+                  >
+                    ×
+                  </button>
+                </span>`,
             )}
-            <button class="chip-btn" @click=${() => void this.onWatchAdd()}
-              >add watch</button
-            >
-          </div>`
-        : nothing}
-      ${this.watches && this.watches.length > 0
-        ? html`<div class="plc-forces">
-            ${this.watches.map(
-              (wt) => html`<span class="plc-force-tag">
-                watch h${wt.handle} ${wt.items}×${wt.totalLen}B
-                ${wt.rateHz ? ` · ${wt.rateHz}Hz` : ''}
-                ${wt.stale ? ' · STALE' : ''}
-                ${this.watchVals.get(wt.handle)?.map(
-                  (v) => html` =${v}`,
-                )}
-                <button
-                  class="chip-btn"
-                  title="one-shot read"
-                  @click=${() => void this.onWatchGet(wt.handle)}
-                  >get</button
-                >
-                <button
-                  class="chip-btn"
-                  title=${wt.rateHz ? 'stop streaming' : 'stream at 10 Hz'}
-                  @click=${() =>
+              <button class="chip-btn" @click=${() => void this.onWatchAdd()}>add watch</button>
+            </div>`
+          : nothing
+      }
+      ${
+        this.watches && this.watches.length > 0
+          ? html`<div class="plc-forces">
+              ${this.watches.map(
+              (wt) =>
+                html`<span class="plc-force-tag">
+                  watch h${wt.handle} ${wt.items}×${wt.totalLen}B
+                  ${wt.rateHz ? ` · ${wt.rateHz}Hz` : ''} ${wt.stale ? ' · STALE' : ''}
+                  ${this.watchVals.get(wt.handle)?.map((v) => html` =${v}`)}
+                  <button
+                    class="chip-btn"
+                    title="one-shot read"
+                    @click=${() => void this.onWatchGet(wt.handle)}
+                  >
+                    get
+                  </button>
+                  <button
+                    class="chip-btn"
+                    title=${wt.rateHz ? 'stop streaming' : 'stream at 10 Hz'}
+                    @click=${() =>
                     this.ctlOp('watch stream', () =>
-                      this.ctl.dbgWatchStream(
-                        wt.handle, wt.rateHz ? 0 : 10))}
-                  >${wt.rateHz ? 'stop' : 'stream'}</button
-                >
-                <button
-                  class="chip-btn"
-                  @click=${() =>
-                    this.ctlOp('watch rm', () =>
-                      this.ctl.dbgWatchRemove(wt.handle))}
-                  >×</button
-                >
-              </span>`,
+                      this.ctl.dbgWatchStream(wt.handle, wt.rateHz ? 0 : 10),
+                    )}
+                  >
+                    ${wt.rateHz ? 'stop' : 'stream'}
+                  </button>
+                  <button
+                    class="chip-btn"
+                    @click=${() => this.ctlOp('watch rm', () => this.ctl.dbgWatchRemove(wt.handle))}
+                  >
+                    ×
+                  </button>
+                </span>`,
             )}
-          </div>`
-        : nothing}
+            </div>`
+          : nothing
+      }
       ${this.traceChart()}
-      ${this.traceLines
-        ? html`<details class="plc-trace-raw"><summary class="plc-dim">raw frames</summary>
-            <code class="plc-dbg-hex">${this.traceLines.map(
-              (l) => html`${l}<br />`,
-            )}</code></details>`
-        : nothing}
+      ${
+        this.traceLines
+          ? html`<details class="plc-trace-raw">
+              <summary class="plc-dim">raw frames</summary>
+              <code class="plc-dbg-hex">${this.traceLines.map((l) => html`${l}<br />`)}</code>
+            </details>`
+          : nothing
+      }
       <div class="plc-forces">
         <button
           class="chip-btn"
           title="what the last swap's migrate rules did"
           @click=${() => void this.onStateDiff()}
-          >state.diff</button
         >
-        ${this.stateDiff
-          ? html`<span class="plc-dim">
-              ${this.stateDiff.sameLayout ? 'same-layout' : 'migrated'}
-              · ${this.stateDiff.rules.length} rules</span
-            >`
-          : nothing}
+          state.diff
+        </button>
+        ${
+          this.stateDiff
+            ? html`<span class="plc-dim">
+                ${this.stateDiff.sameLayout ? 'same-layout' : 'migrated'} ·
+                ${this.stateDiff.rules.length} rules</span
+              >`
+            : nothing
+        }
       </div>
-      ${this.stateDiff
-        ? html`<div class="plc-forces">
-            ${this.stateDiff.rules.map(
-              (r) => html`<span class="plc-force-tag">
-                ${DBG_DIFF_KIND[r.kind] ?? r.kind}
-                ${r.oldName || '-'}[${r.oldOff}:${r.oldLen}] →
-                ${r.newName || '-'}[${r.newOff}:${r.newLen}]
-                ${r.sev === 1 ? ' · degraded' : nothing}
-                ${r.sev === 2 ? ' · deny' : nothing}
-              </span>`,
+      ${
+        this.stateDiff
+          ? html`<div class="plc-forces">
+              ${this.stateDiff.rules.map(
+              (r) =>
+                html`<span class="plc-force-tag">
+                  ${DBG_DIFF_KIND[r.kind] ?? r.kind} ${r.oldName || '-'}[${r.oldOff}:${r.oldLen}] →
+                  ${r.newName || '-'}[${r.newOff}:${r.newLen}]
+                  ${r.sev === 1 ? ' · degraded' : nothing} ${r.sev === 2 ? ' · deny' : nothing}
+                </span>`,
             )}
-          </div>`
-        : nothing}
+            </div>`
+          : nothing
+      }
     `;
   }
 
@@ -3323,8 +3894,7 @@ export class TetherPlcIde extends LitElement {
     const s = this.dbgSym;
     if (!s) return;
     try {
-      const b = await this.ctl.dbgRead(s.offset, Math.min(s.size, 256),
-                                     this.dbgSymShadow ? 1 : 0);
+      const b = await this.ctl.dbgRead(s.offset, Math.min(s.size, 256), this.dbgSymShadow ? 1 : 0);
       this.dbgHex = [...b].map((x) => x.toString(16).padStart(2, '0')).join(' ');
       const c = codecForSym(s, this.dbgCodec);
       this.dbgRawVal = `${c.label}: ${safeDecode(c, b.slice(0, c.size))}`;
@@ -3371,8 +3941,7 @@ export class TetherPlcIde extends LitElement {
     const clean = (this.dbgHex ?? '').replace(/\s+/g, '');
     if (!/^[0-9a-f]+$/i.test(clean) || clean.length % 2) return undefined;
     const out = new Uint8Array(clean.length / 2);
-    for (let i = 0; i < out.length; i++)
-      out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16)!;
+    for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16)!;
     return out;
   }
 
@@ -3469,7 +4038,14 @@ export class TetherPlcIde extends LitElement {
     const kind = Number(this.brkKind);
     await this.ctlOp(kind ? 'dbg capture' : 'dbg break', () =>
       (kind ? this.ctl.dbgCapture : this.ctl.dbgBreak).call(
-        this.ctl, taskIdx, s.offset, s.size, Number(this.brkCmp), value));
+        this.ctl,
+        taskIdx,
+        s.offset,
+        s.size,
+        Number(this.brkCmp),
+        value,
+      ),
+    );
   }
 
   private async onDbgBreakExpr(): Promise<void> {
@@ -3482,8 +4058,9 @@ export class TetherPlcIde extends LitElement {
     }
     if (!expr) return;
     const kind = Number(this.brkKind);
-    await this.ctlOp(kind ? 'dbg capture expr' : 'dbg break expr',
-      () => this.ctl.dbgBreakExpr(taskIdx, expr, kind === 1));
+    await this.ctlOp(kind ? 'dbg capture expr' : 'dbg break expr', () =>
+      this.ctl.dbgBreakExpr(taskIdx, expr, kind === 1),
+    );
   }
 
   private onTraceChAdd(): void {
@@ -3499,8 +4076,11 @@ export class TetherPlcIde extends LitElement {
       this.requestUpdate();
       return;
     }
-    this.traceChs.push({ name: this.dbgSymName.trim() || `off${s.offset}`,
-                         off: s.offset, len: s.size });
+    this.traceChs.push({
+      name: this.dbgSymName.trim() || `off${s.offset}`,
+      off: s.offset,
+      len: s.size,
+    });
     this.requestUpdate();
   }
 
@@ -3517,17 +4097,18 @@ export class TetherPlcIde extends LitElement {
       this.requestUpdate();
       return;
     }
-    this.watchChs.push({ name: this.dbgSymName.trim() || `off${s.offset}`,
-                         off: s.offset, len: s.size });
+    this.watchChs.push({
+      name: this.dbgSymName.trim() || `off${s.offset}`,
+      off: s.offset,
+      len: s.size,
+    });
     this.requestUpdate();
   }
 
   private async onWatchAdd(): Promise<void> {
     const items = this.watchChs;
     await this.ctlOp('watch add', async () => {
-      await this.ctl.dbgWatchAdd(
-        items.map((c) => ({ offset: c.off, len: c.len,
-                            name: c.name })));
+      await this.ctl.dbgWatchAdd(items.map((c) => ({ offset: c.off, len: c.len, name: c.name })));
       this.watchChs = [];
     });
   }
@@ -3535,10 +4116,12 @@ export class TetherPlcIde extends LitElement {
   private async onWatchGet(handle: number): Promise<void> {
     await this.ctlOp('watch get', async () => {
       const items = await this.ctl.dbgWatchGet(handle);
-      this.watchVals.set(handle, items.map(
-        (b) => b.length
-          ? [...b].map((x) => x.toString(16).padStart(2, '0')).join('')
-          : 'stale'));
+      this.watchVals.set(
+        handle,
+        items.map((b) =>
+          b.length ? [...b].map((x) => x.toString(16).padStart(2, '0')).join('') : 'stale',
+        ),
+      );
       this.requestUpdate();
     });
   }
@@ -3547,7 +4130,9 @@ export class TetherPlcIde extends LitElement {
     await this.ctlOp('trace arm', () =>
       this.ctl.dbgTraceConf(
         this.traceChs.map((c) => ({ offset: c.off, len: c.len })),
-        this.traceNoFreeze));
+        this.traceNoFreeze,
+      ),
+    );
   }
 
   private async onTraceRead(): Promise<void> {
@@ -3556,11 +4141,12 @@ export class TetherPlcIde extends LitElement {
       this.traceFrames = r.frames;
       this.traceFrameLen = r.frameLen;
       this.traceLines = r.frames.length
-        ? r.frames.slice(0, 8).map(
-            (f) =>
-              `#${f.seq} ${[...f.data]
-                .map((b) => b.toString(16).padStart(2, '0'))
-                .join(' ')}`)
+        ? r.frames
+            .slice(0, 8)
+            .map(
+              (f) =>
+                `#${f.seq} ${[...f.data].map((b) => b.toString(16).padStart(2, '0')).join(' ')}`,
+            )
         : ['(ring empty)'];
       this.requestUpdate();
     });
@@ -3586,7 +4172,9 @@ export class TetherPlcIde extends LitElement {
   private traceChart(): TemplateResult | typeof nothing {
     const frames = this.traceFrames;
     if (!frames?.length || !this.traceChs.length) return nothing;
-    const w = 560, h = 120, pad = 4;
+    const w = 560,
+      h = 120,
+      pad = 4;
     const nCh = Math.min(this.traceChs.length, 8);
     const laneH = (h - pad * 2) / nCh;
     return html`<svg class="plc-trace" width=${w} height=${h}>
@@ -3595,21 +4183,30 @@ export class TetherPlcIde extends LitElement {
           .map((f) => this.traceChannelValue(f, ch))
           .filter((v): v is number => v !== undefined);
         if (vals.length < 2) return nothing;
-        let lo = Infinity, hi = -Infinity;
-        for (const v of vals) { if (v < lo) lo = v; if (v > hi) hi = v; }
-        if (lo === hi) { lo -= 1; hi += 1; }
+        let lo = Infinity,
+          hi = -Infinity;
+        for (const v of vals) {
+          if (v < lo) lo = v;
+          if (v > hi) hi = v;
+        }
+        if (lo === hi) {
+          lo -= 1;
+          hi += 1;
+        }
         const y0 = pad + ch * laneH;
-        const pts = vals.map((v, i) => {
-          const x = pad + (i / (vals.length - 1)) * (w - pad * 2);
-          const y = y0 + laneH - 2 - ((v - lo) / (hi - lo)) * (laneH - 4);
-          return `${x.toFixed(1)},${y.toFixed(1)}`;
-        }).join(' ');
+        const pts = vals
+          .map((v, i) => {
+            const x = pad + (i / (vals.length - 1)) * (w - pad * 2);
+            const y = y0 + laneH - 2 - ((v - lo) / (hi - lo)) * (laneH - 4);
+            return `${x.toFixed(1)},${y.toFixed(1)}`;
+          })
+          .join(' ');
         const hue = (ch * 67) % 360;
         return html`<g>
-          <text x=${pad + 2} y=${y0 + 10} class="plc-trace-lbl"
-            fill="hsl(${hue},70%,65%)">${this.traceChs[ch]!.name}</text>
-          <polyline points=${pts} fill="none"
-            stroke="hsl(${hue},70%,60%)" stroke-width="1" />
+          <text x=${pad + 2} y=${y0 + 10} class="plc-trace-lbl" fill="hsl(${hue},70%,65%)"
+            >${this.traceChs[ch]!.name}</text
+          >
+          <polyline points=${pts} fill="none" stroke="hsl(${hue},70%,60%)" stroke-width="1" />
         </g>`;
       })}
     </svg>`;
@@ -3686,7 +4283,14 @@ export class TetherPlcIde extends LitElement {
         entries.length
           ? html`<table class="plc-table">
               <thead>
-                <tr><th>index</th><th>sub</th><th>name</th><th>access</th><th>value</th><th></th></tr>
+                <tr>
+                  <th>index</th>
+                  <th>sub</th>
+                  <th>name</th>
+                  <th>access</th>
+                  <th>value</th>
+                  <th></th>
+                </tr>
               </thead>
               <tbody>
                 ${entries.map((e) => {
@@ -3701,25 +4305,28 @@ export class TetherPlcIde extends LitElement {
                     <td>
                       ${vals[key] !== undefined ? html`<code>${vals[key]}</code>` : '—'}
                       ${odTy !== undefined ? html`<span class="plc-dim"> ${odTypeName(odTy)}</span>` : nothing}
-                      ${e.access !== 0
-                        ? html`<input
-                            class="fbd-in plc-force-in"
-                            placeholder=${odTy !== undefined ? odTypeName(odTy) : 'hex'}
-                            title=${odTy !== undefined ? `write as ${odTypeName(odTy)}` : 'write as hex'}
-                            .value=${this.odWriteHex[key] ?? ''}
-                            @input=${(ev: Event) =>
+                      ${
+                        e.access !== 0
+                          ? html`<input
+                              class="fbd-in plc-force-in"
+                              placeholder=${odTy !== undefined ? odTypeName(odTy) : 'hex'}
+                              title=${odTy !== undefined ? `write as ${odTypeName(odTy)}` : 'write as hex'}
+                              .value=${this.odWriteHex[key] ?? ''}
+                              @input=${(ev: Event) =>
                               (this.odWriteHex[key] = (ev.target as HTMLInputElement).value)}
-                          />`
-                        : nothing}
+                            />`
+                          : nothing
+                      }
                     </td>
                     <td>
                       <button class="chip-btn" @click=${() => void this.onOdRead(e)}>read</button>
-                      ${e.access !== 0
-                        ? html`<button
-                            class="chip-btn"
-                            @click=${() => void this.onOdWrite(e)}
-                          >write</button>`
-                        : nothing}
+                      ${
+                        e.access !== 0
+                          ? html`<button class="chip-btn" @click=${() => void this.onOdWrite(e)}>
+                              write
+                            </button>`
+                          : nothing
+                      }
                     </td>
                   </tr>`;
                 })}
@@ -3789,15 +4396,12 @@ export class TetherPlcIde extends LitElement {
     const raw = this.odRaw?.[key];
     const declaredLen = e.len || raw?.length || 0;
     const odType = this.odTypes?.[key];
-    const codec =
-      declaredLen > 0
-        ? defaultCodec(declaredLen)
-        : undefined;
+    const codec = declaredLen > 0 ? defaultCodec(declaredLen) : undefined;
     try {
       if (odType !== undefined) bytes = odEncode(odType, text);
       else {
-        const looksNumeric = /^-?[\d.]+\s*(ms|s|m|us|ns)?$/i.test(text) ||
-          /^(true|false|on|off)$/i.test(text);
+        const looksNumeric =
+          /^-?[\d.]+\s*(ms|s|m|us|ns)?$/i.test(text) || /^(true|false|on|off)$/i.test(text);
         if (codec && looksNumeric) bytes = codec.encode(text);
         else bytes = parseHex(text);
       }
@@ -3834,7 +4438,8 @@ export class TetherPlcIde extends LitElement {
     const draft = this.mapEdit ?? this.genMap?.text ?? this.project.deployMap ?? '';
     const m = parseDeployMap(draft);
     this.mapRows = {
-      inSize: m.inSize, outSize: m.outSize,
+      inSize: m.inSize,
+      outSize: m.outSize,
       channels: m.channels.map((c) => ({ ...c })),
       bindings: m.bindings.map((b) => ({ ...b })),
     };
@@ -3855,7 +4460,10 @@ export class TetherPlcIde extends LitElement {
     const c = r.channels[Number(m[1])];
     if (!c) return;
     const f = m[2]!;
-    if (f === 'dir') { if (v === 'in' || v === 'out') c.dir = v; return; }
+    if (f === 'dir') {
+      if (v === 'in' || v === 'out') c.dir = v;
+      return;
+    }
     if (f === 'off' || f === 'size') {
       const n = Number(v);
       if (Number.isFinite(n) && n >= 0) (c as unknown as Record<string, number>)[f] = Math.floor(n);
@@ -3865,14 +4473,20 @@ export class TetherPlcIde extends LitElement {
       if (v) (c as unknown as Record<string, string>)[f] = v;
       else delete (c as unknown as Record<string, string>)[f];
       if (f === 'key' && !c.pdo) c.key = v;
-      if (f === 'pdo' && v) { delete (c as unknown as Record<string, string>).key; c.key = v; }
+      if (f === 'pdo' && v) {
+        delete (c as unknown as Record<string, string>).key;
+        c.key = v;
+      }
     }
     this.requestUpdate();
   }
 
   private mapBindRow(i: number, k: 'at' | 'key', v: string): void {
     const b = this.mapRows?.bindings[i];
-    if (b) { b[k] = v; this.requestUpdate(); }
+    if (b) {
+      b[k] = v;
+      this.requestUpdate();
+    }
   }
 
   private addMapChannel(): void {
@@ -3896,8 +4510,11 @@ export class TetherPlcIde extends LitElement {
     const r = this.mapRows;
     if (!r) return;
     this.mapEdit = serializeDeployMap({
-      inSize: r.inSize, outSize: r.outSize,
-      channels: r.channels, bindings: r.bindings, safety: [],
+      inSize: r.inSize,
+      outSize: r.outSize,
+      channels: r.channels,
+      bindings: r.bindings,
+      safety: [],
     });
     this.mapRows = undefined;
     this.mapViolations = undefined;
@@ -3907,54 +4524,122 @@ export class TetherPlcIde extends LitElement {
   /** editable channel/binding grid — the graphical deploy-map editor. */
   private mapRowsEditor(): TemplateResult {
     const r = this.mapRows!;
-    const cell = (i: number, k: string, v: string | number | undefined, w = 6) => html`
-      <input class="plc-mapcell" style="width:${w}ch" .value=${v ?? ''}
-        @change=${(e: Event) => this.mapRow(`${i}:${k}`, (e.target as HTMLInputElement).value)} />`;
-    return html`
-      <div class="plc-mapgrid">
-        <div class="plc-mapgrid-row">
-          <label>image in <input class="plc-mapcell" type="number" .value=${r.inSize ?? ''}
-            @change=${(e: Event) => this.mapRow('inSize', (e.target as HTMLInputElement).value)} /></label>
-          <label>out <input class="plc-mapcell" type="number" .value=${r.outSize ?? ''}
-            @change=${(e: Event) => this.mapRow('outSize', (e.target as HTMLInputElement).value)} /></label>
-          <button class="chip-btn" @click=${() => this.addMapChannel()}>+ channel</button>
-          <button class="chip-btn" @click=${() => this.addMapBind()}>+ bind</button>
-          <button class="chip-btn primary" @click=${() => this.applyMapRows()}>apply to text</button>
-          <button class="chip-btn" @click=${() => { this.mapRows = undefined; this.requestUpdate(); }}>cancel</button>
-        </div>
-        <table class="plc-table plc-mapgrid-tbl">
-          <thead><tr><th>dir</th><th>off</th><th>size</th><th>key/pdo</th><th>type</th><th>safe</th><th></th></tr></thead>
-          <tbody>
-            ${r.channels.map((c, i) => html`
-              <tr>
-                <td><select class="plc-mapcell" .value=${c.dir}
-                  @change=${(e: Event) => this.mapRow(`${i}:dir`, (e.target as HTMLSelectElement).value)}>
-                  <option value="in">in</option><option value="out">out</option>
-                </select></td>
-                <td>${cell(i, 'off', c.off)}</td>
-                <td>${cell(i, 'size', c.size)}</td>
-                <td>${cell(i, c.pdo ? 'pdo' : 'key', c.pdo ?? c.key, 14)}</td>
-                <td>${cell(i, 'type', c.type, 8)}</td>
-                <td>${cell(i, 'safe', c.safe, 8)}</td>
-                <td><button class="chip-btn" @click=${() => this.delMapRow('chan', i)}>✕</button></td>
-              </tr>`)}
-          </tbody>
-        </table>
-        ${r.bindings.length ? html`
-          <table class="plc-table plc-mapgrid-tbl">
-            <thead><tr><th>bind at</th><th>→ key</th><th></th></tr></thead>
-            <tbody>
-              ${r.bindings.map((b, i) => html`
-                <tr>
-                  <td><input class="plc-mapcell" style="width:12ch" .value=${b.at}
-                    @change=${(e: Event) => this.mapBindRow(i, 'at', (e.target as HTMLInputElement).value)} /></td>
-                  <td><input class="plc-mapcell" style="width:16ch" .value=${b.key}
-                    @change=${(e: Event) => this.mapBindRow(i, 'key', (e.target as HTMLInputElement).value)} /></td>
-                  <td><button class="chip-btn" @click=${() => this.delMapRow('bind', i)}>✕</button></td>
-                </tr>`)}
-            </tbody>
-          </table>` : nothing}
-      </div>`;
+    const cell = (i: number, k: string, v: string | number | undefined, w = 6) =>
+      html` <input
+        class="plc-mapcell"
+        style="width:${w}ch"
+        .value=${v ?? ''}
+        @change=${(e: Event) => this.mapRow(`${i}:${k}`, (e.target as HTMLInputElement).value)}
+      />`;
+    return html` <div class="plc-mapgrid">
+      <div class="plc-mapgrid-row">
+        <label
+          >image in
+          <input
+            class="plc-mapcell"
+            type="number"
+            .value=${r.inSize ?? ''}
+            @change=${(e: Event) => this.mapRow('inSize', (e.target as HTMLInputElement).value)}
+        /></label>
+        <label
+          >out
+          <input
+            class="plc-mapcell"
+            type="number"
+            .value=${r.outSize ?? ''}
+            @change=${(e: Event) => this.mapRow('outSize', (e.target as HTMLInputElement).value)}
+        /></label>
+        <button class="chip-btn" @click=${() => this.addMapChannel()}>+ channel</button>
+        <button class="chip-btn" @click=${() => this.addMapBind()}>+ bind</button>
+        <button class="chip-btn primary" @click=${() => this.applyMapRows()}>apply to text</button>
+        <button
+          class="chip-btn"
+          @click=${() => {
+            this.mapRows = undefined;
+            this.requestUpdate();
+          }}
+        >
+          cancel
+        </button>
+      </div>
+      <table class="plc-table plc-mapgrid-tbl">
+        <thead>
+          <tr>
+            <th>dir</th>
+            <th>off</th>
+            <th>size</th>
+            <th>key/pdo</th>
+            <th>type</th>
+            <th>safe</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${r.channels.map(
+              (c, i) =>
+                html` <tr>
+                  <td>
+                    <select
+                      class="plc-mapcell"
+                      .value=${c.dir}
+                      @change=${(e: Event) => this.mapRow(`${i}:dir`, (e.target as HTMLSelectElement).value)}
+                    >
+                      <option value="in">in</option>
+                      <option value="out">out</option>
+                    </select>
+                  </td>
+                  <td>${cell(i, 'off', c.off)}</td>
+                  <td>${cell(i, 'size', c.size)}</td>
+                  <td>${cell(i, c.pdo ? 'pdo' : 'key', c.pdo ?? c.key, 14)}</td>
+                  <td>${cell(i, 'type', c.type, 8)}</td>
+                  <td>${cell(i, 'safe', c.safe, 8)}</td>
+                  <td>
+                    <button class="chip-btn" @click=${() => this.delMapRow('chan', i)}>✕</button>
+                  </td>
+                </tr>`,
+            )}
+        </tbody>
+      </table>
+      ${
+          r.bindings.length
+            ? html` <table class="plc-table plc-mapgrid-tbl">
+                <thead>
+                  <tr>
+                    <th>bind at</th>
+                    <th>→ key</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${r.bindings.map(
+                (b, i) =>
+                  html` <tr>
+                    <td>
+                      <input
+                        class="plc-mapcell"
+                        style="width:12ch"
+                        .value=${b.at}
+                        @change=${(e: Event) => this.mapBindRow(i, 'at', (e.target as HTMLInputElement).value)}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        class="plc-mapcell"
+                        style="width:16ch"
+                        .value=${b.key}
+                        @change=${(e: Event) => this.mapBindRow(i, 'key', (e.target as HTMLInputElement).value)}
+                      />
+                    </td>
+                    <td>
+                      <button class="chip-btn" @click=${() => this.delMapRow('bind', i)}>✕</button>
+                    </td>
+                  </tr>`,
+              )}
+                </tbody>
+              </table>`
+            : nothing
+        }
+    </div>`;
   }
 
   private ioMapCard(): TemplateResult {
@@ -3996,18 +4681,44 @@ export class TetherPlcIde extends LitElement {
       <div class="plc-ops">
         <button class="chip-btn" @click=${() => void this.onIoMap()}>load</button>
         <button class="chip-btn" @click=${() => void this.onGenMap()}>generate</button>
-        <button class="chip-btn" ?disabled=${!draft.trim()} @click=${() => this.onValidateMap()}>validate</button>
-        <button class="chip-btn primary" ?disabled=${!draft.trim()} @click=${() => this.onSaveMap()}>save for deploy</button>
-        ${saved ? html`<button class="chip-btn" @click=${() => { this.project.deployMap = undefined; this.mapEdit = undefined; this.genMap = undefined; this.save(); }}>clear</button>` : nothing}
+        <button class="chip-btn" ?disabled=${!draft.trim()} @click=${() => this.onValidateMap()}>
+          validate
+        </button>
+        <button
+          class="chip-btn primary"
+          ?disabled=${!draft.trim()}
+          @click=${() => this.onSaveMap()}
+        >
+          save for deploy
+        </button>
+        ${
+          saved
+            ? html`<button
+                class="chip-btn"
+                @click=${() => {
+                  this.project.deployMap = undefined;
+                  this.mapEdit = undefined;
+                  this.genMap = undefined;
+                  this.save();
+                }}
+              >
+                clear
+              </button>`
+            : nothing
+        }
       </div>
       ${
         this.genMap?.warnings.length
-          ? html`<ul class="plc-od-warn">${this.genMap.warnings.map((w) => html`<li>${w}</li>`)}</ul>`
+          ? html`<ul class="plc-od-warn">
+              ${this.genMap.warnings.map((w) => html`<li>${w}</li>`)}
+            </ul>`
           : nothing
       }
       ${
         this.mapViolations?.length
-          ? html`<ul class="plc-od-warn">${this.mapViolations.map((x) => html`<li>[${x.rule}] ${x.detail}</li>`)}</ul>`
+          ? html`<ul class="plc-od-warn">
+              ${this.mapViolations.map((x) => html`<li>[${x.rule}] ${x.detail}</li>`)}
+            </ul>`
           : nothing
       }
       ${
@@ -4018,35 +4729,64 @@ export class TetherPlcIde extends LitElement {
             </ul>`
           : nothing
       }
-      <textarea class="plc-mapedit" rows="10" spellcheck="false"
+      <textarea
+        class="plc-mapedit"
+        rows="10"
+        spellcheck="false"
         placeholder="deploy map (bridge format) — generate drafts channels + binds from project AT bindings; pdo= endpoints come from device blocks"
         .value=${draft}
-        @input=${(e: Event) => { this.mapEdit = (e.target as HTMLTextAreaElement).value; this.mapViolations = undefined; }}></textarea>
-      ${this.mapRows ? this.mapRowsEditor() : html`
-        <button class="chip-btn" ?disabled=${!draft.trim()} @click=${() => this.openMapRows()}>edit channels…</button>`}
+        @input=${(e: Event) => {
+          this.mapEdit = (e.target as HTMLTextAreaElement).value;
+          this.mapViolations = undefined;
+        }}
+      ></textarea>
+      ${
+        this.mapRows
+          ? this.mapRowsEditor()
+          : html` <button
+              class="chip-btn"
+              ?disabled=${!draft.trim()}
+              @click=${() => this.openMapRows()}
+            >
+              edit channels…
+            </button>`
+      }
       ${
         chans.length
-          ? html`
-              <p class="plc-dim">
-                image in=${m.inSize ?? '?'}B out=${m.outSize ?? '?'}B${m.hash ? html` · hash ${m.hash.slice(0, 12)}…` : nothing}
+          ? html` <p class="plc-dim">
+                image in=${m.inSize ?? '?'}B
+                out=${m.outSize ?? '?'}B${m.hash ? html` · hash ${m.hash.slice(0, 12)}…` : nothing}
                 ${m.bindings.length ? html` · ${m.bindings.length} binds` : nothing}
               </p>
               <table class="plc-table">
                 <thead>
-                  <tr><th>dir</th><th>off</th><th>size</th><th>key</th><th>pdo</th><th>type</th><th>safe</th></tr>
+                  <tr>
+                    <th>dir</th>
+                    <th>off</th>
+                    <th>size</th>
+                    <th>key</th>
+                    <th>pdo</th>
+                    <th>type</th>
+                    <th>safe</th>
+                  </tr>
                 </thead>
                 <tbody>
-                  ${dirRows('in').map(chanRow('in'))}
-                  ${dirRows('out').map(chanRow('out'))}
+                  ${dirRows('in').map(chanRow('in'))} ${dirRows('out').map(chanRow('out'))}
                 </tbody>
               </table>
               ${
                 m.bindings.length
-                  ? html`<details class="plc-raw"><summary>binds (${m.bindings.length})</summary>
+                  ? html`<details class="plc-raw">
+                      <summary>binds (${m.bindings.length})</summary>
                       <table class="plc-table">
                         <tbody>
                           ${m.bindings.map(
-                            (b) => html`<tr><td>${b.at}</td><td>→</td><td>${b.key}</td></tr>`,
+                            (b) =>
+                              html`<tr>
+                                <td>${b.at}</td>
+                                <td>→</td>
+                                <td>${b.key}</td>
+                              </tr>`,
                           )}
                         </tbody>
                       </table>
@@ -4058,28 +4798,39 @@ export class TetherPlcIde extends LitElement {
                   ? html`<ul class="plc-od-warn">
                       ${overlaps.map((i) => {
                         const c = chans[i]!;
-                        return html`<li>%${c.dir === 'in' ? 'I' : 'Q'}[${c.off}..${c.off + c.size}) shared by ${c.key} and ${overlaps
-                          .filter((j) => j !== i && rangesOverlap(chans[j]!, c))
-                          .map((j) => chans[j]!.key)
-                          .join(', ')}</li>`;
+                        return html`<li>
+                          %${c.dir === 'in' ? 'I' : 'Q'}[${c.off}..${c.off + c.size}) shared by
+                          ${c.key} and
+                          ${overlaps
+                            .filter((j) => j !== i && rangesOverlap(chans[j]!, c))
+                            .map((j) => chans[j]!.key)
+                            .join(', ')}
+                        </li>`;
                       })}
                     </ul>`
                   : nothing
               }`
-          : html`<p class="plc-dim">Deploy map (bridge format) of the running package — channel image ranges, PDO endpoints, safe-state policy, safety keys.</p>`
+          : html`<p class="plc-dim">
+              Deploy map (bridge format) of the running package — channel image ranges, PDO
+              endpoints, safe-state policy, safety keys.
+            </p>`
       }
       ${(() => {
         return bindingsEx.length
           ? html`<details class="plc-raw">
-              <summary>project bindings (${bindingsEx.length}${stBinds.length ? `, incl. ${stBinds.length} ST AT` : ''})</summary>
+              <summary>
+                project bindings
+                (${bindingsEx.length}${stBinds.length ? `, incl. ${stBinds.length} ST AT` : ''})
+              </summary>
               <table class="plc-table">
                 <tbody>
                   ${bindingsEx.map(
-                    (b) => html`<tr>
-                      <td>${b.name}</td>
-                      <td class="plc-dim">${b.at}</td>
-                      <td class="plc-dim">${b.type ?? ''}</td>
-                    </tr>`,
+                    (b) =>
+                      html`<tr>
+                        <td>${b.name}</td>
+                        <td class="plc-dim">${b.at}</td>
+                        <td class="plc-dim">${b.type ?? ''}</td>
+                      </tr>`,
                   )}
                 </tbody>
               </table>
@@ -4162,7 +4913,9 @@ export class TetherPlcIde extends LitElement {
       ${
         lines.length
           ? html`<pre class="plc-journal">${lines.join('\n')}</pre>`
-          : html`<p class="plc-dim">Durable audit tail — every management and debug op with client, uid and result.</p>`
+          : html`<p class="plc-dim">
+              Durable audit tail — every management and debug op with client, uid and result.
+            </p>`
       }
     `;
   }
@@ -4185,17 +4938,17 @@ export class TetherPlcIde extends LitElement {
     this.flushStEditors();
     try {
       await this.ensureLibSources();
-      const r = await compileProject(this.ctl.url, this.project, true);
+      const r = await compileProject(this.ctl, this.project, true);
       this.diags = r.diags;
       if (!r.ok || !r.package) {
         this.flash(r.ok ? 'build ok (no package)' : `build failed: ${r.errors} error(s)`);
         return;
       }
-      /* saved deploy map → DEPLOY_MAP section (0x31) via /pkgmap */
+      /* saved deploy map → DEPLOY_MAP section (0x31) via the pkgmap meta-op */
       let pkg = r.package;
       if (this.project.deployMap?.trim()) {
         this.flash('injecting deploy map…');
-        pkg = await injectDeployMap(this.ctl.url, pkg, this.project.deployMap);
+        pkg = await injectDeployMap(this.ctl, pkg, this.project.deployMap);
       }
       this.flash('deploying…');
       this.deployFrac = 0;
@@ -4227,17 +4980,17 @@ export class TetherPlcIde extends LitElement {
   }
 
   private setCtlUrl(url: string): void {
-    this.evSrc?.close();
-    this.evSrc = undefined;
+    this.evOff?.();
+    this.evOff = undefined;
     this.ctl = new PlcCtl(url);
     localStorage.setItem('tether.plc.ctlUrl', url);
     this.refreshCtl();
   }
 
-  /** SSE subscription to runtime events; coalesces refresh storms. */
+  /** /ws event subscription; coalesces refresh storms. */
   private openEvents(): void {
-    if (this.evSrc) return;
-    this.evSrc = this.ctl.events((e) => {
+    if (this.evOff) return;
+    this.evOff = this.ctl.events((e) => {
       if (e.type === EV.FAULT && e.payload.length >= 4) {
         const rc = new DataView(e.payload.buffer, e.payload.byteOffset).getInt32(0, true);
         this.flash(`plc fault rc=${rc}`);
@@ -4258,7 +5011,8 @@ export class TetherPlcIde extends LitElement {
           vals.push(
             [...e.payload.slice(o + 4, o + 4 + l)]
               .map((b) => b.toString(16).padStart(2, '0'))
-              .join(''));
+              .join(''),
+          );
           o += 4 + l;
         }
         this.watchVals.set(h, vals);
@@ -4268,7 +5022,8 @@ export class TetherPlcIde extends LitElement {
         const d = new DataView(e.payload.buffer, e.payload.byteOffset);
         this.flash(
           `event #${d.getUint32(0, true)} state=${d.getUint32(4, true)} ` +
-          `sev=${d.getUint32(16, true)}`);
+            `sev=${d.getUint32(16, true)}`,
+        );
       }
       if (
         e.type === EV.PROG_TRANSITION ||
@@ -4289,32 +5044,58 @@ export class TetherPlcIde extends LitElement {
     this.ctlOk = await this.ctl.health();
     this.ctlErr = '';
     if (!this.ctlOk) {
-      this.evSrc?.close();
-      this.evSrc = undefined;
+      this.evOff?.();
+      this.evOff = undefined;
     }
     if (this.ctlOk) {
       this.openEvents();
+      /* one-shot remote hydrate: the project dir's manifest.ui is the
+         persisted document — adopt it unless the user already edited
+         locally this session */
+      if (!this.remoteLoaded) {
+        this.remoteLoaded = true;
+        if (!this.localDirty) {
+          void loadRemoteProject(this.ctl).then((rp) => {
+            if (rp) {
+              this.project = rp;
+              saveProject(rp);
+              this.requestUpdate();
+            }
+          });
+        }
+      }
       try {
-        [this.prog, this.rt, this.retain, this.dbg, this.forces,
-          this.breaks, this.trace, this.watches, this.shadow,
-          this.alarms, this.alarmStats, this.alarmHist,
-          this.histChans, this.mqttConns] =
-          await Promise.all([
-            this.ctl.progStatus().catch(() => undefined),
-            this.ctl.rtStatus().catch(() => undefined),
-            this.ctl.retainStatus().catch(() => undefined),
-            this.ctl.dbgState().catch(() => undefined),
-            this.ctl.dbgForceList().catch(() => undefined),
-            this.ctl.dbgBreakList().catch(() => undefined),
-            this.ctl.dbgTraceStatus().catch(() => undefined),
-            this.ctl.dbgWatchList().catch(() => undefined),
-            this.ctl.shadowStatus().catch(() => undefined),
-            this.ctl.evlogList().catch(() => undefined),
-            this.ctl.evlogStats().catch(() => undefined),
-            this.ctl.evlogHistory(24).catch(() => undefined),
-            this.ctl.histList().catch(() => undefined),
-            this.ctl.mqttStatus().catch(() => undefined),
-          ]);
+        [
+          this.prog,
+          this.rt,
+          this.retain,
+          this.dbg,
+          this.forces,
+          this.breaks,
+          this.trace,
+          this.watches,
+          this.shadow,
+          this.alarms,
+          this.alarmStats,
+          this.alarmHist,
+          this.histChans,
+          this.mqttConns,
+        ] = await Promise.all([
+          this.ctl.progStatus().catch(() => undefined),
+          this.ctl.rtStatus().catch(() => undefined),
+          this.ctl.retainStatus().catch(() => undefined),
+          this.ctl.dbgState().catch(() => undefined),
+          this.ctl.dbgForceList().catch(() => undefined),
+          this.ctl.dbgBreakList().catch(() => undefined),
+          this.ctl.dbgTraceStatus().catch(() => undefined),
+          this.ctl.dbgWatchList().catch(() => undefined),
+          this.ctl.shadowStatus().catch(() => undefined),
+          this.ctl.evlogList().catch(() => undefined),
+          this.ctl.evlogStats().catch(() => undefined),
+          this.ctl.evlogHistory(24).catch(() => undefined),
+          this.ctl.histList().catch(() => undefined),
+          this.ctl.mqttStatus().catch(() => undefined),
+        ]);
         this.shadowDiffs = this.shadow?.loaded
           ? await this.ctl.shadowCompare().catch(() => undefined)
           : undefined;
@@ -4323,9 +5104,8 @@ export class TetherPlcIde extends LitElement {
         if (this.pane === 'events' && this.mqttConns?.length) {
           const conns = this.mqttConns.slice(0, 8);
           const jr = await Promise.all(
-            conns.map((c) =>
-              this.ctl.mqttJournal(c.handle, 0, 64)
-                .catch(() => undefined)));
+            conns.map((c) => this.ctl.mqttJournal(c.handle, 0, 64).catch(() => undefined)),
+          );
           jr.forEach((j, i) => {
             const c = conns[i];
             if (j && c) this.mqttJournals.set(c.handle, j);

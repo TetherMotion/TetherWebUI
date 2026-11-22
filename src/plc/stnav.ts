@@ -19,7 +19,7 @@ export interface StWorld {
   stSources: Record<string, string>;
   /** synthetic library decls parsed from stSources */
   libPous: Pou[];
-  /** catalog-declared FBs (proxy /blocks) — name + signature text */
+  /** catalog-declared FBs (/ws blocks meta-op) — name + signature text */
   catalogSigs?: Record<string, string>;
 }
 

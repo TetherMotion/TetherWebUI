@@ -1,9 +1,12 @@
 /**
- * PlcCtl — browser client for the tether-plc control channel via
- * tplc-ctl-proxy (POST /ctl = one ctl frame round-trip, octet-stream).
- * Frame format: [u16 type][u16 flags][u32 len][u64 req][payload LE].
+ * PlcCtl — browser client for the tether-plc control channel over the
+ * `tplc serve` /ws WebSocket (see ws.ts). Binary messages carry the
+ * native ctl frame: [u16 type][u16 flags][u32 len][u64 req][payload LE].
  * Error replies carry flags bit15 + TplcCtlError{code,subcode,msg}.
+ * Text messages carry JSON meta-ops (compile/blocks/libsrc/pkgmap).
  */
+import { PlcWs } from './ws';
+export { CtlError, WsError } from './ws';
 
 export const CTL = {
   HELLO: 0x0101,
@@ -82,9 +85,7 @@ export const CTL = {
   MQTT_JOURNAL: 0x0f21,
 } as const;
 
-const F_ERROR = 1 << 15;
-
-/** unsolicited event types (msg_type range 0x0E00, pushed via /events SSE) */
+/** unsolicited event types (msg_type range 0x0E00, pushed over /ws) */
 export const EV = {
   PROG_TRANSITION: 0x0e01,
   FAULT: 0x0e02,
@@ -96,16 +97,6 @@ export const EV = {
 export interface CtlEvent {
   type: number;
   payload: Uint8Array;
-}
-
-export class CtlError extends Error {
-  constructor(
-    public code: number,
-    public subcode: number,
-    msg: string,
-  ) {
-    super(`ctl ${code}: ${msg}`);
-  }
 }
 
 export interface CtlReply {
@@ -200,8 +191,8 @@ export interface EvlogInfo {
   id: number;
   cls: number;
   eventId: number;
-  severity: number;   // 0 verbose .. 4 critical
-  state: number;      // 1 raised, 2 cleared, 3 confirmed
+  severity: number; // 0 verbose .. 4 critical
+  state: number; // 1 raised, 2 cleared, 3 confirmed
   args: number;
   raisedNs: bigint;
   clearedNs: bigint;
@@ -244,7 +235,7 @@ export interface MqttConn {
   state: number;
   journalCount: number;
   port: number;
-  transport: number;   // 0 auto 1 tcp 2 ssl 3 ws 4 wss
+  transport: number; // 0 auto 1 tcp 2 ssl 3 ws 4 wss
   tls: number;
   mqttVersion: number;
   host: string;
@@ -253,7 +244,7 @@ export interface MqttConn {
 
 /** one journaled inbound MQTT message (MQTT_JOURNAL entry) */
 export interface MqttJournalEntry {
-  tsMs: bigint;        // wall-clock ms since epoch
+  tsMs: bigint; // wall-clock ms since epoch
   qos: number;
   retain: number;
   msgid: number;
@@ -382,8 +373,6 @@ export interface RetainStatus {
   losses: bigint;
 }
 
-let reqId = 1n;
-
 function u32(v: number): Uint8Array {
   const b = new Uint8Array(4);
   new DataView(b.buffer).setUint32(0, v, true);
@@ -396,74 +385,44 @@ function u64(v: bigint | number): Uint8Array {
   return b;
 }
 
-function frame(type: number, payload: Uint8Array): ArrayBuffer {
-  const b = new Uint8Array(16 + payload.length);
-  const d = new DataView(b.buffer);
-  d.setUint16(0, type, true);
-  d.setUint32(4, payload.length, true);
-  d.setBigUint64(8, reqId++, true);
-  b.set(payload, 16);
-  return b.buffer;
-}
-
 const cstr = (b: Uint8Array): string => {
   const n = b.indexOf(0);
   return new TextDecoder().decode(n < 0 ? b : b.subarray(0, n));
 };
 
 export class PlcCtl {
-  constructor(public url = localStorage.getItem('tether.plc.ctlUrl') ?? 'http://127.0.0.1:8089') {}
+  private _ws?: PlcWs;
 
-  async call(type: number, payload: Uint8Array = new Uint8Array()): Promise<CtlReply> {
-    const r = await fetch(`${this.url}/ctl`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: frame(type, payload),
-    });
-    if (!r.ok) throw new Error(`proxy ${r.status}: ${await r.text()}`);
-    const buf = new Uint8Array(await r.arrayBuffer());
-    if (buf.length < 16) throw new Error('short ctl frame');
-    const d = new DataView(buf.buffer);
-    const rep: CtlReply = {
-      type: d.getUint16(0, true),
-      flags: d.getUint16(2, true),
-      req: d.getBigUint64(8, true),
-      payload: buf.subarray(16),
-    };
-    if (rep.flags & F_ERROR) {
-      const p = rep.payload;
-      const ml = p.length >= 10 ? new DataView(p.buffer, p.byteOffset + 8).getUint16(0, true) : 0;
-      throw new CtlError(
-        p.length >= 8 ? new DataView(p.buffer, p.byteOffset).getInt32(0, true) : -1,
-        p.length >= 8 ? new DataView(p.buffer, p.byteOffset).getUint32(4, true) : 0,
-        cstr(p.subarray(10, 10 + ml)),
-      );
-    }
-    return rep;
+  constructor(
+    public url = localStorage.getItem('tether.plc.ctlUrl') ?? 'http://127.0.0.1:8089',
+    ws?: PlcWs,
+  ) {
+    this._ws = ws;
   }
 
-  /** subscribe to runtime events; caller owns closing the EventSource. */
-  events(onEvent: (e: CtlEvent) => void): EventSource {
-    const es = new EventSource(`${this.url}/events`);
-    es.onmessage = (m: MessageEvent<string>) => {
-      try {
-        const j = JSON.parse(m.data) as { type: number; payload: string };
-        if (!(j.type & 0x0e00)) return;
-        const bin = atob(j.payload ?? '');
-        const payload = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) payload[i] = bin.charCodeAt(i);
-        onEvent({ type: j.type, payload });
-      } catch {
-        /* malformed line */
-      }
-    };
-    return es;
+  /** the shared /ws channel (ctl frames + JSON meta-ops). */
+  get ws(): PlcWs {
+    return (this._ws ??= new PlcWs(this.url));
+  }
+
+  async call(type: number, payload: Uint8Array = new Uint8Array()): Promise<CtlReply> {
+    return this.ws.sendCtl(type, payload);
+  }
+
+  /** JSON meta-op on the same socket (compile/blocks/libsrc/pkgmap). */
+  meta<T = unknown>(op: string, fields: Record<string, unknown> = {}): Promise<T> {
+    return this.ws.meta<T>(op, fields);
+  }
+
+  /** subscribe to runtime events; returns an unsubscribe function. */
+  events(onEvent: (e: CtlEvent) => void): () => void {
+    return this.ws.onEvent(onEvent);
   }
 
   /**
-   * Proxy reachability — any HTTP response counts, including the proxy's
-   * 503 "backend down" from /health (that status means tplccd is absent,
-   * not that the proxy is unreachable; /compile and /blocks still work).
+   * Backend reachability — any HTTP response counts; /health is a pure
+   * liveness probe (200 even when the ctl runtime is down, in which
+   * case /ws meta-ops still work and ctl frames get F_ERROR replies).
    */
   async health(): Promise<boolean> {
     try {
@@ -485,13 +444,14 @@ export class PlcCtl {
       /* the task array trails the versioned base struct: v1 = 104 B
          base/112 B stride, v2 = 296/136, v3 = 336/136 (shadow tail).
          Detect by exact reply length. */
-      const lay =
-        [
-          { base: 336, stride: 136 },
-          { base: 296, stride: 136 },
-          { base: 104, stride: 112 },
-        ].find((c) => r.payload.length === c.base + taskCount * c.stride) ??
-        { base: 104, stride: 112 };
+      const lay = [
+        { base: 336, stride: 136 },
+        { base: 296, stride: 136 },
+        { base: 104, stride: 112 },
+      ].find((c) => r.payload.length === c.base + taskCount * c.stride) ?? {
+        base: 104,
+        stride: 112,
+      };
       const tasks: ProgStatus['tasks'] = [];
       for (let i = 0; i < taskCount; i++) {
         const o = lay.base + i * lay.stride;
@@ -561,8 +521,7 @@ export class PlcCtl {
    */
   progPrepare(uuidHex: string): Promise<CtlReply> {
     const b = new Uint8Array(16);
-    for (let i = 0; i < 16; i++)
-      b[i] = parseInt(uuidHex.slice(i * 2, i * 2 + 2), 16);
+    for (let i = 0; i < 16; i++) b[i] = parseInt(uuidHex.slice(i * 2, i * 2 + 2), 16);
     return this.call(CTL.PROG_PREPARE, b);
   }
 
@@ -628,8 +587,7 @@ export class PlcCtl {
   /** persistent override at every boundary until cleared → handle.
       mask (same length) limits the override to the marked bits;
       omitted = full overwrite. */
-  dbgForce(offset: bigint | number, bytes: Uint8Array,
-           mask?: Uint8Array): Promise<number> {
+  dbgForce(offset: bigint | number, bytes: Uint8Array, mask?: Uint8Array): Promise<number> {
     const p = new Uint8Array(12 + bytes.length + (mask?.length ?? 0));
     const d = new DataView(p.buffer);
     d.setBigUint64(0, BigInt(offset), true);
@@ -637,7 +595,8 @@ export class PlcCtl {
     p.set(bytes, 12);
     if (mask) p.set(mask, 12 + bytes.length);
     return this.call(CTL.DBG_FORCE, p).then((r) =>
-      new DataView(r.payload.buffer, r.payload.byteOffset).getUint32(0, true));
+      new DataView(r.payload.buffer, r.payload.byteOffset).getUint32(0, true),
+    );
   }
 
   dbgForceList(): Promise<DbgForce[]> {
@@ -668,8 +627,13 @@ export class PlcCtl {
   }
 
   /** arm a conditional suspend: len∈{1,2,4,8}, cmp 0..5 → handle. */
-  dbgBreak(taskIdx: number, offset: bigint | number, len: number,
-           cmp: number, value: bigint | number): Promise<number> {
+  dbgBreak(
+    taskIdx: number,
+    offset: bigint | number,
+    len: number,
+    cmp: number,
+    value: bigint | number,
+  ): Promise<number> {
     const p = new Uint8Array(28);
     const d = new DataView(p.buffer);
     d.setUint32(0, taskIdx, true);
@@ -678,12 +642,18 @@ export class PlcCtl {
     d.setUint8(16, cmp);
     d.setBigUint64(20, BigInt(value), true);
     return this.call(CTL.DBG_BREAK, p).then((r) =>
-      new DataView(r.payload.buffer, r.payload.byteOffset).getUint32(0, true));
+      new DataView(r.payload.buffer, r.payload.byteOffset).getUint32(0, true),
+    );
   }
 
   /** capture trigger: same payload; freezes the recorder on hit. */
-  dbgCapture(taskIdx: number, offset: bigint | number, len: number,
-             cmp: number, value: bigint | number): Promise<number> {
+  dbgCapture(
+    taskIdx: number,
+    offset: bigint | number,
+    len: number,
+    cmp: number,
+    value: bigint | number,
+  ): Promise<number> {
     const p = new Uint8Array(28);
     const d = new DataView(p.buffer);
     d.setUint32(0, taskIdx, true);
@@ -692,24 +662,22 @@ export class PlcCtl {
     d.setUint8(16, cmp);
     d.setBigUint64(20, BigInt(value), true);
     return this.call(CTL.DBG_CAPTURE, p).then((r) =>
-      new DataView(r.payload.buffer, r.payload.byteOffset).getUint32(0, true));
+      new DataView(r.payload.buffer, r.payload.byteOffset).getUint32(0, true),
+    );
   }
 
   /** expression trigger: paths resolve via SMAP at arm time;
       capture=true freezes the recorder on true, else suspends. */
-  dbgBreakExpr(taskIdx: number, expr: string,
-               capture = false): Promise<number> {
+  dbgBreakExpr(taskIdx: number, expr: string, capture = false): Promise<number> {
     const enc = new TextEncoder().encode(expr);
     const p = new Uint8Array(6 + enc.length);
     const d = new DataView(p.buffer);
     d.setUint32(0, taskIdx, true);
     d.setUint16(4, enc.length, true);
     p.set(enc, 6);
-    return this.call(
-      capture ? CTL.DBG_CAPTURE_EXPR : CTL.DBG_BREAK_EXPR, p)
-      .then((r) =>
-        new DataView(r.payload.buffer, r.payload.byteOffset)
-          .getUint32(0, true));
+    return this.call(capture ? CTL.DBG_CAPTURE_EXPR : CTL.DBG_BREAK_EXPR, p).then((r) =>
+      new DataView(r.payload.buffer, r.payload.byteOffset).getUint32(0, true),
+    );
   }
 
   dbgBreakList(): Promise<DbgBreak[]> {
@@ -751,7 +719,8 @@ export class PlcCtl {
       const td = new TextDecoder();
       for (let i = 0; i < n; i++) {
         const rule: DbgDiffRule = {
-          kind: p[o]!, sev: p[o + 1]!,
+          kind: p[o]!,
+          sev: p[o + 1]!,
           tid: d.getUint16(o + 2, true),
           aux: d.getUint32(o + 4, true),
           oldOff: d.getBigUint64(o + 8, true),
@@ -760,25 +729,31 @@ export class PlcCtl {
           newLen: d.getUint32(o + 32, true),
           oldVal: p.slice(o + 44, o + 44 + p[o + 40]!),
           newVal: p.slice(o + 52, o + 52 + p[o + 41]!),
-          oldName: '', newName: '',
+          oldName: '',
+          newName: '',
         };
         o += 60;
-        const ol = d.getUint16(o, true); o += 2;
-        rule.oldName = td.decode(p.subarray(o, o + ol)); o += ol;
-        const nl = d.getUint16(o, true); o += 2;
-        rule.newName = td.decode(p.subarray(o, o + nl)); o += nl;
+        const ol = d.getUint16(o, true);
+        o += 2;
+        rule.oldName = td.decode(p.subarray(o, o + ol));
+        o += ol;
+        const nl = d.getUint16(o, true);
+        o += 2;
+        rule.newName = td.decode(p.subarray(o, o + nl));
+        o += nl;
         rules.push(rule);
       }
       return {
-        sameLayout: p[0] !== 0, migStatus: p[1]!, rules,
+        sameLayout: p[0] !== 0,
+        migStatus: p[1]!,
+        rules,
       };
     });
   }
 
   /** arm the flight recorder: ≤8 channels, per-ch len ≤8, Σlen ≤64.
       nofreeze keeps recording through faults (default freezes on fault). */
-  dbgTraceConf(chs: { offset: bigint | number; len: number }[],
-               nofreeze = false): Promise<number> {
+  dbgTraceConf(chs: { offset: bigint | number; len: number }[], nofreeze = false): Promise<number> {
     const p = new Uint8Array(8 + chs.length * 16);
     const d = new DataView(p.buffer);
     d.setUint32(0, chs.length, true);
@@ -788,8 +763,8 @@ export class PlcCtl {
       d.setUint32(8 + i * 16 + 8, c.len, true);
     });
     return this.call(CTL.TRACE_CONF, p).then((r) =>
-      new DataView(r.payload.buffer, r.payload.byteOffset)
-        .getUint32(0, true));
+      new DataView(r.payload.buffer, r.payload.byteOffset).getUint32(0, true),
+    );
   }
 
   dbgTraceStatus(): Promise<DbgTraceStatus> {
@@ -800,15 +775,16 @@ export class PlcCtl {
         frameLen: d.getUint32(4, true),
         written: d.getBigUint64(8, true),
         avail: d.getBigUint64(16, true),
-        frozen: r.payload.length >= 28 &&
-          (d.getUint32(24, true) & 1) !== 0,
+        frozen: r.payload.length >= 28 && (d.getUint32(24, true) & 1) !== 0,
       };
     });
   }
 
   /** frames with seq ≥ fromSeq still in the ring; ≤512 per call. */
-  dbgTraceRead(fromSeq: bigint | number, max = 256):
-      Promise<{ first: bigint; frameLen: number; frames: DbgTraceFrame[] }> {
+  dbgTraceRead(
+    fromSeq: bigint | number,
+    max = 256,
+  ): Promise<{ first: bigint; frameLen: number; frames: DbgTraceFrame[] }> {
     const p = new Uint8Array(12);
     const d = new DataView(p.buffer);
     d.setBigUint64(0, BigInt(fromSeq), true);
@@ -838,12 +814,10 @@ export class PlcCtl {
   /** register a watch set (≤16 items, Σlen ≤ 512). Items with a
       name resolve through the symmap and re-resolve after a swap;
       nameless offset items go stale on swap. */
-  dbgWatchAdd(items: { offset: bigint | number; len: number;
-                      name?: string }[]): Promise<number> {
+  dbgWatchAdd(items: { offset: bigint | number; len: number; name?: string }[]): Promise<number> {
     const enc = new TextEncoder();
     const names = items.map((c) => enc.encode(c.name ?? ''));
-    const size = 8 + items.reduce(
-      (s, c, i) => s + 14 + names[i]!.length, 0);
+    const size = 8 + items.reduce((s, c, i) => s + 14 + names[i]!.length, 0);
     const p = new Uint8Array(size);
     const d = new DataView(p.buffer);
     d.setUint32(0, items.length, true);
@@ -857,8 +831,8 @@ export class PlcCtl {
       o += 14 + nm.length;
     });
     return this.call(CTL.DBG_WATCH_ADD, p).then((r) =>
-      new DataView(r.payload.buffer, r.payload.byteOffset)
-        .getUint32(0, true));
+      new DataView(r.payload.buffer, r.payload.byteOffset).getUint32(0, true),
+    );
   }
 
   /** one-shot boundary-consistent read of a watch set. */
@@ -1145,7 +1119,7 @@ export class PlcCtl {
     const p = u32(cap);
     return this.call(CTL.EVTLOG_LIST, p).then((r) => {
       const d = new DataView(r.payload.buffer, r.payload.byteOffset);
-      const n = d.getUint32(4, true);   // second u32 = entries shown
+      const n = d.getUint32(4, true); // second u32 = entries shown
       const out: EvlogInfo[] = [];
       let o = 8;
       for (let i = 0; i < n && o + 49 <= r.payload.length; i++) {
@@ -1160,8 +1134,7 @@ export class PlcCtl {
           raisedNs: d.getBigUint64(o + 28, true),
           clearedNs: d.getBigUint64(o + 36, true),
           confirmedNs: d.getBigUint64(o + 44, true),
-          text: new TextDecoder().decode(
-            r.payload.subarray(o + 49, o + 49 + tl)),
+          text: new TextDecoder().decode(r.payload.subarray(o + 49, o + 49 + tl)),
         });
         o += 49 + tl;
       }
@@ -1184,8 +1157,7 @@ export class PlcCtl {
         raisedNs: d.getBigUint64(28, true),
         clearedNs: d.getBigUint64(36, true),
         confirmedNs: d.getBigUint64(44, true),
-        text: new TextDecoder().decode(
-          r.payload.subarray(49, 49 + tl)),
+        text: new TextDecoder().decode(r.payload.subarray(49, 49 + tl)),
       };
     });
   }
@@ -1219,8 +1191,7 @@ export class PlcCtl {
           eventId: d.getUint32(o + 16, true),
           severity: d.getUint32(o + 20, true),
           state: d.getUint32(o + 24, true),
-          text: new TextDecoder().decode(
-            r.payload.subarray(o + 29, o + 29 + tl)),
+          text: new TextDecoder().decode(r.payload.subarray(o + 29, o + 29 + tl)),
         });
         o += 29 + tl;
       }
@@ -1247,14 +1218,18 @@ export class PlcCtl {
     let o = 4;
     for (const nm of names) {
       const nb = new TextEncoder().encode(nm);
-      d.setUint16(o, nb.length, true); o += 2;
-      p.set(nb, o); o += nb.length;
-      d.setUint32(o, 0, true); o += 4;   // len 0 = natural width
-      d.setUint32(o, 0, true); o += 4;   // pad
+      d.setUint16(o, nb.length, true);
+      o += 2;
+      p.set(nb, o);
+      o += nb.length;
+      d.setUint32(o, 0, true);
+      o += 4; // len 0 = natural width
+      d.setUint32(o, 0, true);
+      o += 4; // pad
     }
     return this.call(CTL.HIST_CONF, p).then((r) =>
-      new DataView(r.payload.buffer, r.payload.byteOffset)
-        .getUint32(0, true));
+      new DataView(r.payload.buffer, r.payload.byteOffset).getUint32(0, true),
+    );
   }
 
   histList(): Promise<HistChannel[]> {
@@ -1264,11 +1239,11 @@ export class PlcCtl {
       const out: HistChannel[] = [];
       let o = 4;
       for (let i = 0; i < n && o + 2 <= r.payload.length; i++) {
-        const nl = d.getUint16(o, true); o += 2;
+        const nl = d.getUint16(o, true);
+        o += 2;
         if (o + nl + 12 > r.payload.length) break;
         out.push({
-          name: new TextDecoder().decode(
-            r.payload.subarray(o, o + nl)),
+          name: new TextDecoder().decode(r.payload.subarray(o, o + nl)),
           off: d.getBigUint64(o + nl, true),
           len: d.getUint32(o + nl + 8, true),
         });
@@ -1299,16 +1274,27 @@ export class PlcCtl {
         const tls = d.getUint32(o + 20, true);
         const mqttVersion = d.getUint32(o + 24, true);
         o += 28;
-        const hl = d.getUint16(o, true); o += 2;
+        const hl = d.getUint16(o, true);
+        o += 2;
         if (o + hl + 2 > r.payload.length) break;
         const host = dec.decode(r.payload.subarray(o, o + hl));
         o += hl;
-        const cl = d.getUint16(o, true); o += 2;
+        const cl = d.getUint16(o, true);
+        o += 2;
         if (o + cl > r.payload.length) break;
         const clientId = dec.decode(r.payload.subarray(o, o + cl));
         o += cl;
-        out.push({ handle, state, journalCount, port, transport,
-                   tls, mqttVersion, host, clientId });
+        out.push({
+          handle,
+          state,
+          journalCount,
+          port,
+          transport,
+          tls,
+          mqttVersion,
+          host,
+          clientId,
+        });
       }
       return out;
     });
@@ -1316,8 +1302,11 @@ export class PlcCtl {
 
   /** inbound-message journal for one connection, oldest→newest.
       idx = first logical index (0 = oldest retained), max ≤ 64. */
-  mqttJournal(handle: number, idx = 0, max = 64):
-      Promise<{ total: number; entries: MqttJournalEntry[] }> {
+  mqttJournal(
+    handle: number,
+    idx = 0,
+    max = 64,
+  ): Promise<{ total: number; entries: MqttJournalEntry[] }> {
     const p = new Uint8Array(12);
     const d = new DataView(p.buffer);
     d.setUint32(0, handle, true);
@@ -1337,13 +1326,17 @@ export class PlcCtl {
         const msgid = dv.getUint32(o + 16, true);
         const tl = dv.getUint16(o + 20, true);
         if (o + 22 + tl + 4 > r.payload.length) break;
-        const topic = dec.decode(
-          r.payload.subarray(o + 22, o + 22 + tl));
+        const topic = dec.decode(r.payload.subarray(o + 22, o + 22 + tl));
         let q = o + 22 + tl;
-        const plen = dv.getUint32(q, true); q += 4;
+        const plen = dv.getUint32(q, true);
+        q += 4;
         if (q + plen > r.payload.length) break;
         entries.push({
-          tsMs, qos, retain, msgid, topic,
+          tsMs,
+          qos,
+          retain,
+          msgid,
+          topic,
           payload: r.payload.slice(q, q + plen),
         });
         o = q + plen;

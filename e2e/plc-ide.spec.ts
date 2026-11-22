@@ -43,18 +43,18 @@ test.describe('TetherPLC IDE', () => {
     expect(proj.fbd.project).toBe('Temperature cell');
   });
 
-  test('IDE connects to the ctl proxy and loads the library catalog', async ({ page }) => {
+  test('IDE connects to tplc serve /ws and loads the library catalog', async ({ page }) => {
     await openFreshIde(page);
     await newPou(page, 'program');
     await pane(page, 'FBD');
 
-    // /blocks catalog → palette groups per library file (TC2/TC3/tempctrl)
+    // blocks meta-op → palette groups per library file (TC2/TC3/tempctrl)
     const groups = page.locator('fbd-canvas .fbd-pgroup-name');
     await expect(groups.filter({ hasText: 'TC2' }).first()).toBeVisible({ timeout: 30_000 });
     await expect(groups.filter({ hasText: 'TC3' }).first()).toBeVisible();
     await expect(groups.filter({ hasText: 'TEMPCTRL' }).first()).toBeVisible();
 
-    // Deploy pane reports the proxy reachable
+    // Deploy pane reports the backend reachable
     await pane(page, 'Deploy');
     await expect(page.locator('.plc-ctlbar')).toContainText('connected', { timeout: 15_000 });
   });
@@ -162,7 +162,7 @@ test.describe('TetherPLC IDE', () => {
     ]);
   });
 
-  test('ST source compiles through the proxy; diagnostics navigate', async ({ page }) => {
+  test('ST source compiles through /ws; diagnostics navigate', async ({ page }) => {
     await openFreshIde(page);
     await newPou(page, 'program');
     await pane(page, 'ST');
@@ -204,11 +204,11 @@ test.describe('TetherPLC IDE', () => {
     await item.click();
     await expect(block(page, 'FB_AtcPid')).toHaveCount(1);
 
-    // need-libsrc → /libsrc → source lands in stSources (Libraries tree)
+    // need-libsrc → libsrc meta-op → source lands in stSources (Libraries tree)
     await pane(page, 'Explorer');
     await expect(page.locator('.plc-tree')).toContainText('atc_tempctrl', { timeout: 20_000 });
 
-    // and the project still compiles through the proxy
+    // and the project still compiles through /ws
     await pane(page, 'FBD');
     await runCheck(page);
     await expect(page.locator('.plc-status')).not.toContainText('check failed', {
