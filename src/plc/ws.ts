@@ -79,9 +79,17 @@ export class PlcWs {
         // onclose follows; reject a pending connect there
       };
       ws.onclose = () => {
-        const wasOpen = this.ws === ws && ws.readyState !== WebSocket.CONNECTING;
-        if (this.ws === ws) this.ws = undefined;
-        this.connecting = undefined;
+        const wasCurrent = this.ws === ws;
+        const wasOpen = wasCurrent && ws.readyState !== WebSocket.CONNECTING;
+        if (wasCurrent) this.ws = undefined;
+        /* a socket that closes before onopen must reject the pending
+           connect() — otherwise every awaiter hangs forever (discovery's
+           iface_list went through exactly this path). Only the current
+           socket settles it; a stale socket's close must not kill a
+           newer in-flight attempt. */
+        const connecting = wasCurrent && this.connecting !== undefined;
+        if (wasCurrent) this.connecting = undefined;
+        if (connecting) rej(new WsError('websocket closed during connect'));
         const err = new WsError('websocket closed');
         for (const p of this.pending.values()) p.rej(err);
         this.pending.clear();

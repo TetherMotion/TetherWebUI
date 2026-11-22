@@ -650,6 +650,8 @@ export class TetherPlcIde extends LitElement {
   private busIfacesFetched = false;
   /** 'other…' picked in the NIC select — show the free-text fallback. */
   private busIfaceCustom = false;
+  /** why the NIC select fell back to manual entry (iface_list failed). */
+  private busIfaceErr = '';
   /** recent UDP peers — filled after each successful scan request. */
   private busPeerRecent: string[] = [];
   private busScanBusy = false;
@@ -3952,10 +3954,12 @@ export class TetherPlcIde extends LitElement {
       this.busIfaceAuto = r.auto ?? '';
       if (!this.busLink) this.busLink = this.busIfaceAuto ? 'raw' : 'udp';
       if (this.busIfaceAuto && !this.busIface) this.busIface = this.busIfaceAuto;
-    } catch {
+      this.busIfaceErr = '';
+    } catch (e) {
       /* no backend or op missing — UDP stays the default, NIC input
          falls back to free text */
       if (!this.busLink) this.busLink = 'udp';
+      this.busIfaceErr = `NIC list unavailable (${e instanceof Error ? e.message : e}) — enter the interface name`;
     }
     this.requestUpdate();
   }
@@ -3977,7 +3981,7 @@ export class TetherPlcIde extends LitElement {
         ${label}
       </button>`;
     return html`
-      <div class="plc-ops">
+      <div class="plc-ops plc-buslink">
         ${seg('udp', 'EtherCAT/UDP', 'UDP datagrams carrying Ethernet frames — no raw-socket privileges needed (slave-chain emulator, remote labs)')}
         ${seg('raw', 'raw NIC', 'AF_PACKET master on a physical NIC — the real EtherCAT path (needs CAP_NET_RAW / runec)')}
         ${link === 'udp' ? this.busUdpFields() : this.busRawFields()}
@@ -3988,7 +3992,15 @@ export class TetherPlcIde extends LitElement {
         >
           ${this.busScanBusy ? 'scanning…' : 'scan bus'}
         </button>
-        <button class="chip-btn" @click=${() => void this.refreshBus()}>refresh</button>
+        <button
+          class="chip-btn"
+          @click=${() => {
+            void this.refreshBus();
+            void this.refreshIfaces();
+          }}
+        >
+          refresh
+        </button>
       </div>`;
   }
 
@@ -4028,16 +4040,22 @@ export class TetherPlcIde extends LitElement {
           placeholder="iface"
           .value=${this.busIface}
           @input=${(e: Event) => (this.busIface = (e.target as HTMLInputElement).value)}
-        />${ifs?.length ? html`<button
-            class="chip-btn"
-            title="back to detected NICs"
-            @click=${() => {
-              this.busIfaceCustom = false;
-              this.requestUpdate();
-            }}
-          >
-            list
-          </button>` : nothing}`;
+        />${ifs?.length
+          ? html`<button
+              class="chip-btn"
+              title="back to detected NICs"
+              @click=${() => {
+                this.busIfaceCustom = false;
+                this.requestUpdate();
+              }}
+            >
+              list
+            </button>`
+          : this.busIfaceErr
+            ? html`<span class="plc-dim plc-busiface-err" title=${this.busIfaceErr}
+                >NIC list unavailable — manual entry</span
+              >`
+            : nothing}`;
     const opt = (i: (typeof ifs)[number]) => html`<option
       value=${i.name}
       ?selected=${i.name === this.busIface}
