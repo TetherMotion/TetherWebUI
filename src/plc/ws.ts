@@ -68,6 +68,9 @@ export class PlcWs {
         return;
       }
       this.ws = ws;
+      /* binary ctl frames must arrive as ArrayBuffer — the default
+         'blob' type makes every reply parse as empty and drop */
+      ws.binaryType = 'arraybuffer';
       ws.onopen = () => {
         this.connecting = undefined;
         res();

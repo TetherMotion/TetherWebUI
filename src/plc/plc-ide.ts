@@ -3407,8 +3407,7 @@ export class TetherPlcIde extends LitElement {
       <h4>
         program ${p.name}
         <span class="plc-dim"
-          >${['stopped', 'running', 'fault'][p.state] ?? p.state} · ${p.cycles}
-          cycles${p.epoch !== undefined ? ` · epoch ${p.epoch}` : ''}</span
+          >${['stopped', 'running', 'fault'][p.state] ?? p.state} · ${p.cycles} cycles${p.epoch !== undefined ? ` · epoch ${p.epoch}` : ''}</span
         >
       </h4>
       <table class="plc-table">

@@ -5,7 +5,7 @@
  * Error replies carry flags bit15 + TplcCtlError{code,subcode,msg}.
  * Text messages carry JSON meta-ops (compile/blocks/libsrc/pkgmap).
  */
-import { PlcWs } from './ws';
+import { CtlError, PlcWs } from './ws';
 export { CtlError, WsError } from './ws';
 
 export const CTL = {
@@ -1094,22 +1094,40 @@ export class PlcCtl {
     begin.set(u64(pkg.length), 0);
     begin.set(sha, 8);
     begin[40] = mode;
-    const r1 = await this.call(CTL.DEPLOY_BEGIN, begin);
+    let r1: CtlReply;
+    try {
+      r1 = await this.call(CTL.DEPLOY_BEGIN, begin);
+    } catch (e) {
+      /* a previous client that died mid-upload leaves the slot occupied —
+         abort it once and retry rather than failing every deploy       */
+      if (e instanceof CtlError && /in progress/.test(e.message)) {
+        await this.call(CTL.DEPLOY_ABORT).catch(() => {});
+        r1 = await this.call(CTL.DEPLOY_BEGIN, begin);
+      } else {
+        throw e;
+      }
+    }
     const d1 = new DataView(r1.payload.buffer, r1.payload.byteOffset);
     const upid = d1.getBigUint64(0, true);
     let maxc = d1.getUint32(8, true);
     if (maxc === 0 || maxc > 48 * 1024) maxc = 48 * 1024;
-    for (let off = 0; off < pkg.length; off += maxc) {
-      const n = Math.min(maxc, pkg.length - off);
-      const frame_ = new Uint8Array(16 + n);
-      frame_.set(u64(upid), 0);
-      frame_.set(u64(off), 8);
-      frame_.set(pkg.subarray(off, off + n), 16);
-      await this.call(CTL.DEPLOY_CHUNK, frame_);
-      onProgress?.((off + n) / pkg.length);
+    try {
+      for (let off = 0; off < pkg.length; off += maxc) {
+        const n = Math.min(maxc, pkg.length - off);
+        const frame_ = new Uint8Array(16 + n);
+        frame_.set(u64(upid), 0);
+        frame_.set(u64(off), 8);
+        frame_.set(pkg.subarray(off, off + n), 16);
+        await this.call(CTL.DEPLOY_CHUNK, frame_);
+        onProgress?.((off + n) / pkg.length);
+      }
+      const r3 = await this.call(CTL.DEPLOY_COMMIT, u64(upid));
+      return [...r3.payload.subarray(1, 17)].map((b) => b.toString(16).padStart(2, '0')).join('');
+    } catch (e) {
+      /* don't leave the runtime's single upload slot occupied */
+      await this.call(CTL.DEPLOY_ABORT, u64(upid)).catch(() => {});
+      throw e;
     }
-    const r3 = await this.call(CTL.DEPLOY_COMMIT, u64(upid));
-    return [...r3.payload.subarray(1, 17)].map((b) => b.toString(16).padStart(2, '0')).join('');
   }
 
   // ---- event log (0x0F0x) --------------------------------------------

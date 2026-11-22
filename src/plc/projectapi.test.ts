@@ -90,8 +90,8 @@ describe('projectapi', () => {
           return undefined;
       }
     });
-    expect((await pa.gitStatus(ch))[0].path).toBe('a.st');
-    expect((await pa.gitLog(ch))[0].short).toBe('abc1234');
+    expect((await pa.gitStatus(ch))[0]?.path).toBe('a.st');
+    expect((await pa.gitLog(ch))[0]?.short).toBe('abc1234');
     expect(await pa.gitDiff(ch)).toBe('+x');
     expect(await pa.gitBranch(ch)).toBe('main');
     expect(await pa.gitCommit(ch, 'msg')).toBe('abc1234');
