@@ -64,6 +64,13 @@ export async function openPlcIde(page: Page): Promise<Locator> {
   return ide;
 }
 
+/** Dismiss the first-run template picker if it's covering the IDE —
+    it re-appears on every engineering activity until dismissed. */
+export async function dismissTplPicker(page: Page): Promise<void> {
+  const blank = page.locator('.plc-tpl-foot button', { hasText: 'Blank project' });
+  if (await blank.count()) await blank.click();
+}
+
 /** Full path: fresh project → connect → PLC IDE on the FBD-capable state. */
 export async function openFreshIde(page: Page, ctl = CTL_URL): Promise<void> {
   await freshPlcProject(page, ctl);

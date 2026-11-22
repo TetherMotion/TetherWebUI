@@ -25,9 +25,25 @@ tether-shell {
 }
 
 .app {
-  display: grid;
-  grid-template-rows: var(--chrome-h) 36px 1fr;
+  display: flex;
+  flex-direction: column;
   height: 100%;
+}
+
+/* the tab bar only exists on Operate — flex (not a fixed 3-row grid)
+   keeps .body at 1fr whether the nav is present or not */
+.app > .status-strip {
+  flex: none;
+  height: var(--chrome-h);
+}
+
+.app > .board-tabs {
+  flex: none;
+}
+
+.app > .body {
+  flex: 1;
+  min-height: 0;
 }
 
 /* ---- Status strip ---------------------------------------------------------- */
@@ -631,7 +647,9 @@ tile-frame {
   background: rgba(10, 18, 28, 0.45);
   display: grid;
   place-items: center;
-  z-index: 50;
+  /* above .plc-tpl-overlay (60) — connect/settings modals must win
+     even while the first-run template picker is up */
+  z-index: 70;
 }
 
 .overlay-panel {
@@ -2097,9 +2115,11 @@ tile-frame {
   color: var(--text-muted);
 }
 
-/* project-template picker (first-run + toolbar) */
+/* project-template picker (first-run + toolbar) — absolute, not fixed:
+   the IDE lives inside .content (position:relative), so the modal
+   covers only the work area and the rail/status strip stay usable */
 .plc-tpl-overlay {
-  position: fixed;
+  position: absolute;
   inset: 0;
   background: rgba(0, 0, 0, 0.55);
   display: flex;

@@ -16,10 +16,11 @@ import { defineConfig } from '@playwright/test';
  *   cmake --build build -j8 && cargo build -p tplc -p tplcc  (in TetherPLC)
  *
  * which provides `tplc serve` (the /ws backend: ctl frames + compile/
- * catalog meta-ops) and `tplcc` (compiler). Paths resolve relative to
- * this repo's parent (`../Tether`, `../TetherPLC`) and can be overridden
- * with env vars: WEB_DASHBOARD_EXAMPLE, TPLC, TPLCC, TPLC_LIBDIRS
- * (colon-separated)
+ * catalog meta-ops) and `tplcc` (compiler). This repo lives at
+ * TetherPLC/TetherWebUI (submodule), so defaults resolve to the
+ * sibling Tether checkout and the enclosing TetherPLC root; every path
+ * can be overridden with env vars: WEB_DASHBOARD_EXAMPLE, TPLC, TPLCC,
+ * TPLC_ROOT, TPLC_LIBDIRS (colon-separated)
  *
  * Playwright's bundled Chromium is used (install with
  * `npx playwright install chromium`); set PW_CHANNEL=chrome to use a
@@ -27,22 +28,24 @@ import { defineConfig } from '@playwright/test';
  */
 const repoRoot = fileURLToPath(new URL('.', import.meta.url));
 const abs = (p: string) => (isAbsolute(p) ? p : resolve(repoRoot, p));
+/* submodule layout: <dev>/TetherPLC/TetherWebUI — TetherPLC is ../..,
+   the sibling Tether checkout is ../../Tether */
+const tplcRoot = abs(process.env.TPLC_ROOT ?? '../..');
 const webDashboard = abs(
-  process.env.WEB_DASHBOARD_EXAMPLE ?? '../Tether/build/bin/web_dashboard_example',
+  process.env.WEB_DASHBOARD_EXAMPLE ?? '../../Tether/build/bin/web_dashboard_example',
 );
-const tplc = abs(process.env.TPLC ?? '../TetherPLC/compiler/target/debug/tplc');
-const tplcc = abs(process.env.TPLCC ?? '../TetherPLC/compiler/target/debug/tplcc');
-const tplcRoot = abs(process.env.TPLC_ROOT ?? '../TetherPLC');
+const tplc = abs(process.env.TPLC ?? `${tplcRoot}/compiler/target/debug/tplc`);
+const tplcc = abs(process.env.TPLCC ?? `${tplcRoot}/compiler/target/debug/tplcc`);
 const tetherPlc = abs(process.env.TPLC_HOST ?? `${tplcRoot}/build/tether-plc`);
 const tplcImage = abs(process.env.TPLC_IMAGE ?? `${tplcRoot}/build/tplc-image`);
 const tplcIo = abs(process.env.TPLC_IO ?? `${tplcRoot}/build/tplc-io`);
 /* every path tplc/tplcc receives must be absolute */
 const libdirs = (
   process.env.TPLC_LIBDIRS ??
-  '../TetherPLC/libraries/tempctrl:../TetherPLC/libraries/homeassistant:' +
-    '../TetherPLC/libraries/mqtt:../TetherPLC/libraries/iolink:' +
-    '../TetherPLC/libraries/profinet:../TetherPLC/libraries/canopen:' +
-    '../TetherPLC/compat/tc2:../TetherPLC/compat/tc3'
+  `${tplcRoot}/libraries/tempctrl:${tplcRoot}/libraries/homeassistant:` +
+    `${tplcRoot}/libraries/mqtt:${tplcRoot}/libraries/iolink:` +
+    `${tplcRoot}/libraries/profinet:${tplcRoot}/libraries/canopen:` +
+    `${tplcRoot}/compat/tc2:${tplcRoot}/compat/tc3`
 )
   .split(':')
   .filter(Boolean)

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { act } from './plc-helpers';
+import { act, dismissTplPicker } from './plc-helpers';
 
 const WS_URL = 'ws://127.0.0.1:8099/tether-io';
 
@@ -152,7 +152,10 @@ test('expanding a drive card reveals raw snapshot fields and statusword bits', a
 
 test('catalog explorer lists the full CiA 402 object dictionary per axis', async ({ page }) => {
   await connectAs(page, 'operator');
-  await page.locator('button[title="Explore"]').click();
+  // the catalog tile re-homed into the IDE: Debug → Explore
+  await act(page, 'Debug');
+  await dismissTplPicker(page);
+  await page.locator('.plc-nav-btn', { hasText: 'Explore' }).click();
 
   const filter = page.locator('.catalog-filter');
   await filter.fill('sdo.sim-axis-x.');

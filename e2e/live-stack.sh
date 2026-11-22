@@ -8,14 +8,15 @@
 #     and --tplc-io → the provider, whose /tether-io WebSocket endpoint
 #     gives browsers the live catalog + values.
 #
-# Env: TPLC_ROOT (default ../TetherPLC), LIVE_PORT (default 8090),
+# Env: TPLC_ROOT (default ../.. — the enclosing TetherPLC checkout when
+#      this repo is its TetherWebUI submodule), LIVE_PORT (default 8090),
 #      TPLC (tplc binary), TPLC_LIBDIRS (colon-separated, same default
 #      as playwright.config).
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
-TPLC_ROOT=${TPLC_ROOT:-$ROOT/../TetherPLC}
+TPLC_ROOT=${TPLC_ROOT:-$ROOT/../..}
 PORT=${LIVE_PORT:-8090}
 IMG=/tplc_pw_live_$$
 W=$(mktemp -d /tmp/tplc-live-stack.XXXXXX)
