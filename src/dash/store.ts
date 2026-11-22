@@ -23,10 +23,21 @@ export function loadBoards(): BoardDoc[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (b): b is BoardDoc =>
-        !!b && typeof b === 'object' && b.format === BOARD_FORMAT && Array.isArray(b.tiles),
-    );
+    return parsed
+      .filter(
+        (b): b is BoardDoc =>
+          !!b &&
+          typeof b === 'object' &&
+          b.format === BOARD_FORMAT &&
+          Array.isArray(b.tiles) &&
+          /* migration: the old builtin.plc board hosted the IDE tile —
+             the IDE is now a shell-level activity, not a tile */
+          b.id !== 'builtin.plc',
+      )
+      .map((b) => ({
+        ...b,
+        tiles: b.tiles.filter((t) => t?.type !== 'plc-ide'),
+      }));
   } catch {
     return [];
   }
@@ -116,13 +127,6 @@ function builtinBoards(): BoardDoc[] {
         makeTile('checklist', { x: 7, y: 10, w: 5, h: 5 }, { title: 'Checklist' }),
         makeTile('recipes', { x: 0, y: 12, w: 7, h: 4 }, { title: 'Recipes' }),
       ],
-    },
-    {
-      format: BOARD_FORMAT,
-      id: 'builtin.plc',
-      title: 'TetherPLC',
-      source: 'builtin',
-      tiles: [makeTile('plc-ide', { x: 0, y: 0, w: 12, h: 16 }, { title: 'PLC IDE' })],
     },
   ];
 }

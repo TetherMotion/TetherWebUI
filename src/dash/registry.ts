@@ -492,15 +492,6 @@ export const TILE_SPECS: TileSpec[] = [
 
   // ---- PLC ----------------------------------------------------------------------
   {
-    type: 'plc-ide',
-    label: 'PLC IDE',
-    group: 'Tools',
-    description: 'TetherPLC project explorer, ST/FBD sources, watch, deploy.',
-    tag: 'tile-plc-ide',
-    defaultSize: { w: 12, h: 14 },
-    minSize: { w: 8, h: 8 },
-  },
-  {
     type: 'faceplate',
     label: 'Faceplate',
     group: 'Signals',

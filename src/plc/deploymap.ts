@@ -420,6 +420,29 @@ export function parseBusCatalog(text: string): BusEndpoint[] {
   return out;
 }
 
+/** one row of the ecpump `.topology` artifact — the discovered
+    terminal view. `tx`/`rx` are PDO byte counts per direction. */
+export interface BusSlave {
+  i: number;
+  part: string;
+  key: string;
+  coupler?: boolean;
+  vendor?: number;
+  product?: number;
+  tx?: number;
+  rx?: number;
+}
+
+/** Parse the `.topology` JSON ({slaves:[…]}); malformed JSON → []. */
+export function parseBusTopology(text: string): BusSlave[] {
+  try {
+    const j = JSON.parse(text) as { slaves?: BusSlave[] };
+    return Array.isArray(j.slaves) ? j.slaves : [];
+  } catch {
+    return [];
+  }
+}
+
 export interface MapViolation { rule: string; detail: string }
 
 /** Mirror of the bridge validate_map rules that can be checked

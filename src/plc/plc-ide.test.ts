@@ -42,6 +42,8 @@ describe('plc-ide tasks pane', () => {
   it('adds, edits, assigns, and deletes tasks', async () => {
     seed();
     const el = await mount();
+    el.activity = 'configure';
+    await el.updateComplete;
     navTo(el, 'Tasks');
     await el.updateComplete;
 
@@ -75,7 +77,9 @@ describe('plc-ide tasks pane', () => {
   it('shows retain card only when ctl reports a store', async () => {
     seed();
     const el = await mount();
-    navTo(el, 'Deploy');
+    el.activity = 'debug';
+    await el.updateComplete;
+    navTo(el, 'Run');
     await el.updateComplete;
     expect(el.querySelector('h4')?.textContent ?? '').not.toContain('retain store');
     el.remove();
@@ -161,5 +165,50 @@ describe('projectIoBindings', () => {
     expect(names).toContain('main.run');
     expect(names).toContain('main.EK1123.CH1');
     expect(binds.find((b) => b.name === 'main.EK1123.CH1')?.at).toBe('%QW2');
+  });
+});
+
+describe('plc-ide workbench (program activity)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    document.body.innerHTML = '';
+  });
+
+  it('renders explorer + tabs + inspector instead of pane nav', async () => {
+    seed();
+    const el = await mount();
+    el.activity = 'program';
+    await el.updateComplete;
+    expect(el.querySelector('.plc-workbench')).toBeTruthy();
+    expect(el.querySelector('.plc-side')).toBeTruthy();
+    expect(el.querySelector('.plc-nav-btn')).toBeFalsy();
+    // no tabs until a document is opened
+    expect(el.querySelectorAll('.plc-tab').length).toBe(0);
+
+    // clicking a POU in the explorer opens its FBD tab
+    el.querySelector<HTMLElement>('.plc-tree-pou')!.click();
+    await el.updateComplete;
+    const tabs = el.querySelectorAll('.plc-tab');
+    expect(tabs.length).toBe(1);
+    expect(tabs[0]!.textContent).toContain('main');
+    expect(el.querySelector('.plc-edkind')).toBeTruthy();
+
+    // switching editor kind to ST mounts the st editor
+    [...el.querySelectorAll<HTMLButtonElement>('.plc-edkind .chip-btn')]
+      .find((b) => b.textContent?.trim() === 'ST')!
+      .click();
+    await el.updateComplete;
+    expect(el.querySelector('st-editor')).toBeTruthy();
+
+    // globals row opens a second tab; closing leaves the first
+    [...el.querySelectorAll<HTMLElement>('.plc-tree-pou')]
+      .find((r) => r.textContent?.includes('globals'))!
+      .click();
+    await el.updateComplete;
+    expect(el.querySelectorAll('.plc-tab').length).toBe(2);
+    el.querySelector<HTMLElement>('.plc-tab-x')!.click();
+    await el.updateComplete;
+    expect(el.querySelectorAll('.plc-tab').length).toBe(1);
+    el.remove();
   });
 });

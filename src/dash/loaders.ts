@@ -10,7 +10,6 @@ const loadMachine = () => import('../tiles/machine');
 const loadAnalysis = () => import('../tiles/analysis');
 const loadActions = () => import('../tiles/actions');
 const loadTools = () => import('../tiles/tools');
-const loadPlc = () => import('../tiles/plc');
 const loadFaceplate = () => import('../tiles/faceplate');
 const loadProfile = () => import('../tiles/profile');
 const loadHmi = () => import('../tiles/hmi');
@@ -56,8 +55,6 @@ const TAG_LOADERS: Record<string, () => Promise<unknown>> = {
   'tile-checklist': loadTools,
   'tile-catalog': loadTools,
   'tile-note': loadTools,
-  // tiles/plc.ts
-  'tile-plc-ide': loadPlc,
   // tiles/faceplate.ts
   'tile-faceplate': loadFaceplate,
   // tiles/profile.ts

@@ -4,9 +4,11 @@ import {
   catalogGroups,
   catalogPous,
   libStem,
+  projectLibRefs,
   srcBase,
   type CatalogLib,
 } from './catalog';
+import { emptyProject, type Block, type Network, type Pou } from './model';
 import { blockSig } from './sigs';
 import { parseTy } from './types';
 
@@ -123,5 +125,76 @@ describe('catalog', () => {
     const t = parseTy('ARRAY[1..32] OF ST_AtcSeg', catalogPous(LIBS));
     expect(t.k).toBe('array');
     if (t.k === 'array') expect(t.hi).toBe(32);
+  });
+});
+
+describe('projectLibRefs', () => {
+  const blk = (type_ref: string, patch: Partial<Block> = {}): Block => ({
+    id: 1,
+    kind: 'fb',
+    type_ref,
+    pos: { x: 0, y: 0 },
+    params: {},
+    exec_order: 0,
+    negated: [],
+    comment: '',
+    ...patch,
+  });
+  const net = (blocks: Block[]): Network => ({
+    id: 'n1', kind: 'fbd', label: '', comments: [], assocs: [],
+    labels: [], jumps: [], returns: [], blocks, wires: [],
+  });
+  const pou = (patch: Partial<Pou> = {}): Pou => ({
+    id: 'p1', name: 'Main', kind: 'program', en_eno: 'off',
+    interface: [], networks: [], ...patch,
+  });
+
+  it('collects refs from block types, pins, interface, and globals', () => {
+    const fbd = emptyProject('t');
+    fbd.pous.push(
+      pou({
+        interface: [{ name: 'PROF', kind: 'var_in_out', type: 'FB_AtcProfile' }],
+        networks: [
+          net([
+            blk('FB_AtcPid'),
+            blk('st', {
+              pins: [{ name: 'Q', kind: 'var_in_out', type: 'ARRAY[1..4] OF FB_Queue' }],
+            }),
+          ]),
+        ],
+      }),
+    );
+    fbd.global_vars.push({ name: 'mq', kind: 'var_global', type: 'FB_Mqtt' });
+    const refs = projectLibRefs(fbd, {});
+    for (const r of ['FB_ATCPID', 'FB_ATCPROFILE', 'FB_QUEUE', 'FB_MQTT'])
+      expect(refs.has(r)).toBe(true);
+  });
+
+  it('collects refs from attached ST sources and inline-ST bodies', () => {
+    const fbd = emptyProject('t');
+    fbd.pous.push(
+      pou({
+        networks: [
+          net([
+            blk('st', { params: { CODE: 'VAR\n  tuner : FB_AtcTune;\nEND_VAR\nOut := 1;' } }),
+          ]),
+        ],
+      }),
+    );
+    const srcs = { main: 'PROGRAM Main\nVAR\n  pid : FB_AtcPid;\nEND_VAR\nEND_PROGRAM' };
+    const refs = projectLibRefs(fbd, srcs);
+    expect(refs.has('FB_ATCTUNE')).toBe(true);
+    expect(refs.has('FB_ATCPID')).toBe(true);
+  });
+
+  it('excludes names the project declares itself', () => {
+    const fbd = emptyProject('t');
+    fbd.pous.push(pou({ name: 'FB_MyCtrl' }));
+    const srcs = {
+      mine: 'FUNCTION_BLOCK FB_MyLib\nVAR x : INT; END_VAR\nEND_FUNCTION_BLOCK',
+    };
+    const refs = projectLibRefs(fbd, srcs);
+    expect(refs.has('FB_MYCTRL')).toBe(false);
+    expect(refs.has('FB_MYLIB')).toBe(false);
   });
 });

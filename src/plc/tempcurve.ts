@@ -189,6 +189,7 @@ export class TempCurve extends LitElement {
     if (!this.pou) return;
     applyToPou(this.pou, this.prof);
     this.emit();
+    this.dispatchEvent(new CustomEvent('inserted', { bubbles: true, composed: true }));
   }
 
   private exportSt(): void {

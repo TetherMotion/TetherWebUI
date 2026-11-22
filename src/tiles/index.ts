@@ -4,7 +4,6 @@ import './machine';
 import './analysis';
 import './actions';
 import './tools';
-import './plc';
 import './faceplate';
 import './profile';
 import './hmi';

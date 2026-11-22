@@ -7,6 +7,7 @@ import {
   nextFreeBaseFor,
   parseAt,
   parseBusCatalog,
+  parseBusTopology,
   projectIoBindingsEx,
   serializeDeployMap,
   stIoBindings,
@@ -269,5 +270,21 @@ describe('serializeDeployMap roundtrip', () => {
     expect(back.channels).toHaveLength(r.map.channels.length);
     expect(back.bindings).toHaveLength(r.map.bindings.length);
     expect(back.hash).toBe(r.map.hash);
+  });
+});
+
+describe('parseBusTopology', () => {
+  it('parses the ecpump .topology artifact', () => {
+    const s = parseBusTopology(
+      '{"slaves":[{"i":1,"part":"EK1100","key":"ek1100","coupler":true,"tx":0,"rx":0},{"i":2,"part":"EL1014","key":"el1014.c1","tx":1,"rx":0}]}',
+    );
+    expect(s).toHaveLength(2);
+    expect(s[0]).toMatchObject({ i: 1, part: 'EK1100', coupler: true });
+    expect(s[1]).toMatchObject({ i: 2, key: 'el1014.c1', tx: 1 });
+  });
+  it('returns [] on malformed or empty input', () => {
+    expect(parseBusTopology('')).toEqual([]);
+    expect(parseBusTopology('not json')).toEqual([]);
+    expect(parseBusTopology('{"slaves":42}')).toEqual([]);
   });
 });

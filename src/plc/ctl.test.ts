@@ -395,3 +395,18 @@ describe('PlcCtl mqtt ops', () => {
     expect(q.getUint32(8, true)).toBe(2);
   });
 });
+
+describe('PlcCtl imageRead', () => {
+  it('sends a 13-byte {region, u64 off, u32 len} payload on op 0x0702', async () => {
+    mock(new Uint8Array([0xaa, 0xbb]));
+    const r = await new PlcCtl().imageRead(1, 8, 32);
+    expect([...r]).toEqual([0xaa, 0xbb]);
+    const d = new DataView(lastReq!.buffer, lastReq!.byteOffset);
+    expect(d.getUint16(0, true)).toBe(0x0702);
+    const p = new DataView(lastReq!.buffer, lastReq!.byteOffset + 16);
+    expect(lastReq!.length - 16).toBe(13);
+    expect(p.getUint8(0)).toBe(1);
+    expect(p.getBigUint64(1, true)).toBe(8n);
+    expect(p.getUint32(9, true)).toBe(32);
+  });
+});

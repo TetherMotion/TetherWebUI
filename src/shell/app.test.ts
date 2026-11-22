@@ -10,8 +10,13 @@ function makeHub(): DataHub {
   return hub;
 }
 
+const activity = (shell: Element, label: string) =>
+  [...shell.querySelectorAll<HTMLButtonElement>('.rail-act')].find(
+    (b) => b.textContent?.trim() === label,
+  )!;
+
 describe('tether-shell', () => {
-  it('renders the status strip and built-in board tabs', async () => {
+  it('renders the status strip and the activity bar', async () => {
     localStorage.clear();
     const shell = document.createElement('tether-shell') as TetherShell;
     shell.hub = makeHub();
@@ -19,29 +24,36 @@ describe('tether-shell', () => {
     await shell.updateComplete;
     await new Promise((r) => setTimeout(r, 0));
     expect(shell.querySelector('.status-strip')).toBeTruthy();
-    expect(shell.querySelectorAll('.board-tab').length).toBeGreaterThanOrEqual(4);
-    expect(shell.querySelector('board-view')).toBeTruthy();
+    for (const label of ['Configure', 'Program', 'Debug', 'Operate'])
+      expect(activity(shell, label)).toBeTruthy();
     shell.remove();
   });
 
-  it('exposes a TetherPLC tab hosting the PLC IDE tile', async () => {
+  it('hosts the PLC IDE under the Program activity; boards under Operate', async () => {
     localStorage.clear();
     const shell = document.createElement('tether-shell') as TetherShell;
     shell.hub = makeHub();
     document.body.appendChild(shell);
     await shell.updateComplete;
     await new Promise((r) => setTimeout(r, 0));
-    const tab = [...shell.querySelectorAll<HTMLButtonElement>('.board-tab')].find((t) =>
-      t.textContent?.includes('TetherPLC'),
-    );
-    expect(tab).toBeTruthy();
-    tab!.click();
-    await shell.updateComplete;
-    await new Promise((r) => setTimeout(r, 0));
+    // default activity is program — the IDE is mounted already (it
+    // lazy-imports, so wait for the upgrade before probing shadow DOM)
+    await customElements.whenDefined('tether-plc-ide');
     const ide = shell.querySelector('tether-plc-ide');
     expect(ide).toBeTruthy();
+    await (ide as unknown as { updateComplete: Promise<boolean> }).updateComplete;
     expect(ide!.querySelector('.plc-ide')).toBeTruthy();
-    expect(ide!.querySelectorAll('.plc-nav-btn').length).toBeGreaterThanOrEqual(5);
+    // Program renders the workbench (explorer + tabs + inspector), not nav
+    expect(ide!.querySelectorAll('.plc-nav-btn').length).toBe(0);
+    expect(ide!.querySelector('.plc-workbench')).toBeTruthy();
+    expect(shell.querySelector('board-view')).toBeFalsy();
+    // Operate shows the board tabs + board grid
+    activity(shell, 'Operate').click();
+    await shell.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(shell.querySelectorAll('.board-tab').length).toBeGreaterThanOrEqual(4);
+    expect(shell.querySelector('board-view')).toBeTruthy();
+    expect(shell.querySelector<HTMLElement>('tether-plc-ide')!.hidden).toBe(true);
     shell.remove();
   });
 
@@ -52,6 +64,8 @@ describe('tether-shell', () => {
     document.body.appendChild(shell);
     await shell.updateComplete;
     await new Promise((r) => setTimeout(r, 0));
+    activity(shell, 'Operate').click();
+    await shell.updateComplete;
     shell.editing = true;
     await shell.updateComplete;
     const view = shell.querySelector('board-view') as unknown as {

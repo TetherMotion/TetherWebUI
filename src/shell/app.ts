@@ -1,6 +1,7 @@
 /**
- * tether-shell — the application chrome: single status strip, board tab bar,
- * tool rail, slide-in drawers (alarms/events), and full-screen tool overlays.
+ * tether-shell — the application chrome: status strip, workflow activity bar
+ * (Configure/Program/Debug/Operate), board tabs (Operate only), slide-in
+ * drawers (alarms/events), and overlays (connect/settings).
  * All machine data lives in the DataHub; this element only owns layout state.
  */
 import { html, nothing, TemplateResult } from 'lit';
@@ -19,12 +20,25 @@ import { TILE_SPECS, TileSpec } from '../dash/registry';
 import '../board/board-view';
 import '../board/tile-frame';
 import { ensureTileTag } from '../dash/loaders';
+import type { Pane, PlcStatePayload, TetherPlcIde } from '../plc/plc-ide';
 import { icon } from '../icons';
 import { TileElement } from '../tiles/base';
 import { buildSupportBundle } from '../domain/analysis';
 
 type Drawer = 'alarms' | 'events' | undefined;
-type Overlay = 'commissioning' | 'diagnostics' | 'explore' | 'settings' | 'connect' | undefined;
+type Overlay = 'settings' | 'connect' | undefined;
+
+/** Workflow activities — Configure/Program/Debug host the PLC IDE in
+    section mode; Operate is the board/tile dashboards (TODO-UI-CONCEPT). */
+type ShellActivity = 'configure' | 'program' | 'debug' | 'operate';
+type PlcActivity = Exclude<ShellActivity, 'operate'>;
+
+const ACTIVITIES: { id: ShellActivity; label: string; icon: string }[] = [
+  { id: 'configure', label: 'Configure', icon: 'sliders-horizontal' },
+  { id: 'program', label: 'Program', icon: 'square-pen' },
+  { id: 'debug', label: 'Debug', icon: 'play' },
+  { id: 'operate', label: 'Operate', icon: 'gauge' },
+];
 
 interface Toast {
   id: number;
@@ -32,46 +46,16 @@ interface Toast {
   kind: 'error' | 'info';
 }
 
-const OVERLAY_TOOLS: {
-  id: Exclude<Overlay, undefined>;
-  label: string;
-  icon: string;
-  tiles: string[];
-}[] = [
-  {
-    id: 'commissioning',
-    label: 'Commissioning',
-    icon: 'clipboard-check',
-    tiles: [
-      'tile-sdo-inspector',
-      'tile-config-txn',
-      'tile-capture',
-      'tile-baseline',
-      'tile-checklist',
-    ],
-  },
-  {
-    id: 'diagnostics',
-    label: 'Diagnostics',
-    icon: 'stethoscope',
-    tiles: [
-      'tile-machine-state',
-      'tile-diag-bus',
-      'tile-diag-chain',
-      'tile-diag-topology',
-      'tile-diag-cyclic',
-      'tile-supervisor',
-      'tile-pdo-map',
-    ],
-  },
-  { id: 'explore', label: 'Explore', icon: 'binoculars', tiles: ['tile-catalog'] },
-];
-
 let toastSeq = 0;
 
 export class TetherShell extends TileElement {
   private boards: BoardDoc[] = [];
   private activeId = '';
+  private activity: ShellActivity = 'program';
+  /** the lazy plc-ide module — SECTIONS lives there for ⌘K section jumps. */
+  private plcMod?: typeof import('../plc/plc-ide');
+  /** last `plc-state` payload from the IDE — drives the strip's PLC items. */
+  private plcState?: PlcStatePayload;
   private drawer?: Drawer;
   private overlay?: Overlay;
   private galleryOpen = false;
@@ -104,10 +88,21 @@ export class TetherShell extends TileElement {
     return this.querySelector('board-view');
   }
 
+  /** the mounted PLC IDE — status strip + palette deep-link into it. */
+  private ide(): TetherPlcIde | null {
+    return this.querySelector<TetherPlcIde>('tether-plc-ide');
+  }
+
   // ---- Lifecycle -----------------------------------------------------------------
 
   connectedCallback(): void {
     super.connectedCallback();
+    /* the PLC IDE powers Configure/Program/Debug — register it lazily
+       so the engineering chunk loads in parallel with first paint */
+    void import('../plc/plc-ide').then((m) => {
+      this.plcMod = m;
+      this.requestUpdate();
+    });
     this.boards = ensureBuiltinBoards(loadBoards());
     this.activeId = this.boards[0]?.id ?? '';
     this.rebuildBoards();
@@ -134,6 +129,8 @@ export class TetherShell extends TileElement {
   private keyHandler = (e: KeyboardEvent): void => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
       e.preventDefault();
+      /* jump-anywhere palette — activities, sections, POUs, commands,
+         signals; tile adds still require Operate (handled per-item) */
       this.paletteOpen = !this.paletteOpen;
       this.paletteQuery = '';
       this.requestUpdate();
@@ -295,23 +292,94 @@ export class TetherShell extends TileElement {
 
   // ---- Quick add (⌘K) ---------------------------------------------------------------
 
-  private paletteResults(): { name: string; unit?: string }[] {
+  /** Jump-anywhere palette items — activities, PLC sections, POUs,
+      IDE commands, watch signals, and (under Operate) signal tiles.
+      Each item closes over its own action. */
+  private paletteItems(): { icon: string; title: string; sub: string; run: () => void }[] {
+    const items: { icon: string; title: string; sub: string; run: () => void }[] = [];
+    const ide = () => this.ide();
+    for (const a of ACTIVITIES)
+      items.push({
+        icon: a.icon,
+        title: `go: ${a.label}`,
+        sub: 'activity',
+        run: () => {
+          this.activity = a.id;
+          this.requestUpdate();
+        },
+      });
+    const sections = this.plcMod?.SECTIONS;
+    if (sections)
+      for (const [a, list] of Object.entries(sections)) {
+        const act = a as PlcActivity;
+        for (const s of list as { id: Pane; label: string }[])
+          items.push({
+            icon: 'list',
+            title: `${act} → ${s.label}`,
+            sub: 'section',
+            run: () => ide()?.navigate(act, s.id),
+          });
+      }
+    for (const p of this.plcState?.pous ?? [])
+      for (const [ed, tag] of [
+        ['fbd', 'FBD'],
+        ['st', 'ST'],
+        ['curve', 'curve'],
+        ['tune', 'tune'],
+      ] as const)
+        items.push({
+          icon: 'square-pen',
+          title: `pou: ${p.name} (${tag})`,
+          sub: p.kind,
+          run: () => ide()?.openEditor(p.name, ed),
+        });
+    const cmds: [string, string][] = [
+      ['check', 'compile + diagnose the project'],
+      ['deploy', 'build & deploy to the target'],
+      ['start', 'start the program'],
+      ['stop', 'stop the program'],
+      ['rollback', 'roll back the deployed program'],
+      ['refresh', 'refresh runtime state'],
+      ['new-program', 'new POU: program'],
+      ['new-fb', 'new POU: function block'],
+      ['new-fn', 'new POU: function'],
+    ];
+    for (const [name, hint] of cmds)
+      items.push({
+        icon: 'play',
+        title: `cmd: ${name}`,
+        sub: hint,
+        run: () => ide()?.command(name),
+      });
+    for (const s of this.hub?.signals ?? []) {
+      if (s.name.startsWith('plc.'))
+        items.push({
+          icon: 'binoculars',
+          title: `watch: ${s.name}`,
+          sub: 'signal → watch dock',
+          run: () => ide()?.watchKey(s.name),
+        });
+      if (this.activity === 'operate')
+        items.push({
+          icon: 'gauge',
+          title: `tile: ${s.name}`,
+          sub: 'sparkline on the board',
+          run: () => this.addSparkline(s.name),
+        });
+    }
     const q = this.paletteQuery.trim().toLowerCase();
-    if (!q || !this.hub) return [];
-    return this.hub.signals
-      .filter((s) => s.name.toLowerCase().includes(q))
-      .slice(0, 8)
-      .map((s) => ({
-        name: s.name,
-        unit: typeof s.metadata?.['unit'] === 'string' ? (s.metadata['unit'] as string) : undefined,
-      }));
+    const hit = q
+      ? items.filter(
+          (i) => i.title.toLowerCase().includes(q) || i.sub.toLowerCase().includes(q),
+        )
+      : items;
+    return hit.slice(0, 40);
   }
 
   private addSparkline(name: string): void {
     const binding: TileBinding = { entry: name };
     const view = this.boardView();
     view?.addTile?.('sparkline', { bindings: [binding], title: name }, { w: 6, h: 3 });
-    this.paletteOpen = false;
     this.editing = false;
     this.requestUpdate();
   }
@@ -351,6 +419,7 @@ export class TetherShell extends TileElement {
       <span class="status-item">${this.connLabel()}</span>
       <span class="status-item">${lease}</span>
       ${age !== undefined ? html`<span class="status-item">data ${Math.round(age / 100) / 10}s</span>` : nothing}
+      ${this.plcStripItems()}
       ${
         alarms
           ? html`<button
@@ -379,6 +448,116 @@ export class TetherShell extends TileElement {
         ${icon('sun-moon')}
       </button>
     </header>`;
+  }
+
+  /** PLC state items in the status strip — every item deep-links into
+      the IDE at the surface that owns the fact it reports. */
+  private plcStripItems(): TemplateResult | typeof nothing {
+    const s = this.plcState;
+    if (!s) return nothing;
+    const go = (fn: (ide: TetherPlcIde) => void) => () => {
+      const ide = this.ide();
+      if (ide) fn(ide);
+    };
+    return html`
+      <button
+        class="status-item ghost plc-item"
+        title="PLC project — Program"
+        @click=${go((ide) => ide.navigate('program', 'explorer'))}
+      >
+        ${icon('plug-zap')} ${s.project}
+      </button>
+      ${
+        s.runState
+          ? html`<button
+              class="status-item ghost plc-item plc-run-${s.runState}"
+              title="program ${s.runState}${s.epoch !== undefined ? ` · epoch ${s.epoch}` : ''} — Debug → Run"
+              @click=${go((ide) => ide.navigate('debug', 'run'))}
+            >
+              ${s.runState === 'running' ? '▶' : s.runState === 'fault' ? '⚠' : '■'}
+              ${s.runState}${s.epoch !== undefined ? ` · e${s.epoch}` : ''}
+            </button>`
+          : nothing
+      }
+      ${
+        s.errors
+          ? html`<button
+              class="status-item ghost plc-item warn"
+              title="${s.errors} compile problem(s) — Problems dock"
+              @click=${go((ide) => {
+                ide.navigate('program', 'explorer');
+                ide.openDock('problems');
+              })}
+            >
+              ${icon('triangle-alert')} ${s.errors}
+            </button>`
+          : nothing
+      }
+      ${
+        s.forces
+          ? html`<button
+              class="status-item ghost plc-item warn"
+              title="${s.forces} forced value(s) — Debug → Watch"
+              @click=${go((ide) => ide.navigate('debug', 'watch'))}
+            >
+              ⚡${s.forces}
+            </button>`
+          : nothing
+      }
+      ${
+        s.alarms
+          ? html`<button
+              class="status-item ghost plc-item warn"
+              title="${s.alarms} PLC alarm(s) — Debug → Events & Alarms"
+              @click=${go((ide) => ide.navigate('debug', 'events'))}
+            >
+              ${icon('triangle-alert')} ${s.alarms}
+            </button>`
+          : nothing
+      }
+      ${this.workflowSteps()}
+    `;
+  }
+
+  /** Configure → Program → Debug progress — each step lights from real
+      IDE state and deep-links to the activity that owns it. */
+  private workflowSteps(): TemplateResult | typeof nothing {
+    const s = this.plcState;
+    if (!s) return nothing;
+    const go = (a: 'configure' | 'program' | 'debug', p?: string) => () => {
+      this.ide()?.navigate(a, p as never);
+    };
+    const step = (
+      label: string,
+      state: 'done' | 'active' | 'todo',
+      title: string,
+      on: () => void,
+    ) => html`
+      <button
+        class="status-item ghost plc-item plc-step plc-step-${state}"
+        title=${title}
+        @click=${on}
+      >
+        ${state === 'done' ? '✓' : state === 'active' ? '●' : '○'} ${label}
+      </button>
+    `;
+    return html`<span class="plc-flow">
+      ${step('Configure', 'done', `project "${s.project}" — Configure`, go('configure'))}
+      <span class="plc-flow-sep">→</span>
+      ${step(
+        'Program',
+        s.errors ? 'todo' : 'done',
+        s.errors ? `${s.errors} problem(s) — Program` : 'clean compile — Program',
+        go('program'),
+      )}
+      <span class="plc-flow-sep">→</span>
+      ${step(
+        'Debug',
+        s.runState === 'running' ? 'active' : 'todo',
+        s.runState ? `program ${s.runState} — Debug` : 'not deployed — Debug',
+        go('debug', 'run'),
+      )}
+    </span>`;
   }
 
   private toggleTheme(): void {
@@ -489,9 +668,24 @@ export class TetherShell extends TileElement {
     </nav>`;
   }
 
-  private rail(): TemplateResult {
-    const tools = OVERLAY_TOOLS;
+  /** Activity bar — the workflow rail. Engineering activities host the
+      PLC IDE; Operate hosts the board/tile dashboards. */
+  private activityBar(): TemplateResult {
     return html`<aside class="rail">
+      ${ACTIVITIES.map(
+        (a) =>
+          html`<button
+            class="rail-btn rail-act${this.activity === a.id ? ' active' : ''}"
+            title=${a.label}
+            @click=${() => {
+              this.activity = a.id;
+              this.requestUpdate();
+            }}
+          >
+            ${icon(a.icon)}<span class="rail-act-label">${a.label}</span>
+          </button>`,
+      )}
+      <div class="rail-sep"></div>
       <button
         class="rail-btn${this.drawer === 'alarms' ? ' active' : ''}"
         title="Alarms"
@@ -514,20 +708,6 @@ export class TetherShell extends TileElement {
       >
         ${icon('list')}
       </button>
-      <div class="rail-sep"></div>
-      ${tools.map(
-        (t) =>
-          html`<button
-            class="rail-btn${this.overlay === t.id ? ' active' : ''}"
-            title=${t.label}
-            @click=${() => {
-              this.overlay = this.overlay === t.id ? undefined : t.id;
-              this.requestUpdate();
-            }}
-          >
-            ${icon(t.icon)}
-          </button>`,
-      )}
       <div class="spacer"></div>
       <button
         class="rail-btn"
@@ -605,18 +785,10 @@ export class TetherShell extends TileElement {
   }
 
   private drawerSeq = 0;
-  private overlaySeq = 0;
-  private prevOverlay?: Overlay;
 
   protected updated(changed: Map<string, unknown>): void {
     super.updated(changed);
     if (this.drawer) this.mountDrawerTile();
-    // `overlay` is not a reactive property, so detect transitions manually;
-    // `hub` changes also require a remount so tiles receive the client.
-    if (this.overlay !== this.prevOverlay || changed.has('hub')) {
-      this.prevOverlay = this.overlay;
-      this.mountOverlayTiles();
-    }
   }
 
   private mountDrawerTile(): void {
@@ -640,52 +812,7 @@ export class TetherShell extends TileElement {
   private overlayPanel(): TemplateResult | typeof nothing {
     if (!this.overlay) return nothing;
     if (this.overlay === 'settings') return this.settingsOverlay();
-    if (this.overlay === 'connect') return this.connectOverlay();
-    const tool = OVERLAY_TOOLS.find((t) => t.id === this.overlay)!;
-    return html`<div
-      class="overlay"
-      @click=${(e: Event) => {
-        if (e.target === e.currentTarget) {
-          this.overlay = undefined;
-          this.requestUpdate();
-        }
-      }}
-    >
-      <div class="overlay-panel">
-        <header class="overlay-head">
-          <strong>${tool.label}</strong>
-          <button
-            class="icon-btn"
-            @click=${() => {
-              this.overlay = undefined;
-              this.requestUpdate();
-            }}
-          >
-            ${icon('x')}
-          </button>
-        </header>
-        <div class="overlay-body overlay-tiles"></div>
-      </div>
-    </div>`;
-  }
-
-  private mountOverlayTiles(): void {
-    const overlay = this.overlay;
-    const tool = overlay ? OVERLAY_TOOLS.find((t) => t.id === overlay) : undefined;
-    if (!tool) return;
-    const seq = ++this.overlaySeq;
-    void Promise.all(tool.tiles.map(ensureTileTag)).then(() => {
-      if (seq !== this.overlaySeq || this.overlay !== overlay || !this.isConnected) return;
-      const body = this.querySelector<HTMLElement>('.overlay-tiles');
-      if (!body) return;
-      body.replaceChildren(
-        ...tool.tiles.map((tag) => {
-          const el = document.createElement(tag) as HTMLElement & { hub?: DataHub };
-          el.hub = this.hub;
-          return el;
-        }),
-      );
-    });
+    return this.connectOverlay();
   }
 
   /** "New board" template picker — blank plus operator presets. */
@@ -927,7 +1054,14 @@ export class TetherShell extends TileElement {
 
   private palette(): TemplateResult | typeof nothing {
     if (!this.paletteOpen) return nothing;
-    const results = this.paletteResults();
+    const results = this.paletteItems();
+    const pick = (i: number): void => {
+      const r = results[i];
+      if (!r) return;
+      this.paletteOpen = false;
+      r.run();
+      this.requestUpdate();
+    };
     return html`<div
       class="palette"
       @click=${(e: Event) => {
@@ -939,7 +1073,7 @@ export class TetherShell extends TileElement {
     >
       <div class="palette-box">
         <input
-          placeholder="Add a signal tile…"
+          placeholder="Jump anywhere — activity, section, POU, command, signal…"
           .value=${this.paletteQuery}
           @input=${(e: Event) => {
             this.paletteQuery = (e.target as HTMLInputElement).value;
@@ -955,8 +1089,8 @@ export class TetherShell extends TileElement {
             if (e.key === 'ArrowDown')
               this.paletteIndex = Math.min(this.paletteIndex + 1, results.length - 1);
             if (e.key === 'ArrowUp') this.paletteIndex = Math.max(this.paletteIndex - 1, 0);
-            if (e.key === 'Enter' && results[this.paletteIndex]) {
-              this.addSparkline(results[this.paletteIndex]!.name);
+            if (e.key === 'Enter') {
+              pick(this.paletteIndex);
               return;
             }
             this.requestUpdate();
@@ -968,12 +1102,12 @@ export class TetherShell extends TileElement {
             (r, i) =>
               html`<li
                 class=${i === this.paletteIndex ? 'active' : ''}
-                @click=${() => this.addSparkline(r.name)}
+                @click=${() => pick(i)}
               >
-                ${r.name} ${r.unit ? html`<small>${r.unit}</small>` : nothing}
+                ${r.title} <small>${r.sub}</small>
               </li>`,
           )}
-          ${!results.length ? html`<li class="empty">${this.paletteQuery ? 'No matching signals' : 'Type to search signals'}</li>` : nothing}
+          ${!results.length ? html`<li class="empty">${this.paletteQuery ? 'No matches' : 'Type to filter — activities, sections, POUs, commands, signals'}</li>` : nothing}
         </ul>
       </div>
     </div>`;
@@ -988,14 +1122,15 @@ export class TetherShell extends TileElement {
 
   protected render(): TemplateResult {
     const board = this.activeBoard();
+    const operate = this.activity === 'operate';
     return html`
       <div class="app">
-        ${this.statusStrip()} ${this.tabBar()}
+        ${this.statusStrip()} ${operate ? this.tabBar() : nothing}
         <div class="body">
-          ${this.rail()}
+          ${this.activityBar()}
           <main class="content">
             ${
-              this.editing && board?.source !== 'profile'
+              operate && this.editing && board?.source !== 'profile'
                 ? html`<button
                     class="gallery-fab"
                     @click=${() => {
@@ -1007,12 +1142,29 @@ export class TetherShell extends TileElement {
                   </button>`
                 : nothing
             }
-            <board-view
+            ${
+              operate
+                ? html`<board-view
+                    .hub=${this.hub}
+                    .board=${board}
+                    .editing=${this.editing}
+                    @board-change=${(e: Event) => this.onBoardChange(e as CustomEvent)}
+                  ></board-view>`
+                : nothing
+            }
+            <!-- the IDE stays mounted across activity switches — its
+                 project/ctl state must survive Configure→Debug hops -->
+            <tether-plc-ide
               .hub=${this.hub}
-              .board=${board}
-              .editing=${this.editing}
-              @board-change=${(e: Event) => this.onBoardChange(e as CustomEvent)}
-            ></board-view>
+              .activity=${operate ? 'program' : this.activity}
+              ?hidden=${operate}
+              @plc-navigate=${(e: CustomEvent<{ activity: PlcActivity }>) => {
+                this.activity = e.detail.activity;
+              }}
+              @plc-state=${(e: CustomEvent<PlcStatePayload>) => {
+                this.plcState = e.detail;
+              }}
+            ></tether-plc-ide>
           </main>
           ${this.gallery()} ${this.drawerPanel()}
         </div>

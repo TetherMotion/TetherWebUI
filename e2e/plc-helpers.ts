@@ -44,11 +44,16 @@ export async function ensureConnected(page: Page): Promise<void> {
   await connectDashboard(page);
 }
 
-/** Open the TetherPLC board and wait for the IDE element. */
+/** Switch the shell workflow activity (Configure/Program/Debug/Operate). */
+export async function act(page: Page, name: string): Promise<void> {
+  await page.locator('.rail-act', { hasText: name }).click();
+}
+
+/** Ensure the PLC IDE is visible (Program activity) and wait for it. */
 export async function openPlcIde(page: Page): Promise<Locator> {
-  await page.locator('.board-tab', { hasText: 'TetherPLC' }).click();
-  const ide = page.locator('tile-plc-ide tether-plc-ide');
-  await expect(ide).toHaveCount(1, { timeout: 30_000 });
+  await act(page, 'Program');
+  const ide = page.locator('tether-plc-ide');
+  await expect(ide).toBeVisible({ timeout: 30_000 });
   /* fresh projects auto-open the template picker — tests want the
      blank canvas, so dismiss it (session-scoped: reloads stay blank).
      Wait for the toolbar (first render) first: tplPicker is set in
@@ -66,14 +71,25 @@ export async function openFreshIde(page: Page, ctl = CTL_URL): Promise<void> {
   await openPlcIde(page);
 }
 
-/** Create a POU of the given kind via the explorer toolbar. */
+/** Create a POU of the given kind via the explorer sidebar — also
+    opens its FBD editor tab. */
 export async function newPou(page: Page, kind: 'program' | 'function_block' | 'function'): Promise<void> {
   const label = { program: '+PRG', function_block: '+FB', function: '+FN' }[kind];
-  await page.locator('.plc-nav-btn', { hasText: 'Explorer' }).click();
   await page.locator('.plc-tree-head button', { hasText: label }).click();
 }
 
-/** Switch IDE panes. */
+/** Open a POU's editor tab from the explorer sidebar. */
+export async function openPou(page: Page, name: string): Promise<void> {
+  await page.locator('.plc-tree-pou', { hasText: name }).first().click();
+}
+
+/** Switch the active POU tab's editor kind (FBD/ST/Curve/Tune). */
+export async function edKind(page: Page, name: string): Promise<void> {
+  await page.locator('.plc-edkind .chip-btn', { hasText: name }).click();
+}
+
+/** Switch IDE sections (Configure/Debug nav — Program has tabs, not
+    panes; use openPou/edKind there). */
 export async function pane(page: Page, name: string): Promise<void> {
   await page.locator('.plc-nav-btn', { hasText: name }).click();
 }

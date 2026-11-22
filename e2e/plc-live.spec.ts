@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { expect, test, type Page } from '@playwright/test';
 import {
+  act,
+  edKind,
   block,
   connectDashboard,
   dragWire,
@@ -75,7 +77,7 @@ const progOps = (page: Page, name: string) =>
     previous test/run left it stopped) */
 async function openDeploy(page: Page): Promise<void> {
   await openFreshIde(page, LIVE_CTL);
-  await pane(page, 'Deploy');
+  await act(page, 'Debug'); await pane(page, 'Run');
   await expect(page.locator('.plc-ctlbar')).toContainText('connected', {
     timeout: 15_000,
   });
@@ -150,7 +152,7 @@ test.describe('TetherPLC IDE — live runtime', () => {
 
     // real program through the ST pane: POU1.st must declare PROGRAM POU1
     await newPou(page, 'program');
-    await pane(page, 'ST');
+    await edKind(page, 'ST');
     await setStSource(
       page,
       [
@@ -163,7 +165,7 @@ test.describe('TetherPLC IDE — live runtime', () => {
       ].join('\n'),
     );
 
-    await pane(page, 'Deploy');
+    await act(page, 'Debug'); await pane(page, 'Run');
     await progOps(page, 'build & deploy').click();
     await expect(page.locator('.plc-status')).toContainText('deployed', {
       timeout: 60_000,
@@ -306,7 +308,7 @@ test.describe('TetherPLC IDE — live runtime', () => {
     await freshPlcProject(page, LIVE_CTL);
     await connectDashboard(page, 'operator', 'ws://127.0.0.1:8090/tether-io');
     await openPlcIde(page);
-    await pane(page, 'watch');
+    await act(page, 'Debug'); await pane(page, 'Watch');
 
     // the active program's DINT counter (LiveDemo.cnt, or POU1.cnt when
     // an earlier test's build & deploy swapped the program) increments
@@ -332,18 +334,18 @@ test.describe('TetherPLC IDE — live runtime', () => {
     // tplc-io rebuild its registry, dropping the WS bridge's TCP leg;
     // the dashboard reconnects and re-lists the catalog
     await newPou(page, 'program');
-    await pane(page, 'ST');
+    await edKind(page, 'ST');
     await setStSource(
       page,
       'PROGRAM POU1\nVAR\n    cnt : DINT := 0;\nEND_VAR\ncnt := cnt + 1;\nEND_PROGRAM',
     );
-    await pane(page, 'Deploy');
+    await act(page, 'Debug'); await pane(page, 'Run');
     await page.locator('.plc-ops button', { hasText: 'build & deploy' }).click();
     await expect(page.locator('.plc-status')).toContainText('deployed', {
       timeout: 60_000,
     });
 
-    await pane(page, 'watch');
+    await act(page, 'Debug'); await pane(page, 'Watch');
     const row = page.locator('tr', { hasText: 'plc.POU1.cnt' });
     await expect(row).toHaveCount(1, { timeout: 45_000 });
     await expect(row.locator('td').nth(2)).not.toHaveText('—', {
@@ -362,18 +364,18 @@ test.describe('TetherPLC IDE — live runtime', () => {
     await openPlcIde(page);
 
     await newPou(page, 'program');
-    await pane(page, 'ST');
+    await edKind(page, 'ST');
     await setStSource(
       page,
       'PROGRAM POU1\nVAR\n    cnt : DINT := 0;\n    setpoint : DINT := 21;\nEND_VAR\ncnt := cnt + 1;\nEND_PROGRAM',
     );
-    await pane(page, 'Deploy');
+    await act(page, 'Debug'); await pane(page, 'Run');
     await page.locator('.plc-ops button', { hasText: 'build & deploy' }).click();
     await expect(page.locator('.plc-status')).toContainText('deployed', {
       timeout: 60_000,
     });
 
-    await pane(page, 'watch');
+    await act(page, 'Debug'); await pane(page, 'Watch');
     const row = page.locator('tr', { hasText: 'plc.POU1.setpoint' });
     await expect(row).toHaveCount(1, { timeout: 45_000 });
     const val = row.locator('td').nth(2);
@@ -397,7 +399,7 @@ test.describe('TetherPLC IDE — live runtime', () => {
     await connectDashboard(page, 'operator', 'ws://127.0.0.1:8090/tether-io');
     await openPlcIde(page);
     await newPou(page, 'program');
-    await pane(page, 'FBD');
+    await edKind(page, 'FBD');
     await page.waitForSelector('fbd-canvas svg');
 
     await paletteItem(page, 'TON').first().click();
@@ -444,14 +446,14 @@ test.describe('TetherPLC IDE — live runtime', () => {
       .toBe(true);
 
     // ship it to the real runtime
-    await pane(page, 'Deploy');
+    await act(page, 'Debug'); await pane(page, 'Run');
     await page.locator('.plc-ops button', { hasText: 'build & deploy' }).click();
     await expect(page.locator('.plc-status')).toContainText('deployed', {
       timeout: 60_000,
     });
 
     // canvas live overlays: TON's out pins resolve plc.<prog>.i1.Q/ET
-    await pane(page, 'FBD');
+    await act(page, 'Program'); await edKind(page, 'FBD');
     const lives = ton.locator('.fbd-pin-live');
     await expect(lives.first()).toBeVisible({ timeout: 45_000 });
     // ET accumulates every scan — at least one live text must change
@@ -527,13 +529,13 @@ test.describe('TetherPLC IDE — live runtime', () => {
     // Curves pane offers the one-time library attach until the project
     // contains FB_AtcProfile — the file lands in stSources and compiles
     // together with the program
-    await pane(page, 'Curves');
+    await edKind(page, 'Curve');
     await page.waitForSelector('temp-curve', { timeout: 15_000 });
     await page.locator('.plc-main input[type="file"]').setInputFiles(
       `${FIXTURES}/atc_tempctrl.st`,
     );
 
-    await pane(page, 'ST');
+    await edKind(page, 'ST');
     await setStSource(
       page,
       [
@@ -571,13 +573,13 @@ test.describe('TetherPLC IDE — live runtime', () => {
       ].join('\n'),
     );
 
-    await pane(page, 'Deploy');
+    await act(page, 'Debug'); await pane(page, 'Run');
     await page.locator('.plc-ops button', { hasText: 'build & deploy' }).click();
     await expect(page.locator('.plc-status')).toContainText('deployed', {
       timeout: 60_000,
     });
 
-    await pane(page, 'watch');
+    await act(page, 'Debug'); await pane(page, 'Watch');
     const consoleLog: string[] = [];
     page.on('console', (m) => consoleLog.push(`${m.type()}: ${m.text()}`));
     page.on('pageerror', (e) => consoleLog.push(`pageerror: ${e.message}`));
@@ -752,6 +754,7 @@ test.describe('TetherPLC IDE — live runtime', () => {
     await expect(page.locator('.status-strip')).toContainText('connected', {
       timeout: 60_000,
     });
+    await act(page, 'Operate');
     await page.locator('.board-tab', { hasText: 'Profile E2E' }).click();
 
     const pt = page.locator('tile-profile');
@@ -825,7 +828,7 @@ test.describe('TetherPLC IDE — live runtime', () => {
     await connectDashboard(page, 'operator', 'ws://127.0.0.1:8090/tether-io');
     await openPlcIde(page);
     await newPou(page, 'program');
-    await pane(page, 'ST');
+    await edKind(page, 'ST');
     await setStSource(
       page,
       [
@@ -844,7 +847,7 @@ test.describe('TetherPLC IDE — live runtime', () => {
         'END_PROGRAM',
       ].join('\n'),
     );
-    await pane(page, 'Deploy');
+    await act(page, 'Debug'); await pane(page, 'Run');
     await page.locator('.plc-ops button', { hasText: 'build & deploy' }).click();
     await expect(page.locator('.plc-status')).toContainText('deployed', {
       timeout: 60_000,
@@ -895,6 +898,7 @@ test.describe('TetherPLC IDE — live runtime', () => {
     await expect(page.locator('.status-strip')).toContainText('connected', {
       timeout: 60_000,
     });
+    await act(page, 'Operate');
     await page.locator('.board-tab', { hasText: 'Faceplate E2E' }).click();
 
     const fp = page.locator('tile-faceplate');

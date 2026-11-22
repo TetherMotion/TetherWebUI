@@ -92,6 +92,7 @@ export class TempTune extends LitElement {
     if (!this.pou) return;
     applyTunerToPou(this.pou, this.cfg);
     this.emit();
+    this.dispatchEvent(new CustomEvent('inserted', { bubbles: true, composed: true }));
   }
 
   /** merged param list: defaults overridden by cfg.params. */

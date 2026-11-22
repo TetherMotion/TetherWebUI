@@ -1,12 +1,14 @@
 import { expect, test } from '@playwright/test';
-import { fileURLToPath } from 'node:url';
 import {
+  act,
   block,
   connectDashboard,
   dragWire,
+  edKind,
   ensureConnected,
   freshPlcProject,
   newPou,
+  openPou,
   openFreshIde,
   openPlcIde,
   paletteItem,
@@ -17,8 +19,6 @@ import {
   setStSource,
 } from './plc-helpers';
 
-const FIXTURES = fileURLToPath(new URL('../test-fixtures', import.meta.url));
-
 test.describe('TetherPLC IDE', () => {
   test('template picker offers starters on a fresh project; apply loads POUs', async ({
     page,
@@ -26,9 +26,8 @@ test.describe('TetherPLC IDE', () => {
     /* bypass openPlcIde — it dismisses the picker for the other tests */
     await freshPlcProject(page);
     await connectDashboard(page);
-    await page.locator('.board-tab', { hasText: 'TetherPLC' }).click();
-    const ide = page.locator('tile-plc-ide tether-plc-ide');
-    await expect(ide).toHaveCount(1, { timeout: 30_000 });
+    const ide = page.locator('tether-plc-ide');
+    await expect(ide).toBeVisible({ timeout: 30_000 });
 
     const card = ide.locator('.plc-tpl-card', { hasText: 'Temperature cell' });
     await expect(card).toBeVisible({ timeout: 15_000 });
@@ -46,7 +45,7 @@ test.describe('TetherPLC IDE', () => {
   test('IDE connects to tplc serve /ws and loads the library catalog', async ({ page }) => {
     await openFreshIde(page);
     await newPou(page, 'program');
-    await pane(page, 'FBD');
+    await edKind(page, 'FBD');
 
     // blocks meta-op → palette groups per library file (TC2/TC3/tempctrl)
     const groups = page.locator('fbd-canvas .fbd-pgroup-name');
@@ -54,14 +53,14 @@ test.describe('TetherPLC IDE', () => {
     await expect(groups.filter({ hasText: 'TC3' }).first()).toBeVisible();
     await expect(groups.filter({ hasText: 'TEMPCTRL' }).first()).toBeVisible();
 
-    // Deploy pane reports the backend reachable
-    await pane(page, 'Deploy');
+    // Debug → Run reports the backend reachable
+    await act(page, 'Debug');
+    await pane(page, 'Run');
     await expect(page.locator('.plc-ctlbar')).toContainText('connected', { timeout: 15_000 });
   });
 
   test('POU kinds are created from the explorer', async ({ page }) => {
     await openFreshIde(page);
-    await pane(page, 'Explorer');
 
     await newPou(page, 'program');
     await expect(page.locator('.plc-tree-pou', { hasText: 'POU1' })).toContainText('PRG');
@@ -82,7 +81,7 @@ test.describe('TetherPLC IDE', () => {
   test('mouse drag wires blocks; undo and redo work', async ({ page }) => {
     await openFreshIde(page);
     await newPou(page, 'program');
-    await pane(page, 'FBD');
+    await edKind(page, 'FBD');
     await page.waitForSelector('fbd-canvas svg', { timeout: 15_000 });
 
     // var-in (source, right-side out pin) → var-out (sink, left-side in pin)
@@ -108,7 +107,7 @@ test.describe('TetherPLC IDE', () => {
   test('live typecheck flags an incompatible wire', async ({ page }) => {
     await openFreshIde(page);
     await newPou(page, 'program');
-    await pane(page, 'FBD');
+    await edKind(page, 'FBD');
     await page.waitForSelector('fbd-canvas svg');
 
     // ADD produces a numeric value; TON.IN is BOOL — REAL→BOOL is not
@@ -131,7 +130,7 @@ test.describe('TetherPLC IDE', () => {
   test('device wizard creates a mixed EK1110 DI+DO terminal', async ({ page }) => {
     await openFreshIde(page);
     await newPou(page, 'program');
-    await pane(page, 'FBD');
+    await edKind(page, 'FBD');
     await page.waitForSelector('fbd-canvas svg');
 
     await paletteItem(page, 'EK1110').click();
@@ -165,7 +164,7 @@ test.describe('TetherPLC IDE', () => {
   test('ST source compiles through /ws; diagnostics navigate', async ({ page }) => {
     await openFreshIde(page);
     await newPou(page, 'program');
-    await pane(page, 'ST');
+    await edKind(page, 'ST');
     await page.waitForSelector('st-editor .cm-content', { timeout: 15_000 });
 
     await setStSource(
@@ -194,7 +193,7 @@ test.describe('TetherPLC IDE', () => {
   test('catalog block placement auto-attaches its library source', async ({ page }) => {
     await openFreshIde(page);
     await newPou(page, 'program');
-    await pane(page, 'FBD');
+    await edKind(page, 'FBD');
     await page.waitForSelector('fbd-canvas svg');
 
     // place FB_AtcPid from the tempctrl catalog group
@@ -205,34 +204,31 @@ test.describe('TetherPLC IDE', () => {
     await expect(block(page, 'FB_AtcPid')).toHaveCount(1);
 
     // need-libsrc → libsrc meta-op → source lands in stSources (Libraries tree)
-    await pane(page, 'Explorer');
     await expect(page.locator('.plc-tree')).toContainText('atc_tempctrl', { timeout: 20_000 });
 
     // and the project still compiles through /ws
-    await pane(page, 'FBD');
+    await edKind(page, 'FBD');
     await runCheck(page);
     await expect(page.locator('.plc-status')).not.toContainText('check failed', {
       timeout: 30_000,
     });
   });
 
-  test('curve editor attaches library, inserts profile, auto-wires, compiles', async ({ page }) => {
+  test('curve editor inserts profile; library auto-resolves, auto-wires, compiles', async ({
+    page,
+  }) => {
     await openFreshIde(page);
     await newPou(page, 'program');
-    await pane(page, 'Curves');
+    await edKind(page, 'Curve');
     await page.waitForSelector('temp-curve', { timeout: 15_000 });
 
-    // attach the Atc_TempCtrl library source via the file input
-    await page.locator('.plc-main input[type="file"]').setInputFiles(
-      `${FIXTURES}/atc_tempctrl.st`,
-    );
-    await expect(page.locator('.plc-main')).not.toContainText('FB_AtcProfile is not', {
-      timeout: 10_000,
-    });
-
-    // insert the profile into the selected POU
+    // insert the profile into the selected POU — the generated blocks
+    // reference FB_AtcProfile, so its library source attaches
+    // automatically through the catalog (no manual attach step)
     await page.locator('temp-curve button', { hasText: /insert into/ }).click();
-    await pane(page, 'FBD');
+    await expect(page.locator('.plc-tree')).toContainText('atc_tempctrl', { timeout: 20_000 });
+
+    await edKind(page, 'FBD');
     await expect(block(page, 'FB_AtcProfile')).toHaveCount(1);
     await expect(block(page, 'FB_AtcPid')).toHaveCount(1);
     // auto-wiring produced wires
@@ -249,7 +245,7 @@ test.describe('TetherPLC IDE', () => {
   test('project persists across reload', async ({ page }) => {
     await openFreshIde(page);
     await newPou(page, 'program');
-    await pane(page, 'FBD');
+    await edKind(page, 'FBD');
     await page.waitForSelector('fbd-canvas svg');
     await page.locator('fbd-canvas .fbd-palette button[title*="variable input"]').click();
     await page.locator('fbd-canvas .fbd-palette button[title*="variable output"]').click();
@@ -263,24 +259,28 @@ test.describe('TetherPLC IDE', () => {
     await page.reload();
     await ensureConnected(page);
     await openPlcIde(page);
-    await pane(page, 'FBD');
+    await openPou(page, 'POU1');
     await expect(block(page, 'v0')).toHaveCount(1);
     await expect(page.locator('fbd-canvas .fbd-wire')).toHaveCount(1);
   });
 
-  test('watch, tasks and deploy panes render their surfaces', async ({ page }) => {
+  test('tasks (configure), watch and run (debug) panes render their surfaces', async ({
+    page,
+  }) => {
     await openFreshIde(page);
     await newPou(page, 'program');
 
+    await act(page, 'Configure');
     await pane(page, 'Tasks');
     await expect(page.locator('.plc-main')).toBeVisible();
 
+    await act(page, 'Debug');
     await pane(page, 'Watch');
     await expect(page.locator('.plc-main')).toBeVisible();
 
-    await pane(page, 'Deploy');
+    await pane(page, 'Run');
     await expect(page.locator('.plc-ctlbar')).toContainText('connected', { timeout: 15_000 });
-    /* the deploy pane has several .plc-ops card groups — assert the
+    /* the run pane has several .plc-ops card groups — assert the
        first is visible rather than violating strict mode */
     await expect(page.locator('.plc-ops').first()).toBeVisible();
   });

@@ -2,7 +2,14 @@ import { test, expect } from '@playwright/test';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { freshPlcProject, connectDashboard, openPlcIde, CTL_URL } from './plc-helpers';
+import {
+  act,
+  freshPlcProject,
+  connectDashboard,
+  openPlcIde,
+  pane,
+  CTL_URL,
+} from './plc-helpers';
 import { readFileSync } from 'node:fs';
 
 /* FBD-pane selection coverage: blank project guidance, template
@@ -47,8 +54,7 @@ test('blank project: FBD pane guides to +PRG; new POU renders canvas', async ({ 
 test('template picker: chosen template lands on its first network', async ({ page }) => {
   await freshPlcProject(page, CTL_URL);
   await connectDashboard(page);
-  await page.locator('.board-tab', { hasText: 'TetherPLC' }).click();
-  const ide = page.locator('tile-plc-ide tether-plc-ide');
+  const ide = page.locator('tether-plc-ide');
   await expect(ide.locator('.plc-toolbar')).toBeVisible({ timeout: 15_000 });
   await ide.locator('button.plc-tpl-card').first().click();
   await ide.locator('.plc-nav-btn', { hasText: 'FBD' }).click();
@@ -60,7 +66,8 @@ test('project_open adopts manifest.ui; reload rehydrates it', async ({ page }) =
   await connectDashboard(page);
   const ide = await openPlcIde(page);
 
-  await ide.locator('.plc-nav-btn', { hasText: 'Project' }).click();
+  await act(page, 'Configure');
+  await pane(page, 'Project');
   await ide.locator('input[placeholder="/path/to/project"]').fill(projDir);
   await ide.locator('button', { hasText: 'open' }).first().click();
   await expect(ide.locator('.plc-status')).toContainText('project opened', { timeout: 10_000 });
@@ -73,8 +80,7 @@ test('project_open adopts manifest.ui; reload rehydrates it', async ({ page }) =
   // the document (proves manifest.ui → canvas, not localStorage)
   await page.evaluate(() => localStorage.removeItem('tether.plc.project.v1'));
   await page.reload();
-  await page.locator('.board-tab', { hasText: 'TetherPLC' }).click();
-  const ide2 = page.locator('tile-plc-ide tether-plc-ide');
+  const ide2 = page.locator('tether-plc-ide');
   await expect(ide2.locator('.plc-toolbar')).toBeVisible({ timeout: 15_000 });
   await ide2.locator('.plc-nav-btn', { hasText: 'FBD' }).click();
   await expect(ide2.locator('fbd-canvas')).toHaveCount(1, { timeout: 15_000 });

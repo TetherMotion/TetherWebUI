@@ -8,7 +8,7 @@
  * signatures/typechecking, palette groups per library file, and the
  * source file needed to make the project self-contained.
  */
-import { IfaceKind, IfaceVar, Pou } from './model';
+import { FbdProject, IfaceKind, IfaceVar, Pou } from './model';
 import type { PaletteGroup, PaletteItem } from './palette';
 import type { MetaChannel } from './build';
 
@@ -153,6 +153,55 @@ export function catalogGroups(libs: CatalogLib[]): PaletteGroup[] {
     });
   }
   return groups.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+const FB_REF = /\b(?:FB|F)_[A-Za-z0-9_]+/gi;
+const POU_DECL =
+  /\b(?:FUNCTION_BLOCK|FUNCTION|PROGRAM|TYPE|STRUCT|VAR_GLOBAL|VAR_EXTERNAL)\s+([A-Za-z_][A-Za-z0-9_]*)/gi;
+
+/**
+ * Type names the project references but does not declare itself —
+ * every place a library block can sneak in:
+ *
+ *   - fbd block `type_ref`s (dropped/generated blocks)
+ *   - pin/interface/global var types (`PROF : FB_AtcProfile`,
+ *     `ARRAY[..] OF FB_X`)
+ *   - FB_/F_-prefixed identifiers inside attached ST sources and
+ *     inline-ST block bodies (params.CODE declares FB-typed vars)
+ *
+ * Names the project declares itself (pou names, POU/TYPE decls in
+ * stSources) are excluded so a user-defined `FB_Foo` never triggers a
+ * same-named library attach. Feed the result through `blockSource` —
+ * refs that aren't catalog blocks resolve to undefined.
+ */
+export function projectLibRefs(
+  fbd: FbdProject,
+  stSources: Record<string, string>,
+): Set<string> {
+  const refs = new Set<string>();
+  const declared = new Set<string>();
+  const addTy = (ty: string | undefined): void => {
+    if (!ty) return;
+    for (const m of ty.matchAll(FB_REF)) refs.add(m[0].toUpperCase());
+  };
+  const scanSt = (text: string): void => {
+    for (const m of text.matchAll(POU_DECL)) declared.add(m[1]!.toUpperCase());
+    for (const m of text.matchAll(FB_REF)) refs.add(m[0].toUpperCase());
+  };
+  for (const p of fbd.pous) declared.add(p.name.toUpperCase());
+  for (const v of fbd.global_vars ?? []) addTy(v.type);
+  for (const src of Object.values(stSources)) scanSt(src);
+  for (const p of fbd.pous) {
+    for (const v of p.interface) addTy(v.type);
+    for (const n of p.networks)
+      for (const b of n.blocks) {
+        if (b.type_ref) refs.add(b.type_ref.toUpperCase());
+        for (const pin of b.pins ?? []) addTy(pin.type);
+        for (const val of Object.values(b.params ?? {})) scanSt(val);
+      }
+  }
+  for (const d of declared) refs.delete(d);
+  return refs;
 }
 
 /** Look up which library/file a block name came from (for auto-attach). */

@@ -58,6 +58,7 @@ export const CTL = {
   DBG_STATE_DIFF: 0x0517,
   DBG_FIELDS: 0x0518,
   IMAGE_STATS: 0x0701,
+  IMAGE_READ: 0x0702,
   SHADOW_LOAD: 0x0801,
   SHADOW_STATUS: 0x0802,
   SHADOW_COMPARE: 0x0803,
@@ -572,6 +573,17 @@ export class PlcCtl {
     d.setUint32(8, len, true);
     if (sel) p[12] = sel;
     return this.call(CTL.DBG_READ, p).then((r) => r.payload);
+  }
+
+  /** raw process-image bytes. region 0 = %I, 1 = %Q; `off`/`len` are
+      image byte offsets. */
+  imageRead(region: 0 | 1, off: number, len: number): Promise<Uint8Array> {
+    const p = new Uint8Array(13);
+    const d = new DataView(p.buffer);
+    p[0] = region;
+    d.setBigUint64(1, BigInt(off), true);
+    d.setUint32(9, len, true);
+    return this.call(CTL.IMAGE_READ, p).then((r) => r.payload);
   }
 
   /** one-shot write at the next task boundary (no force semantics). */

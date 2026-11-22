@@ -11,6 +11,7 @@
  */
 import { html, LitElement, nothing, TemplateResult } from 'lit';
 import { DataHub } from '../data/hub';
+import { ensureTileTag } from '../dash/loaders';
 import './fbd-canvas';
 import './ld-canvas';
 import './st-editor';
@@ -43,12 +44,15 @@ import {
   ShadowDiff,
   ShadowStatus,
 } from './ctl';
-import { byteToOffset, compileProject, CompileDiag, diagsForFile, injectDeployMap } from './build';
+import { byteToOffset, compileProject, CompileDiag, diagsForFile, injectDeployMap, projectSources } from './build';
 import {
   atCollisions,
   endpointCollisions,
   generateDeployMap,
   serializeDeployMap,
+  parseAt,
+  parseBusCatalog,
+  parseBusTopology,
   projectIoBindingsEx,
   stIoBindings,
   validateDeployMapText,
@@ -103,15 +107,10 @@ import {
   fetchCatalog,
   fetchLibSrc,
   libStem,
+  projectLibRefs,
   type CatalogLib,
 } from './catalog';
-import {
-  CurveProfile,
-  defaultProfile,
-  hasProfileLibrary,
-  profileFromPou,
-  sourceStem,
-} from './curve';
+import { CurveProfile, defaultProfile, profileFromPou, sourceStem } from './curve';
 import { TuneCfg, tunerFromPou } from './tune';
 import {
   instantiateTemplate,
@@ -122,17 +121,35 @@ import {
   type ProjectTemplate,
 } from './templates';
 
-type Pane =
+/** Workflow activity the IDE is embedded in (shell activity bar). */
+export type Activity = 'configure' | 'program' | 'debug';
+
+/** Sections are the second (and last) navigation level inside an activity. */
+export type Pane =
+  // program
   | 'explorer'
   | 'st'
   | 'fbd'
   | 'curves'
+  // configure
+  | 'project'
+  | 'target'
+  | 'discovery'
+  | 'iomap'
   | 'tasks'
+  | 'libraries'
+  | 'services'
+  | 'commissioning'
+  // debug
+  | 'run'
+  | 'tasksrt'
   | 'watch'
-  | 'alarms'
+  | 'ioimage'
   | 'events'
-  | 'deploy'
-  | 'project';
+  | 'alarms'
+  | 'diagnostics'
+  | 'simulate'
+  | 'explore';
 
 /** migrate rule kinds shared with the runtime's MIGD encoding */
 const DBG_DIFF_KIND = ['copy', 'xform', 'init', 'drop', 'deny', 'alias'];
@@ -147,18 +164,89 @@ const IFACE_KINDS: IfaceKind[] = [
   'var_global',
 ];
 
-const PANES: { id: Pane; label: string }[] = [
-  { id: 'explorer', label: 'Explorer' },
-  { id: 'st', label: 'ST' },
-  { id: 'fbd', label: 'FBD' },
-  { id: 'curves', label: 'Curves' },
-  { id: 'tasks', label: 'Tasks' },
-  { id: 'watch', label: 'Watch' },
-  { id: 'alarms', label: 'Alarms' },
-  { id: 'events', label: 'Events' },
-  { id: 'deploy', label: 'Deploy' },
-  { id: 'project', label: 'Project' },
-];
+/** Activity → its sections. Workflow order per TODO-UI-CONCEPT.md:
+    Configure defines the system, Program edits it, Debug runs it. */
+export const SECTIONS: Record<Activity, { id: Pane; label: string }[]> = {
+  configure: [
+    { id: 'project', label: 'Project' },
+    { id: 'target', label: 'Target' },
+    { id: 'discovery', label: 'Discovery' },
+    { id: 'iomap', label: 'I/O Map' },
+    { id: 'tasks', label: 'Tasks' },
+    { id: 'libraries', label: 'Libraries' },
+    { id: 'services', label: 'Services' },
+    { id: 'commissioning', label: 'Commissioning' },
+  ],
+  /* Program has no sections — it renders the workbench (explorer
+     sidebar + editor tabs + inspector) instead of nav+section. */
+  program: [],
+  debug: [
+    { id: 'run', label: 'Run' },
+    { id: 'tasksrt', label: 'Tasks' },
+    { id: 'watch', label: 'Watch' },
+    { id: 'ioimage', label: 'I/O Image' },
+    { id: 'events', label: 'Events & Alarms' },
+    { id: 'diagnostics', label: 'Diagnostics' },
+    { id: 'simulate', label: 'Simulate' },
+    { id: 'explore', label: 'Explore' },
+  ],
+};
+
+/** A workbench tab. `key` is the document id: pou.id for POU tabs,
+    '__globals' for globals, the source stem for library tabs. */
+interface EditorTab {
+  key: string;
+  kind: 'pou' | 'lib' | 'globals';
+  /** pou tabs can switch editor; lib/globals are fixed. */
+  editor: 'fbd' | 'st' | 'curve' | 'tune' | 'lib' | 'globals';
+}
+
+export type DockTab = 'problems' | 'watch' | 'events';
+
+/** Summary payload the IDE publishes as `plc-state` for the shell
+    status strip — the strip's only live view into PLC land. */
+export interface PlcStatePayload {
+  project: string;
+  runState?: 'stopped' | 'running' | 'fault';
+  epoch?: number;
+  version?: string;
+  forces: number;
+  alarms: number;
+  errors: number;
+  pous: { id: string; name: string; kind: string }[];
+}
+
+/** sections that mount board tiles (the old rail overlay tools,
+    re-homed into Configure/Debug). */
+const SECTION_TILES: Partial<Record<Pane, string[]>> = {
+  commissioning: [
+    'tile-sdo-inspector',
+    'tile-config-txn',
+    'tile-capture',
+    'tile-baseline',
+    'tile-checklist',
+  ],
+  diagnostics: [
+    'tile-machine-state',
+    'tile-diag-bus',
+    'tile-diag-chain',
+    'tile-diag-topology',
+    'tile-diag-cyclic',
+    'tile-supervisor',
+    'tile-pdo-map',
+  ],
+  explore: ['tile-catalog'],
+};
+
+/** sections that refresh the ctl plane when opened. */
+const CTL_REFRESH_PANES = new Set<Pane>([
+  'run',
+  'target',
+  'events',
+  'services',
+  'iomap',
+  'tasksrt',
+]);
 
 /** codec for a resolved symbol — prefer the user-picked label when it
     fits the symbol's byte size, else the size-based default. */
@@ -412,9 +500,11 @@ export function deployMapOverlaps(chans: DeployMapChannel[]): number[] {
 
 export class TetherPlcIde extends LitElement {
   declare hub?: DataHub;
+  declare activity: Activity;
 
   static properties = {
     hub: { attribute: false },
+    activity: { attribute: 'activity' },
     pane: { state: true },
     selPou: { state: true },
     selNet: { state: true },
@@ -444,6 +534,15 @@ export class TetherPlcIde extends LitElement {
   declare pane: Pane;
   declare selPou: string;
   declare selNet: number;
+  /** editor tabs — one per open document (POU, library source, globals). */
+  private tabs: EditorTab[] = [];
+  private activeTab?: string;
+  private inspectorOpen = true;
+  /** bottom dock (Program + Debug): problems / watch / events. */
+  private dockTab: DockTab = 'problems';
+  private dockOpen = false;
+  /** merged-events stream filter text. */
+  private evFilter = '';
   declare status: string;
   declare ctlOk?: boolean;
   declare ctlErr: string;
@@ -534,6 +633,21 @@ export class TetherPlcIde extends LitElement {
   private trendSamples: number[] = [];
   private trendLastSeq = 0n;
   private trendTimer?: number;
+  private imageTimer?: number;
+  /** live %I/%Q image bytes for the I/O Image section. */
+  private imgIn?: Uint8Array;
+  private imgOut?: Uint8Array;
+  /** Discovery: GET /bus artifacts (.topology/.fleet/.bus) + scan state. */
+  private busData?: { simdir: string; topology?: string; fleet?: string; bus?: string };
+  private busPeer = '127.0.0.1';
+  private busPort = 34980;
+  private busIface = '';
+  private busScanBusy = false;
+  private busScanLog = '';
+  /** Debug → Simulate: steps text + last run output. */
+  private simSteps = 'step 4  time=1s\n';
+  private simBusy = false;
+  private simOut = '';
   private stateDiff: DbgStateDiff | undefined;
   private odWriteHex: Record<string, string> = {};
   private evOff?: () => void;
@@ -561,6 +675,7 @@ export class TetherPlcIde extends LitElement {
 
   constructor() {
     super();
+    this.activity = 'program';
     this.pane = 'explorer';
     /* restore the selection a persisted project implies — otherwise a
        reload lands on an empty detail pane until a POU is re-clicked */
@@ -727,23 +842,17 @@ export class TetherPlcIde extends LitElement {
     }
   }
 
-  /** Attach library sources for every catalog block the project
-      references (fbd block type_refs + inline-st pin types) that isn't
-      already in stSources — makes templates and pasted networks
-      compile without a manual attach step. */
+  /** Attach library sources for every type the project references but
+      doesn't declare (blocks, pins, interface/global vars, ST bodies)
+      — the user never attaches libraries by hand; if a generated or
+      dropped block uses `FB_X`, its source silently joins the project
+      so the next compile is self-contained. */
   private async ensureLibSources(): Promise<void> {
+    if (!this.catalogLibs?.length) await this.loadCatalog();
     const libs = this.catalogLibs ?? [];
     if (!libs.length) return;
-    const refs = new Set<string>();
-    for (const p of this.project.fbd.pous)
-      for (const n of p.networks)
-        for (const b of n.blocks) {
-          if (b.type_ref) refs.add(b.type_ref.toUpperCase());
-          for (const pin of b.pins ?? [])
-            if (/^(FB_|F_)/i.test(pin.type)) refs.add(pin.type.toUpperCase());
-        }
-    let changed = false;
-    for (const ref of refs) {
+    const added: string[] = [];
+    for (const ref of projectLibRefs(this.project.fbd, this.project.stSources)) {
       const src = blockSource(libs, ref);
       if (!src) continue;
       const stem = libStem(src.file);
@@ -754,12 +863,12 @@ export class TetherPlcIde extends LitElement {
       const text = await fetchLibSrc(this.ctl, src.lib, src.file);
       if (text) {
         this.project.stSources[stem] = text;
-        changed = true;
+        added.push(stem);
       }
     }
-    if (changed) {
+    if (added.length) {
       this.save();
-      this.flash('attached library sources');
+      this.flash(`added library source${added.length > 1 ? 's' : ''}: ${added.join(', ')}`);
     }
   }
 
@@ -773,7 +882,9 @@ export class TetherPlcIde extends LitElement {
     if (have) return;
     void fetchLibSrc(this.ctl, lib, file).then((src) => {
       if (!src) {
-        this.flash(`library source ${file} not available from backend`);
+        this.flash(
+          `could not fetch ${file} from the backend — attach the .st source manually (Explorer → Libraries → + .st)`,
+        );
         return;
       }
       this.project.stSources[stem] = src;
@@ -799,11 +910,41 @@ export class TetherPlcIde extends LitElement {
       clearInterval(this.mqttTimer);
       this.mqttTimer = undefined;
     }
+    if (this.imageTimer !== undefined) {
+      clearInterval(this.imageTimer);
+      this.imageTimer = undefined;
+    }
     super.disconnectedCallback();
   }
 
+  /** last visited section per activity — switching activities keeps
+      your place instead of always landing on the first section. */
+  private lastPane: Partial<Record<Activity, Pane>> = {};
+
   willUpdate(changed: Map<string, unknown>): void {
     if (changed.has('hub')) this.syncHub();
+    const oldActivity = changed.get('activity') as Activity | undefined;
+    if (oldActivity && oldActivity !== this.activity) {
+      /* `changed.get('pane')` is the pane that was actually showing under
+         the old activity — gotoActivity may have already overwritten it */
+      const prevPane = (changed.get('pane') as Pane | undefined) ?? this.pane;
+      if (SECTIONS[oldActivity].some((s) => s.id === prevPane))
+        this.lastPane[oldActivity] = prevPane;
+    }
+    /* keep the visible section inside the active activity — the shell
+       drives `activity` and may hand the IDE a pane id from another
+       one (e.g. a deep link from Debug while still on Program) */
+    if (changed.has('activity') || changed.has('pane')) {
+      const valid = SECTIONS[this.activity]?.some((s) => s.id === this.pane);
+      if (!valid) {
+        const remembered = this.lastPane[this.activity];
+        this.pane =
+          remembered && SECTIONS[this.activity].some((s) => s.id === remembered)
+            ? remembered
+            : (SECTIONS[this.activity]?.[0]?.id ?? 'explorer');
+      }
+    }
+    if (changed.has('pane')) this.flushStEditors();
   }
 
   private syncHub(): void {
@@ -933,6 +1074,7 @@ export class TetherPlcIde extends LitElement {
       ],
     });
     this.selPou = name;
+    this.openTab(name, 'fbd');
     this.save();
   }
 
@@ -963,11 +1105,11 @@ export class TetherPlcIde extends LitElement {
     if (pou) {
       this.selPou = pou.id;
       this.selLib = undefined;
-      this.pane = 'st';
+      this.gotoActivity('program', 'st');
     } else if (this.project.stSources[pouName]) {
       this.selLib = pouName;
       this.selPou = '';
-      this.pane = 'st';
+      this.gotoActivity('program', 'st');
     } else {
       /* lib file whose key differs from the POU name — find the source
          that declares it */
@@ -979,7 +1121,7 @@ export class TetherPlcIde extends LitElement {
       if (!key) return false;
       this.selLib = key;
       this.selPou = '';
-      this.pane = 'st';
+      this.gotoActivity('program', 'st');
       pouName = key;
     }
     if (off !== undefined) {
@@ -1011,7 +1153,7 @@ export class TetherPlcIde extends LitElement {
           if (pou) {
             this.selPou = pou.id;
             this.selLib = undefined;
-            this.pane = 'st';
+            this.gotoActivity('program', 'st');
           }
         }
         return;
@@ -1084,7 +1226,7 @@ export class TetherPlcIde extends LitElement {
           ? t.pou
           : pou.name;
     if (!pouName) {
-      this.status = 'rename: could not resolve declaring POU';
+      this.status = 'rename failed — could not find where this name is declared';
       return;
     }
     const sym = t?.kind === 'member' ? t.member : name;
@@ -1126,14 +1268,14 @@ export class TetherPlcIde extends LitElement {
   }
 
   /**
-   * Stimulate an image channel (`plc.image.<R>.ch.<name>`): resolve the
+   * Force an image channel (`plc.image.<R>.ch.<name>`): resolve the
    * channel's qualified var name through the debug symmap and arm a
    * DBG_FORCE on the program var. The runtime translates the force
    * through the io bindings — %I forces patch the latched input image
    * every scan, %Q forces stamp the output image before commit. Only
    * BOOL bindings are forceable; other widths are denied (414).
    */
-  private async onImageStim(entry: CatalogEntry, input: HTMLInputElement): Promise<void> {
+  private async onImageForce(entry: CatalogEntry, input: HTMLInputElement): Promise<void> {
     const hub = this.hub;
     if (!hub) return;
     const m = /^plc\.image\.[IQM]\.ch\.(.+)$/.exec(entry.name);
@@ -1145,13 +1287,13 @@ export class TetherPlcIde extends LitElement {
     try {
       sym = await this.ctl.dbgResolve(name);
     } catch (e) {
-      this.flash(`stim ${name}: ${e instanceof Error ? e.message : e}`);
+      this.flash(`cannot force ${name}: ${e instanceof Error ? e.message : e}`);
       return;
     }
     /* SMAP kind 10 = the image-channel entry itself — its "offset" is
        an image byte, not a blob offset; only the var entry is forceable */
     if (sym.kind === 10) {
-      this.flash(`stim ${name}: channel has no program var`);
+      this.flash(`${name}: this channel has no program variable to force`);
       return;
     }
     const codec = codecForSym(sym);
@@ -1159,19 +1301,21 @@ export class TetherPlcIde extends LitElement {
     try {
       bytes = codec.encode(text);
     } catch (e) {
-      this.flash(`stim ${name}: ${e instanceof Error ? e.message : e}`);
+      this.flash(`cannot force ${name}: ${e instanceof Error ? e.message : e}`);
       return;
     }
     if (bytes.length !== sym.size) {
-      this.flash(`stim ${name}: ${codec.label} is ${bytes.length}B, var is ${sym.size}B`);
+      this.flash(
+        `${name}: ${codec.label} writes ${bytes.length} B but the variable is ${sym.size} B`,
+      );
       return;
     }
     try {
       await this.ctl.dbgForce(sym.offset, bytes);
       input.value = '';
-      this.flash(`stim ${name} := ${text} (forced until cleared)`);
+      this.flash(`${name} := ${text} — input forced until cleared`);
     } catch (e) {
-      this.flash(`stim ${name}: ${e instanceof Error ? e.message : e}`);
+      this.flash(`cannot force ${name}: ${e instanceof Error ? e.message : e}`);
     }
   }
 
@@ -1235,35 +1379,272 @@ export class TetherPlcIde extends LitElement {
           </button>
           ${this.status ? html`<span class="plc-status">${this.status}</span>` : nothing}
         </div>
-        <div class="plc-nav">
-          ${PANES.map(
-            (p) => html`
-              <button
-                class="plc-nav-btn ${this.pane === p.id ? 'active' : ''}"
-                @click=${() => {
-                  this.flushStEditors();
-                  this.pane = p.id;
-                  if (p.id === 'deploy' || p.id === 'events') void this.refreshCtl();
-                }}
-              >
-                ${p.label}
-              </button>
-            `,
-          )}
-        </div>
-        <div class="plc-main">${this.paneBody()}</div>
-        ${this.diagsStrip()} ${this.tplPicker ? this.templatePicker() : nothing}
+        ${this.activity === 'debug' ? this.runHeader() : nothing}
+        ${
+          SECTIONS[this.activity].length
+            ? html`<div class="plc-nav">
+                ${SECTIONS[this.activity].map(
+                  (p) => html`
+                    <button
+                      class="plc-nav-btn ${this.pane === p.id ? 'active' : ''}"
+                      @click=${() => {
+                        this.flushStEditors();
+                        this.pane = p.id;
+                        if (CTL_REFRESH_PANES.has(p.id)) void this.refreshCtl();
+                      }}
+                    >
+                      ${p.label}
+                    </button>
+                  `,
+                )}
+              </div>`
+            : nothing
+        }
+        ${
+          this.activity === 'program'
+            ? this.workbench()
+            : html`<div class="plc-main">${this.paneBody()}</div>`
+        }
+        ${this.dock()} ${this.tplPicker ? this.templatePicker() : nothing}
         ${this.historyOpen ? this.historyDialog() : nothing}
       </div>
     `;
   }
 
-  /** compile diagnostics strip, docked under the pane area. */
-  private diagsStrip(): TemplateResult | typeof nothing {
-    if (!this.diags?.length) return nothing;
+  // ---- Program workbench: explorer sidebar + editor tabs + inspector --
+
+  /** Open (or activate) a document tab. `key`: pou.id | '__globals' |
+      library source stem; `editor`: which editor the tab shows. */
+  private openTab(key: string, editor: EditorTab['editor']): void {
+    const kind: EditorTab['kind'] =
+      key === '__globals' ? 'globals' : editor === 'lib' ? 'lib' : 'pou';
+    let tab = this.tabs.find((t) => t.key === key);
+    if (!tab) {
+      tab = { key, kind, editor };
+      this.tabs = [...this.tabs, tab];
+    } else if (kind === 'pou' && tab.editor !== editor) {
+      tab.editor = editor;
+    }
+    this.activateTab(tab);
+    this.requestUpdate();
+  }
+
+  private activateTab(tab: EditorTab): void {
+    this.activeTab = tab.key;
+    if (tab.kind === 'pou') {
+      this.selPou = tab.key;
+      this.selLib = undefined;
+    } else if (tab.kind === 'lib') {
+      this.selLib = tab.key;
+      this.selPou = '';
+    } else {
+      this.selPou = '__globals';
+      this.selLib = undefined;
+    }
+  }
+
+  private closeTab(key: string): void {
+    const i = this.tabs.findIndex((t) => t.key === key);
+    if (i < 0) return;
+    this.tabs.splice(i, 1);
+    if (this.activeTab === key) {
+      const next = this.tabs[Math.min(i, this.tabs.length - 1)];
+      if (next) this.activateTab(next);
+      else this.activeTab = undefined;
+    }
+    this.requestUpdate();
+  }
+
+  /** The workbench — Program activity's whole body. */
+  private workbench(): TemplateResult {
+    const tab = this.tabs.find((t) => t.key === this.activeTab);
+    return html`
+      <div class="plc-workbench">
+        <aside class="plc-side tile-scroll">${this.explorerTree()}</aside>
+        <div class="plc-editor">
+          <div class="plc-tabs">
+            ${this.tabs.map((t) => this.tabChip(t))}
+            ${!this.tabs.length ? html`<span class="plc-dim plc-tab-hint">open a POU, a library source, or globals from the explorer</span>` : nothing}
+            <span class="spacer"></span>
+            <button
+              class="chip-btn"
+              title=${this.inspectorOpen ? 'hide inspector' : 'show inspector'}
+              @click=${() => {
+                this.inspectorOpen = !this.inspectorOpen;
+              }}
+            >
+              ${this.inspectorOpen ? 'inspector ▸' : '◂ inspector'}
+            </button>
+          </div>
+          ${tab?.kind === 'pou' ? this.editorKindBar(tab) : nothing}
+          <div class="plc-edbody">${this.tabBody(tab)}</div>
+        </div>
+        ${this.inspectorOpen ? html`<aside class="plc-insp tile-scroll">${this.inspectorBody(tab)}</aside>` : nothing}
+      </div>
+    `;
+  }
+
+  private tabChip(t: EditorTab): TemplateResult {
+    const label =
+      t.kind === 'globals'
+        ? 'globals'
+        : t.kind === 'lib'
+          ? `${t.key}.st`
+          : (this.project.fbd.pous.find((p) => p.id === t.key)?.name ?? t.key);
+    const kind =
+      t.editor === 'fbd' ? 'FBD' : t.editor === 'st' || t.editor === 'lib' ? 'ST'
+      : t.editor === 'curve' ? 'Curve' : t.editor === 'tune' ? 'Tune' : 'VAR';
+    return html`<span
+        class="plc-tab ${this.activeTab === t.key ? 'active' : ''}"
+        title=${`${label} — ${kind}`}
+        @click=${() => this.activateTab(t)}
+      >
+        ${label} <span class="plc-tab-kind">${kind}</span></span
+      ><button
+        class="plc-tab-x"
+        title="close tab"
+        @click=${(e: Event) => {
+          e.stopPropagation();
+          this.closeTab(t.key);
+        }}
+      >
+        ✕
+      </button>`;
+  }
+
+  /** per-tab editor-kind switcher for POU documents. */
+  private editorKindBar(tab: EditorTab): TemplateResult {
+    const kinds: { id: EditorTab['editor']; label: string }[] = [
+      { id: 'fbd', label: 'FBD' },
+      { id: 'st', label: 'ST' },
+      { id: 'curve', label: 'Curve' },
+      { id: 'tune', label: 'Tune' },
+    ];
+    return html`<div class="plc-edkind">
+      ${kinds.map(
+        (k) => html`<button
+          class="chip-btn ${tab.editor === k.id ? 'active' : ''}"
+          @click=${() => {
+            tab.editor = k.id;
+            this.requestUpdate();
+          }}
+        >
+          ${k.label}
+        </button>`,
+      )}
+    </div>`;
+  }
+
+  private tabBody(tab?: EditorTab): TemplateResult {
+    if (!tab) {
+      return html`<div class="plc-dim plc-edempty">
+        <p>No document open.</p>
+        <p>
+          Click a POU in the explorer to open its function-block diagram, or use
+          <b>+PRG</b> / <b>+FB</b> / <b>+FN</b> to create one. Each POU opens as a
+          tab — switch its editor between FBD, ST, Curve and Tune above.
+        </p>
+      </div>`;
+    }
+    switch (tab.editor) {
+      case 'fbd':
+        return this.fbdPane();
+      case 'st':
+        return this.stEditorArea();
+      case 'curve':
+        return this.curveEditor();
+      case 'tune':
+        return this.tuneEditor();
+      case 'lib':
+        return this.libEditor(tab.key);
+      case 'globals':
+        return this.globalsDetail();
+    }
+  }
+
+  /** Inspector — context panel for the active document. POU tabs get
+      the full properties editor; library/globals get a summary. */
+  private inspectorBody(tab?: EditorTab): TemplateResult {
+    if (!tab) {
+      return html`<p class="plc-dim">Nothing selected — open a document to inspect it.</p>`;
+    }
+    if (tab.kind === 'pou') {
+      return this.selPouDetail();
+    }
+    if (tab.kind === 'lib') {
+      const src = this.project.stSources[tab.key] ?? '';
+      return html`
+        <h3>${tab.key}.st <span class="plc-dim">library source</span></h3>
+        <p class="plc-dim">${src.length} B attached to the project.</p>
+        <button class="chip-btn" @click=${() => this.detachSource(tab.key)}>detach</button>
+      `;
+    }
+    return html`<p class="plc-dim">globals — VAR_GLOBAL block shared by every POU.</p>`;
+  }
+
+  // ---- bottom dock: problems / watch / events (Program + Debug) -------
+
+  private dock(): TemplateResult | typeof nothing {
+    /* the dock is shared by Program and Debug — Configure has no
+       problems/watch surface to pin it to */
+    if (this.activity === 'configure') return nothing;
+    const diags = this.diags?.length ?? 0;
+    const tabs: { id: DockTab; label: string }[] = [
+      { id: 'problems', label: `Problems${diags ? ` (${diags})` : ''}` },
+      { id: 'watch', label: 'Watch' },
+      { id: 'events', label: 'Events' },
+    ];
+    return html`
+      <div class="plc-dock">
+        <div class="plc-dock-tabs">
+          ${tabs.map(
+            (t) => html`<button
+              class="plc-dock-tab ${this.dockTab === t.id && this.dockOpen ? 'active' : ''}"
+              @click=${() => {
+                if (this.dockTab === t.id) this.dockOpen = !this.dockOpen;
+                else {
+                  this.dockTab = t.id;
+                  this.dockOpen = true;
+                }
+              }}
+            >
+              ${t.label}
+            </button>`,
+          )}
+          <span class="spacer"></span>
+          <button
+            class="chip-btn"
+            title=${this.dockOpen ? 'collapse dock' : 'expand dock'}
+            @click=${() => {
+              this.dockOpen = !this.dockOpen;
+            }}
+          >
+            ${this.dockOpen ? '▾' : '▴'}
+          </button>
+        </div>
+        ${this.dockOpen ? html`<div class="plc-dock-body">${this.dockBody()}</div>` : nothing}
+      </div>
+    `;
+  }
+
+  private dockBody(): TemplateResult {
+    switch (this.dockTab) {
+      case 'problems':
+        return this.diags
+          ? this.diagRows()
+          : html`<p class="plc-dim">no problems — run check to compile.</p>`;
+      case 'watch':
+        return this.watchPane();
+      case 'events':
+        return this.mergedEvents();
+    }
+  }
+
+  /** compile diagnostic rows — the dock's Problems tab. */
+  private diagRows(): TemplateResult {
     return html`
       <div class="plc-diags tile-scroll">
-        ${this.diags.map(
+        ${(this.diags ?? []).map(
           (d) => html`
             <div class="plc-diag ${d.severity}" @click=${() => this.onDiagClick(d)}>
               <span class="plc-diag-sev"
@@ -1292,6 +1673,147 @@ export class TetherPlcIde extends LitElement {
 
   protected updated(): void {
     if (this.pane === 'st') this.applyEditorDiags();
+    this.mountSectionTiles();
+    /* prune tabs whose document vanished (deleted POU, detached
+       source, project reload) */
+    const valid = new Set<string>([
+      '__globals',
+      ...this.project.fbd.pous.map((p) => p.id),
+      ...Object.keys(this.project.stSources),
+    ]);
+    const before = this.tabs.length;
+    this.tabs = this.tabs.filter((t) => valid.has(t.key));
+    if (this.tabs.length !== before && !this.tabs.some((t) => t.key === this.activeTab))
+      this.activeTab = this.tabs[0]?.key;
+    /* fresh compile errors surface the Problems dock automatically */
+    const errs = this.diags?.filter((d) => d.severity === 'error').length ?? 0;
+    if (errs > this.prevErrCount) {
+      this.dockTab = 'problems';
+      this.dockOpen = true;
+    }
+    this.prevErrCount = errs;
+    this.publishPlcState();
+  }
+
+  private prevErrCount = 0;
+  private lastPlcStateJson = '';
+
+  /** Publish a `plc-state` summary for the shell status strip —
+      emitted whenever the payload actually changes. */
+  private publishPlcState(): void {
+    const p = this.prog;
+    const state: PlcStatePayload = {
+      project: this.project.fbd.project,
+      runState: p
+        ? ((['stopped', 'running', 'fault'] as const)[p.state] ?? 'stopped')
+        : undefined,
+      epoch: p?.epoch !== undefined ? Number(p.epoch) : undefined,
+      version: p?.version,
+      forces: this.forces?.length ?? p?.forceCount ?? 0,
+      alarms: this.alarms?.filter((a) => a.state !== 0 && a.state !== 3).length ?? 0,
+      errors: this.prevErrCount,
+      pous: this.project.fbd.pous.map((x) => ({ id: x.id, name: x.name, kind: x.kind })),
+    };
+    const json = JSON.stringify(state, (_k, v) => (typeof v === 'bigint' ? Number(v) : v));
+    if (json === this.lastPlcStateJson) return;
+    this.lastPlcStateJson = json;
+    this.dispatchEvent(
+      new CustomEvent<PlcStatePayload>('plc-state', {
+        detail: state,
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  // ---- public API — used by the shell status strip and ⌘K palette ----
+
+  /** Navigate activities/sections (Program panes map to editor tabs). */
+  navigate(activity: Activity, pane: Pane): void {
+    this.gotoActivity(activity, pane);
+  }
+
+  /** Open the bottom dock on a tab (or close it). */
+  openDock(tab?: DockTab): void {
+    if (tab) this.dockTab = tab;
+    this.dockOpen = tab !== undefined;
+    this.requestUpdate();
+  }
+
+  /** Open a POU's editor tab by name (defaults to FBD). */
+  openEditor(name: string, editor: EditorTab['editor'] = 'fbd'): void {
+    const pou = this.project.fbd.pous.find((p) => p.name === name || p.id === name);
+    if (pou) {
+      this.gotoActivity('program', 'explorer');
+      this.openTab(pou.id, editor);
+    }
+  }
+
+  /** Add a catalog key to the watch list and reveal the Watch dock. */
+  watchKey(name: string): void {
+    if (!this.watchExprs.includes(name)) {
+      this.watchExprs.push(name);
+      this.exprHistories.push([]);
+    }
+    this.dockTab = 'watch';
+    this.dockOpen = true;
+    this.requestUpdate();
+  }
+
+  /** Named IDE commands for the command palette. */
+  command(name: string): void {
+    switch (name) {
+      case 'check':
+        void this.onCheck();
+        break;
+      case 'deploy':
+        void this.onBuildDeploy();
+        break;
+      case 'start':
+        this.ctlOp('start', () => this.ctl.progStart());
+        break;
+      case 'stop':
+        this.ctlOp('stop', () => this.ctl.progStop());
+        break;
+      case 'rollback':
+        this.ctlOp('rollback', () => this.ctl.progRollback());
+        break;
+      case 'refresh':
+        void this.refreshCtl();
+        break;
+      case 'new-program':
+        this.onNewPou('program');
+        break;
+      case 'new-fb':
+        this.onNewPou('function_block');
+        break;
+      case 'new-fn':
+        this.onNewPou('function');
+        break;
+    }
+  }
+
+  /** Mount the re-homed rail tiles into tile sections (commissioning /
+      diagnostics / explore). Elements get the shared `hub` like the
+      old shell overlay did. */
+  private tileSeq = 0;
+  private mountSectionTiles(): void {
+    const tags = SECTION_TILES[this.pane];
+    const host = this.querySelector<HTMLElement>('.plc-tiles');
+    if (!tags || !host) return;
+    const seq = ++this.tileSeq;
+    void Promise.all(tags.map(ensureTileTag)).then(() => {
+      if (seq !== this.tileSeq || !SECTION_TILES[this.pane] || !this.isConnected) return;
+      const fresh = this.querySelector<HTMLElement>('.plc-tiles');
+      if (!fresh) return;
+      fresh.replaceChildren(
+        ...tags.map((tag) => {
+          const el = document.createElement(tag) as HTMLElement & { hub?: DataHub };
+          el.hub = this.hub;
+          return el;
+        }),
+      );
+    });
   }
 
   /** jump to the offending source: st pane on the file's POU, or the fbd network. */
@@ -1301,7 +1823,7 @@ export class TetherPlcIde extends LitElement {
       const pou = this.project.fbd.pous.find((p) => p.name === name);
       if (pou) {
         this.selPou = pou.id;
-        this.pane = 'st';
+        this.gotoActivity('program', 'st');
         if (d.offset !== undefined) {
           await this.updateComplete;
           const src = this.project.stSources[pou.name] ?? '';
@@ -1317,7 +1839,7 @@ export class TetherPlcIde extends LitElement {
       if (pou) {
         this.selPou = pou.id;
         this.selNet = d.fbd.sheet;
-        this.pane = 'fbd';
+        this.gotoActivity('program', 'fbd');
       }
     }
   }
@@ -1349,132 +1871,175 @@ export class TetherPlcIde extends LitElement {
 
   private paneBody(): TemplateResult {
     switch (this.pane) {
+      // ---- Program — unreachable: program renders workbench(), kept
+      //      in the union so Pane stays the closed section-id type.
       case 'explorer':
-        return this.explorerPane();
       case 'st':
-        return this.stPane();
       case 'fbd':
-        return this.fbdPane();
       case 'curves':
-        return this.curvesPane();
-      case 'tasks':
-        return this.tasksPane();
-      case 'watch':
-        return this.watchPane();
-      case 'alarms':
-        this.ensureTrendTimer();
-        return this.alarmsPane();
-      case 'events':
-        this.ensureMqttTimer();
-        return this.eventsPane();
-      case 'deploy':
-        return this.deployPane();
+        return this.workbench();
+      // ---- Configure
       case 'project':
         return this.projectPane();
+      case 'target':
+        return this.targetSection();
+      case 'discovery':
+        return this.discoverySection();
+      case 'iomap':
+        return this.iomapSection();
+      case 'tasks':
+        return this.tasksPane();
+      case 'libraries':
+        return this.librariesSection();
+      case 'services':
+        this.ensureMqttTimer();
+        return this.servicesSection();
+      case 'commissioning':
+        return this.tilesSection('Commissioning');
+      // ---- Debug
+      case 'run':
+        return this.runSection();
+      case 'tasksrt':
+        return this.tasksRtSection();
+      case 'watch':
+        return this.watchPane();
+      case 'events':
+      case 'alarms':
+        /* 'alarms' folded into 'events' (Events & Alarms) — kept in the
+           Pane union so stale lastPane/coerced values still resolve */
+        this.ensureMqttTimer();
+        this.ensureTrendTimer();
+        return this.eventsPane();
+      case 'ioimage':
+        this.ensureImageTimer();
+        return this.ioImageSection();
+      case 'diagnostics':
+        return this.tilesSection('Diagnostics');
+      case 'simulate':
+        return this.simulateSection();
+      case 'explore':
+        return this.tilesSection('Explore');
     }
   }
 
   // ---- explorer ------------------------------------------------------
 
-  private explorerPane(): TemplateResult {
+  /** The workbench sidebar tree — POUs, networks, globals, tasks,
+      libraries. Clicks open editor tabs instead of switching panes. */
+  private explorerTree(): TemplateResult {
     const fbd = this.project.fbd;
     const sel = this.selPou;
     return html`
-      <div class="plc-split">
-        <div class="plc-tree tile-scroll">
-          <div class="plc-tree-head">
-            <span>Project</span>
-            <button class="chip-btn" @click=${() => this.onNewPou('program')}>+PRG</button>
-            <button class="chip-btn" @click=${() => this.onNewPou('function_block')}>+FB</button>
-            <button class="chip-btn" @click=${() => this.onNewPou('function')}>+FN</button>
-          </div>
-          ${fbd.pous.map(
-            (pou) => html`
-              <div
-                class="plc-tree-pou ${sel === pou.id ? 'sel' : ''}"
-                @click=${() => {
-                  this.selPou = pou.id;
-                  this.selNet = 0;
-                }}
-              >
-                <span class="plc-kind"
-                  >${pou.kind === 'program' ? 'PRG' : pou.kind === 'function_block' ? 'FB' : 'FUN'}</span
-                >
-                ${pou.name}
-              </div>
-              ${
-                sel === pou.id
-                  ? pou.networks.map(
-                      (n, i) => html`
-                        <div
-                          class="plc-tree-net ${this.selNet === i ? 'sel' : ''}"
-                          @click=${() => {
-                            this.selNet = i;
-                            this.pane = 'fbd';
-                          }}
-                        >
-                          net ${i + 1}${n.label ? ` · ${n.label}` : ''}
-                          <span class="plc-dim">(${n.blocks.length}b ${n.wires.length}w)</span>
-                        </div>
-                      `,
-                    )
-                  : nothing
-              }
-            `,
-          )}
-          <div
-            class="plc-tree-pou ${this.selPou === '__globals' ? 'sel' : ''}"
-            @click=${() => {
-              this.selPou = '__globals';
-              this.selNet = 0;
-            }}
-          >
-            <span class="plc-kind">VAR</span> globals
-          </div>
-          ${
-            fbd.tasks.length
-              ? html`<div class="plc-tree-head"><span>Tasks</span></div>
-                  ${fbd.tasks.map(
-                    (t) =>
-                      html`<div class="plc-tree-net">
-                        ${t.name} <span class="plc-dim">${t.period_ns / 1e6}ms</span>
-                      </div>`,
-                  )}`
-              : nothing
-          }
-          ${(() => {
-            // attached library sources: stSources with no POU of that name
-            const pouNames = new Set(fbd.pous.map((p) => p.name.toUpperCase()));
-            const libs = Object.keys(this.project.stSources).filter(
-              (n) => this.project.stSources[n]!.trim() && !pouNames.has(n.toUpperCase()),
-            );
-            if (!libs.length) return nothing;
-            return html`<div class="plc-tree-head"><span>Libraries</span></div>
-              ${libs.map(
-                (n) =>
-                  html`<div
-                    class="plc-tree-net plc-tree-lib"
-                    @click=${() => {
-                      this.selLib = n;
-                      this.selPou = '';
-                      this.pane = 'st';
-                    }}
-                  >
-                    ${n} <span class="plc-dim">${this.project.stSources[n]!.length} B</span>
-                    <button
-                      class="chip-btn"
-                      title="detach source"
-                      @click=${() => this.detachSource(n)}
-                    >
-                      ✕
-                    </button>
-                  </div>`,
-              )}`;
-          })()}
+      <div class="plc-tree">
+        <div class="plc-tree-head">
+          <span>Project</span>
+          <button class="chip-btn" @click=${() => this.onNewPou('program')}>+PRG</button>
+          <button class="chip-btn" @click=${() => this.onNewPou('function_block')}>+FB</button>
+          <button class="chip-btn" @click=${() => this.onNewPou('function')}>+FN</button>
         </div>
-        <div class="plc-detail">${this.selPouDetail()}</div>
+        ${fbd.pous.map(
+          (pou) => html`
+            <div
+              class="plc-tree-pou ${sel === pou.id ? 'sel' : ''}"
+              @click=${() => {
+                this.selNet = 0;
+                this.openTab(pou.id, 'fbd');
+              }}
+            >
+              <span class="plc-kind"
+                >${pou.kind === 'program' ? 'PRG' : pou.kind === 'function_block' ? 'FB' : 'FUN'}</span
+              >
+              ${pou.name}
+            </div>
+            ${
+              sel === pou.id
+                ? pou.networks.map(
+                    (n, i) => html`
+                      <div
+                        class="plc-tree-net ${this.selNet === i ? 'sel' : ''}"
+                        @click=${() => {
+                          this.selNet = i;
+                          this.openTab(pou.id, 'fbd');
+                        }}
+                      >
+                        net ${i + 1}${n.label ? ` · ${n.label}` : ''}
+                        <span class="plc-dim">(${n.blocks.length}b ${n.wires.length}w)</span>
+                      </div>
+                    `,
+                  )
+                : nothing
+            }
+          `,
+        )}
+        <div
+          class="plc-tree-pou ${this.selPou === '__globals' ? 'sel' : ''}"
+          @click=${() => this.openTab('__globals', 'globals')}
+        >
+          <span class="plc-kind">VAR</span> globals
+        </div>
+        ${
+          fbd.tasks.length
+            ? html`<div class="plc-tree-head"><span>Tasks</span></div>
+                ${fbd.tasks.map(
+                  (t) =>
+                    html`<div class="plc-tree-net">
+                      ${t.name} <span class="plc-dim">${t.period_ns / 1e6}ms</span>
+                    </div>`,
+                )}`
+            : nothing
+        }
+        <div class="plc-tree-head">
+          <span>Libraries</span>
+          <label
+            class="chip-btn"
+            title="attach a .st source file manually — installed libraries are added automatically when the project uses them"
+          >
+            + .st
+            <input
+              type="file"
+              accept=".st,text/plain"
+              hidden
+              @change=${(e: Event) => this.onAttachLibrary(e)}
+            />
+          </label>
+        </div>
+        ${this.libraryRows()}
       </div>
     `;
+  }
+
+  /** Attached library sources — stSources that aren't a POU of the same
+      name — shared by the Explorer tree and Configure → Libraries. */
+  private libraryRows(): TemplateResult {
+    const pouNames = new Set(this.project.fbd.pous.map((p) => p.name.toUpperCase()));
+    const libs = Object.keys(this.project.stSources).filter(
+      (n) => this.project.stSources[n]!.trim() && !pouNames.has(n.toUpperCase()),
+    );
+    if (!libs.length) {
+      return html`<p class="plc-dim">
+        no library sources yet — they appear automatically when the project uses an
+        installed-library block, or attach one with + .st.
+      </p>`;
+    }
+    return html`${libs.map(
+      (n) =>
+        html`<div
+          class="plc-tree-net plc-tree-lib"
+          @click=${() => {
+            this.gotoActivity('program', 'explorer');
+            this.openTab(n, 'lib');
+          }}
+        >
+          ${n} <span class="plc-dim">${this.project.stSources[n]!.length} B</span>
+          <button
+            class="chip-btn"
+            title="detach source"
+            @click=${() => this.detachSource(n)}
+          >
+            ✕
+          </button>
+        </div>`,
+    )}`;
   }
 
   private selPouDetail(): TemplateResult {
@@ -1725,110 +2290,64 @@ export class TetherPlcIde extends LitElement {
 
   // ---- ST ------------------------------------------------------------
 
-  private stPane(): TemplateResult {
-    if (this.selLib) return this.libPane();
+  /** ST editor for the selected POU — workbench editor area, no own
+      tree (POU selection lives in the explorer sidebar / tab bar). */
+  private stEditorArea(): TemplateResult {
     const pou = this.project.fbd.pous.find((p) => p.id === this.selPou) ?? this.project.fbd.pous[0];
+    if (!pou) return html`<p class="plc-dim">No POU selected.</p>`;
     return html`
-      <div class="plc-split">
-        <div class="plc-tree tile-scroll">
-          <div class="plc-tree-head"><span>ST sources</span></div>
-          ${this.project.fbd.pous.map(
-            (p) => html`
-              <div
-                class="plc-tree-pou ${pou && p.id === pou.id ? 'sel' : ''}"
-                @click=${() => {
-                  this.selPou = p.id;
-                  this.selLib = undefined;
-                  this.pane = 'st';
-                }}
-              >
-                ${p.name}
+      <h3>${pou.name} <span class="plc-dim">structured text</span></h3>
+      <st-editor
+        class="plc-st-editor"
+        .value=${this.project.stSources[pou.name] ?? ''}
+        .symbols=${{
+          pous: this.project.fbd.pous.map((p) => p.name),
+          vars: pou.interface.map((v) => v.name),
+        }}
+        .world=${this.stNavWorld()}
+        .pouName=${pou.name}
+        @change=${(e: CustomEvent<string>) => this.onStEdit(pou, e.detail)}
+        @st-nav=${(e: CustomEvent<StNavEvent>) => this.onStNav(e)}
+      ></st-editor>
+      ${
+        this.usagesPanel
+          ? html`<div class="plc-usages">
+              <div class="plc-usages-head">
+                <b>${this.usagesPanel.list.length}</b> use(s) of
+                <b>${this.usagesPanel.name}</b>
+                <button class="chip-btn" @click=${() => (this.usagesPanel = undefined)}>
+                  ✕
+                </button>
               </div>
-            `,
-          )}
-        </div>
-        <div class="plc-detail">
-          ${
-            pou
-              ? html`
-                  <h3>${pou.name} <span class="plc-dim">structured text</span></h3>
-                  <st-editor
-                    class="plc-st-editor"
-                    .value=${this.project.stSources[pou.name] ?? ''}
-                    .symbols=${{
-                      pous: this.project.fbd.pous.map((p) => p.name),
-                      vars: pou.interface.map((v) => v.name),
-                    }}
-                    .world=${this.stNavWorld()}
-                    .pouName=${pou.name}
-                    @change=${(e: CustomEvent<string>) => this.onStEdit(pou, e.detail)}
-                    @st-nav=${(e: CustomEvent<StNavEvent>) => this.onStNav(e)}
-                  ></st-editor>
-                  ${
-                    this.usagesPanel
-                      ? html`<div class="plc-usages">
-                          <div class="plc-usages-head">
-                            <b>${this.usagesPanel.list.length}</b> use(s) of
-                            <b>${this.usagesPanel.name}</b>
-                            <button class="chip-btn" @click=${() => (this.usagesPanel = undefined)}>
-                              ✕
-                            </button>
-                          </div>
-                          ${this.usagesPanel.list.map(
-                            (u) =>
-                              html`<div class="plc-usage" @click=${() => this.onUsageClick(u)}>
-                                ${u.where.replace(/^st:/, '')}:${u.line}:${u.col}
-                              </div>`,
-                          )}
-                        </div>`
-                      : nothing
-                  }
-                `
-              : html`<p class="plc-dim">No POU selected.</p>`
-          }
-        </div>
-      </div>
+              ${this.usagesPanel.list.map(
+                (u) =>
+                  html`<div class="plc-usage" @click=${() => this.onUsageClick(u)}>
+                    ${u.where.replace(/^st:/, '')}:${u.line}:${u.col}
+                  </div>`,
+              )}
+            </div>`
+          : nothing
+      }
     `;
   }
 
   /** read/write view of an attached library .st source (no fbd POU). */
-  private libPane(): TemplateResult {
-    const name = this.selLib ?? '';
+  private libEditor(name: string): TemplateResult {
     const src = this.project.stSources[name] ?? '';
     return html`
-      <div class="plc-split">
-        <div class="plc-tree tile-scroll">
-          <div class="plc-tree-head"><span>Libraries</span></div>
-          ${Object.keys(this.project.stSources)
-            .filter((n) => this.project.stSources[n]!.trim())
-            .map(
-              (n) =>
-                html`<div
-                  class="plc-tree-net ${n === name ? 'sel' : ''}"
-                  @click=${() => {
-                    this.selLib = n;
-                  }}
-                >
-                  ${n} <span class="plc-dim">${this.project.stSources[n]!.length} B</span>
-                </div>`,
-            )}
-        </div>
-        <div class="plc-detail">
-          <h3>${name} <span class="plc-dim">library source</span></h3>
-          <st-editor
-            class="plc-st-editor"
-            .value=${src}
-            .symbols=${{ pous: [], vars: [] }}
-            .world=${this.stNavWorld()}
-            .pouName=${name}
-            @change=${(e: CustomEvent<string>) => {
-              this.project.stSources[name] = e.detail;
-              this.save();
-            }}
-            @st-nav=${(e: CustomEvent<StNavEvent>) => this.onStNav(e)}
-          ></st-editor>
-        </div>
-      </div>
+      <h3>${name}.st <span class="plc-dim">library source</span></h3>
+      <st-editor
+        class="plc-st-editor"
+        .value=${src}
+        .symbols=${{ pous: [], vars: [] }}
+        .world=${this.stNavWorld()}
+        .pouName=${name}
+        @change=${(e: CustomEvent<string>) => {
+          this.project.stSources[name] = e.detail;
+          this.save();
+        }}
+        @st-nav=${(e: CustomEvent<StNavEvent>) => this.onStNav(e)}
+      ></st-editor>
     `;
   }
 
@@ -1922,7 +2441,8 @@ export class TetherPlcIde extends LitElement {
     return [...this.project.fbd.pous, ...this.libCache.pous, ...cat];
   }
 
-  private curvesPane(): TemplateResult {
+  /** Curve editor for the selected POU — workbench 'curve' tab. */
+  private curveEditor(): TemplateResult {
     const pou = this.project.fbd.pous.find((p) => p.id === this.selPou);
     const key = pou?.name ?? '';
     // saved editor state wins; otherwise recover the profile from the
@@ -1931,26 +2451,11 @@ export class TetherPlcIde extends LitElement {
       (key ? this.project.curves?.[key] : undefined) ??
       (pou ? profileFromPou(pou) : undefined) ??
       defaultProfile();
-    const hasLib = hasProfileLibrary(Object.values(this.project.stSources));
-    const tune =
-      (key ? this.project.tunes?.[key] : undefined) ?? (pou ? tunerFromPou(pou) : undefined);
     return html`
-      ${
-        hasLib
-          ? nothing
-          : html`<div class="plc-dim">
-              FB_AtcProfile is not in this project — the generated config block needs the
-              Atc_TempCtrl library source. Attach it once per project:
-              <input
-                type="file"
-                accept=".st,text/plain"
-                @change=${(e: Event) => this.onAttachLibrary(e)}
-              />
-            </div>`
-      }
       <temp-curve
         .pou=${pou}
         .profile=${prof}
+        @inserted=${() => void this.ensureLibSources()}
         @change=${(e: CustomEvent<CurveProfile>) => {
           if (key) (this.project.curves ??= {})[key] = e.detail;
           this.save();
@@ -1977,12 +2482,25 @@ export class TetherPlcIde extends LitElement {
           this.save();
           this.requestUpdate();
           this.flash(`exported ${e.detail.name}.st`);
+          // the exported FB takes PROF : FB_AtcProfile — resolve its library now
+          void this.ensureLibSources();
         }}
       ></temp-curve>
+    `;
+  }
+
+  /** Tune editor for the selected POU — workbench 'tune' tab. */
+  private tuneEditor(): TemplateResult {
+    const pou = this.project.fbd.pous.find((p) => p.id === this.selPou);
+    const key = pou?.name ?? '';
+    const tune =
+      (key ? this.project.tunes?.[key] : undefined) ?? (pou ? tunerFromPou(pou) : undefined);
+    return html`
       <temp-tune
         .pou=${pou}
         .tune=${tune}
         .values=${this.hub ? new Map(this.hub.values) : undefined}
+        @inserted=${() => void this.ensureLibSources()}
         @change=${(e: CustomEvent<TuneCfg>) => {
           if (key) (this.project.tunes ??= {})[key] = e.detail;
           this.save();
@@ -1992,9 +2510,12 @@ export class TetherPlcIde extends LitElement {
     `;
   }
 
-  /** Attach a library `.st` (e.g. atc_tempctrl.st) as a project source. */
+  /** Attach a user-picked `.st` source — fallback for sources the
+      installed-library catalog can't provide. */
   private onAttachLibrary(e: Event): void {
-    const file = (e.target as HTMLInputElement).files?.[0];
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
@@ -2345,7 +2866,10 @@ export class TetherPlcIde extends LitElement {
         }
         ${
           !hub
-            ? html`<p class="plc-dim">No machine connection.</p>`
+            ? html`<p class="plc-dim">
+                  No live data connection — use the plug icon in the left rail to connect, then
+                  values stream in.
+                </p>`
             : entries.length
               ? html`
                   <table class="plc-table">
@@ -2392,11 +2916,11 @@ export class TetherPlcIde extends LitElement {
                                   : /^plc\.image\.[IQM]\.ch\./.test(e.name)
                                     ? html`<input
                                           class="fbd-in plc-force-in"
-                                          placeholder="stim"
+                                            placeholder="force"
                                           title="force this channel (BOOL channels only; persists until force-clear)"
                                           @keydown=${(ev: KeyboardEvent) => {
                                             if (ev.key === 'Enter') {
-                                              void this.onImageStim(
+                                              void this.onImageForce(
                                                 e,
                                                 ev.target as HTMLInputElement,
                                               );
@@ -2406,13 +2930,13 @@ export class TetherPlcIde extends LitElement {
                                         <button
                                           class="chip-btn"
                                           @click=${(ev: Event) =>
-                                            void this.onImageStim(
+                                            void this.onImageForce(
                                               e,
                                               (ev.target as HTMLElement)
                                                 .previousElementSibling as HTMLInputElement,
                                             )}
                                         >
-                                          stim
+                                          force
                                         </button>`
                                     : nothing
                               }
@@ -2424,8 +2948,8 @@ export class TetherPlcIde extends LitElement {
                   </table>
                 `
               : html`<p class="plc-dim">
-                  No plc.* entries in the connected catalog. Watch binds to the tether_io catalog
-                  published by the PLC bridge.
+                  No PLC variables published yet — they appear once a program is deployed and the
+                  IO bridge (<code>tplc-io</code>) is connected.
                 </p>`
         }
       </div>
@@ -2466,7 +2990,7 @@ export class TetherPlcIde extends LitElement {
       .filter(Boolean)
       .slice(0, 8);
     if (!names.length) {
-      this.flash('hist: enter comma-separated symbol names');
+      this.flash('historian: enter up to 8 symbol names, comma-separated');
       return;
     }
     try {
@@ -2475,9 +2999,9 @@ export class TetherPlcIde extends LitElement {
       this.trendLastSeq = 0n;
       this.trendCh = 0;
       await this.refreshCtl();
-      this.flash(`hist armed: ${names.length} ch, ${total} B frame`);
+      this.flash(`historian recording ${names.length} channel(s) — ${total} B per frame`);
     } catch (e) {
-      this.ctlErr = `hist: ${e instanceof CtlError ? e.message : e}`;
+      this.ctlErr = `historian: ${e instanceof CtlError ? e.message : e}`;
       this.requestUpdate();
     }
   };
@@ -2544,6 +3068,133 @@ export class TetherPlcIde extends LitElement {
     this.trendTimer = window.setInterval(() => void this.trendTick(), 700);
   }
 
+  private ensureImageTimer(): void {
+    if (this.imageTimer !== undefined) return;
+    void this.imageTick();
+    this.imageTimer = window.setInterval(() => void this.imageTick(), 700);
+  }
+
+  /** poll raw %I/%Q bytes for the I/O Image section. */
+  private async imageTick(): Promise<void> {
+    const inSz = this.mapRows?.inSize ?? 64;
+    const outSz = this.mapRows?.outSize ?? 64;
+    try {
+      [this.imgIn, this.imgOut] = await Promise.all([
+        this.ctl.imageRead(0, 0, inSz),
+        this.ctl.imageRead(1, 0, outSz),
+      ]);
+      this.requestUpdate();
+    } catch {
+      /* backend down — keep last bytes */
+    }
+  }
+
+  // ---- Debug: I/O image + simulate -------------------------------------
+
+  /** I/O Image — live %I/%Q dump with binding labels. Values come from
+      IMAGE_READ; names from the project's `at` bindings. */
+  private ioImageSection(): TemplateResult {
+    const binds = projectIoBindingsEx(this.project).filter((b) => b.at.startsWith('%I') || b.at.startsWith('%Q'));
+    const dump = (region: 'I' | 'Q', bytes?: Uint8Array) => {
+      if (!bytes?.length)
+        return html`<p class="plc-dim">${this.ctlOk === false ? 'backend offline — no image data' : `no %${region} bytes (size 0?)`}</p>`;
+      const rows: TemplateResult[] = [];
+      for (let off = 0; off < bytes.length; off += 16) {
+        const chunk = bytes.subarray(off, Math.min(off + 16, bytes.length));
+        const names = binds
+          .filter((b) => {
+            const a = parseAt(b.at);
+            return a && a.region === region && a.byte >= off && a.byte < off + 16;
+          })
+          .map((b) => `${b.name}@${b.at}`)
+          .join(' ');
+        rows.push(html`<tr>
+          <td class="plc-dim">%${region}${off.toString().padStart(4, '0')}</td>
+          <td class="plc-hex">${[...chunk].map((b) => b.toString(16).padStart(2, '0')).join(' ')}</td>
+          <td class="plc-dim">${names}</td>
+        </tr>`);
+      }
+      return html`<table class="plc-table plc-imgtable"><tbody>${rows}</tbody></table>`;
+    };
+    return html`
+      <div class="tile-scroll">
+        <h3>
+          I/O Image
+          <span class="plc-dim">live %I/%Q process-image bytes (IMAGE_READ, 700ms)</span>
+        </h3>
+        ${this.ctlOk === false ? this.ctlOfflineNote() : nothing}
+        <h4>%I <span class="plc-dim">inputs · ${this.mapRows?.inSize ?? 64} B</span></h4>
+        ${dump('I', this.imgIn)}
+        <h4>%Q <span class="plc-dim">outputs · ${this.mapRows?.outSize ?? 64} B</span></h4>
+        ${dump('Q', this.imgOut)}
+      </div>
+    `;
+  }
+
+  /** Simulate — deterministic step-file runs against tether-plc-sim,
+      no live target needed. Sources compile through the same path as
+      build&deploy; the sim runs server-side via the sim_run meta-op. */
+  private simulateSection(): TemplateResult {
+    return html`
+      <div class="tile-scroll">
+        <h3>
+          Simulate
+          <span class="plc-dim">tether-plc-sim — deterministic steps, no target</span>
+        </h3>
+        <p class="plc-dim">
+          Step format: <code>step &lt;n&gt; time=&lt;ns|ms|s&gt; in &lt;i&gt;=&lt;hex&gt; expect &lt;o&gt;=&lt;hex&gt;</code>
+          — the project compiles, then the sim replays the steps against a fresh
+          image and reports pass/fail per expectation.
+        </p>
+        <textarea
+          class="fbd-textarea plc-simsteps"
+          rows="10"
+          spellcheck="false"
+          .value=${this.simSteps}
+          @input=${(e: Event) => (this.simSteps = (e.target as HTMLTextAreaElement).value)}
+        ></textarea>
+        <div class="plc-ops">
+          <button
+            class="chip-btn"
+            ?disabled=${this.simBusy}
+            @click=${() => void this.onSimRun()}
+          >
+            ${this.simBusy ? 'running…' : 'compile & run'}
+          </button>
+          ${this.simOut ? html`<span class="plc-dim">${this.simVerdict()}</span>` : nothing}
+        </div>
+        ${this.simOut ? html`<pre class="plc-dim plc-simlog">${this.simOut}</pre>` : nothing}
+      </div>
+    `;
+  }
+
+  private simVerdict(): string {
+    const m = /(\d+) pass,\s*(\d+) fail/.exec(this.simOut);
+    if (!m) return this.simOut.includes('exit 0') ? 'passed' : 'see output';
+    return m[2] === '0' ? `✓ ${m[1]} passed` : `✗ ${m[2]} failed / ${m[1]} passed`;
+  }
+
+  private async onSimRun(): Promise<void> {
+    this.simBusy = true;
+    this.simOut = '';
+    this.requestUpdate();
+    try {
+      await this.ensureLibSources();
+      const { files } = projectSources(this.project);
+      const r = await this.ctl.meta<{ exit: number; output: string; compile?: unknown }>(
+        'sim_run',
+        { files, steps: this.simSteps, in: this.mapRows?.inSize ?? 64, out: this.mapRows?.outSize ?? 64 },
+      );
+      this.simOut = (r.output ?? '(no output)').trimEnd();
+      if (r.exit !== 0 && !this.simOut) this.simOut = `sim exited ${r.exit}`;
+    } catch (e) {
+      this.simOut = `sim_run failed: ${e instanceof Error ? e.message : e}`;
+    } finally {
+      this.simBusy = false;
+      this.requestUpdate();
+    }
+  }
+
   // ---- alarm rules ----------------------------------------------------
 
   private alarmRules(): AlarmRule[] {
@@ -2595,7 +3246,7 @@ export class TetherPlcIde extends LitElement {
     this.save();
     this.flash(`AlarmRules program built (${rules.length} rules)`);
     this.selPou = pou.id;
-    this.pane = 'fbd';
+    this.gotoActivity('program', 'fbd');
   }
 
   private alarmRulesEditor(): TemplateResult {
@@ -2703,208 +3354,158 @@ export class TetherPlcIde extends LitElement {
               </tbody>
             </table>`
           : html`<p class="plc-dim">
-              no rules — define a condition on a signal, then build the AlarmRules program.
+              no alarm rules yet — add a condition on a signal below, then click build to
+              generate the AlarmRules program.
             </p>`
       }
     `;
   }
 
-  private alarmsPane(): TemplateResult {
-    const st = this.alarmStats;
-    const live = this.alarms ?? [];
-    const hist = this.alarmHist ?? [];
-    const chans = this.histChans ?? [];
+  /** Cross-activity navigation: ask the shell to switch activities
+      (`plc-navigate` bubbles up to tether-shell) and apply locally as
+      a fallback when no shell hosts the IDE. Program targets map onto
+      editor tabs — 'st'/'fbd'/'curves' open the selected document. */
+  private gotoActivity(activity: Activity, pane: Pane): void {
+    this.activity = activity;
+    this.pane = pane;
+    if (activity === 'program') this.programNav(pane);
+    this.dispatchEvent(
+      new CustomEvent<{ activity: Activity; pane: Pane }>('plc-navigate', {
+        detail: { activity, pane },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /** Program-activity deep links: section ids translate to the tab the
+      document opens in ('st' → ST tab of selPou, 'fbd' → FBD tab…). */
+  private programNav(pane: Pane): void {
+    if (pane === 'st') {
+      if (this.selLib) this.openTab(this.selLib, 'lib');
+      else if (this.selPou && this.selPou !== '__globals') this.openTab(this.selPou, 'st');
+    } else if (pane === 'fbd' || pane === 'explorer') {
+      if (this.selPou === '__globals') this.openTab('__globals', 'globals');
+      else if (this.selPou) this.openTab(this.selPou, 'fbd');
+    } else if (pane === 'curves' && this.selPou && this.selPou !== '__globals') {
+      this.openTab(this.selPou, 'curve');
+    }
+  }
+
+  /** Shared "no live target" note with a jump to Debug → Run. */
+  private ctlOfflineNote(): TemplateResult {
+    return html`<p class="plc-dim">
+      Can't reach the running PLC — connect to a target on the
+      <button
+        class="chip-btn"
+        @click=${() => {
+          this.gotoActivity('debug', 'run');
+          void this.refreshCtl();
+        }}
+      >
+        Debug → Run
+      </button>
+      section first.
+    </p>`;
+  }
+
+  /** Historian card — named debug channels → flight-recorder ring
+      + sparkline trend. Lives in Debug → Events & Alarms. */
+  private historianCard(chans: HistChannel[]): TemplateResult {
     return html`
-      <div class="tile-scroll">
-        <h3>
-          Alarms
-          ${
-            st
-              ? html`<span class="plc-dim">
-                  live ${st.live} · raised ${st.raised} · cleared ${st.cleared} · confirmed
-                  ${st.confirmed}${st.dropped ? ` · dropped ${st.dropped}` : ''}
-                </span>`
-              : nothing
-          }
-        </h3>
-        ${
-          this.ctlOk === false
-            ? html`<p class="plc-dim">ctl unreachable — connect on the Deploy pane.</p>`
-            : nothing
-        }
-        <h4>Rules <span class="plc-dim">compiled into the AlarmRules program</span></h4>
-        ${this.alarmRulesEditor()}
-        <h4>Live events</h4>
-        ${
-          live.length
-            ? html`
-                <table class="plc-table">
-                  <thead>
-                    <tr>
-                      <th>id</th>
-                      <th>sev</th>
-                      <th>state</th>
-                      <th>event</th>
-                      <th>text</th>
-                      <th>raised</th>
-                      <th>ack</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${live.map(
-                      (e) => html`
-                        <tr>
-                          <td>#${e.id}</td>
-                          <td>${this.sevName(e.severity)}</td>
-                          <td>${this.evStateName(e.state)}</td>
-                          <td>cls${e.cls}/evt${e.eventId}</td>
-                          <td>${e.text}</td>
-                          <td>${this.fmtNs(e.raisedNs)}</td>
-                          <td>
-                            ${
-                              e.state === 1
-                                ? html`<button
-                                    class="chip-btn"
-                                    @click=${() => void this.confirmAlarm(e.id)}
-                                  >
-                                    ack
-                                  </button>`
-                                : '—'
-                            }
-                          </td>
-                        </tr>
-                      `,
-                    )}
-                  </tbody>
-                </table>
-              `
-            : html`<p class="plc-dim">no live events</p>`
-        }
-        <h4>History <span class="plc-dim">last transitions</span></h4>
-        ${
-          hist.length
-            ? html`
-                <table class="plc-table">
-                  <thead>
-                    <tr>
-                      <th>time</th>
-                      <th>id</th>
-                      <th>state</th>
-                      <th>sev</th>
-                      <th>text</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${[...hist].reverse().map(
-                      (r) => html`
-                        <tr>
-                          <td>${this.fmtNs(r.tsNs)}</td>
-                          <td>#${r.journalId}</td>
-                          <td>${this.evStateName(r.state)}</td>
-                          <td>${this.sevName(r.severity)}</td>
-                          <td>${r.text}</td>
-                        </tr>
-                      `,
-                    )}
-                  </tbody>
-                </table>
-              `
-            : html`<p class="plc-dim">no transitions recorded</p>`
-        }
-        <h4>
-          Historian
-          <span class="plc-dim">named channels → flight-recorder ring</span>
-        </h4>
-        <div class="plc-ops">
-          <input
-            class="fbd-in wide"
-            placeholder="symbols e.g. temp.sp, pv, cnt"
-            .value=${this.histNamesInput}
-            @input=${(e: Event) => (this.histNamesInput = (e.target as HTMLInputElement).value)}
-            @keydown=${(e: KeyboardEvent) => {
-              if (e.key === 'Enter') void this.armHist();
-            }}
-          />
-          <button class="chip-btn" @click=${() => void this.armHist()}>arm</button>
-          <button
-            class="chip-btn"
-            ?disabled=${!chans.length}
-            @click=${() => void this.ctl.dbgTraceClear().then(() => this.refreshCtl())}
-          >
-            clear ring
-          </button>
-        </div>
-        ${
-          chans.length
-            ? html`
-                <table class="plc-table">
-                  <thead>
-                    <tr>
-                      <th>channel</th>
-                      <th>off</th>
-                      <th>len</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${chans.map(
-                      (c, i) => html`
-                        <tr>
-                          <td>${c.name}</td>
-                          <td>${c.off.toString()}</td>
-                          <td>${c.len}</td>
-                          <td>
-                            <input
-                              type="radio"
-                              name="trendch"
-                              .checked=${this.trendCh === i}
-                              @change=${() => {
-                                this.trendCh = i;
-                                this.trendSamples = [];
-                                this.trendLastSeq = 0n;
-                              }}
-                            />
-                          </td>
-                        </tr>
-                      `,
-                    )}
-                  </tbody>
-                </table>
-                <div class="plc-ops">
-                  <span class="plc-dim">decode</span>
-                  ${codecsForSize(chans[this.trendCh]?.len ?? 0).map(
-                    (c) => html`
-                      <button
-                        class="chip-btn ${
-                          this.trendCodecFor(chans[this.trendCh]).label === c.label ? 'active' : ''
-                        }"
-                        @click=${() => {
-                          this.trendCodecLabel = c.label;
-                          this.trendSamples = [];
-                          this.trendLastSeq = 0n;
-                          this.requestUpdate();
-                        }}
-                      >
-                        ${c.label}
-                      </button>
+      <h4>
+        Historian
+        <span class="plc-dim">named channels → flight-recorder ring</span>
+      </h4>
+      <div class="plc-ops">
+        <input
+          class="fbd-in wide"
+          placeholder="symbols e.g. temp.sp, pv, cnt"
+          .value=${this.histNamesInput}
+          @input=${(e: Event) => (this.histNamesInput = (e.target as HTMLInputElement).value)}
+          @keydown=${(e: KeyboardEvent) => {
+            if (e.key === 'Enter') void this.armHist();
+          }}
+        />
+        <button class="chip-btn" @click=${() => void this.armHist()}>arm</button>
+        <button
+          class="chip-btn"
+          ?disabled=${!chans.length}
+          @click=${() => void this.ctl.dbgTraceClear().then(() => this.refreshCtl())}
+        >
+          clear ring
+        </button>
+      </div>
+      ${
+        chans.length
+          ? html`
+              <table class="plc-table">
+                <thead>
+                  <tr>
+                    <th>channel</th>
+                    <th>off</th>
+                    <th>len</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${chans.map(
+                    (c, i) => html`
+                      <tr>
+                        <td>${c.name}</td>
+                        <td>${c.off.toString()}</td>
+                        <td>${c.len}</td>
+                        <td>
+                          <input
+                            type="radio"
+                            name="trendch"
+                            .checked=${this.trendCh === i}
+                            @change=${() => {
+                              this.trendCh = i;
+                              this.trendSamples = [];
+                              this.trendLastSeq = 0n;
+                            }}
+                          />
+                        </td>
+                      </tr>
                     `,
                   )}
-                </div>
-                <div class="plc-trend">
-                  ${sparkline(this.trendSamples, 320, 48)}
-                  <span class="plc-dim">
-                    ${chans[this.trendCh]?.name ?? ''}
-                    ${
-                      this.trendSamples.length
-                        ? `= ${this.trendSamples[this.trendSamples.length - 1]}`
-                        : '—'
-                    }
-                    (${this.trendSamples.length} samples)
-                  </span>
-                </div>
-              `
-            : html`<p class="plc-dim">no historian channels armed</p>`
-        }
-      </div>
+                </tbody>
+              </table>
+              <div class="plc-ops">
+                <span class="plc-dim">decode</span>
+                ${codecsForSize(chans[this.trendCh]?.len ?? 0).map(
+                  (c) => html`
+                    <button
+                      class="chip-btn ${
+                        this.trendCodecFor(chans[this.trendCh]).label === c.label ? 'active' : ''
+                      }"
+                      @click=${() => {
+                        this.trendCodecLabel = c.label;
+                        this.trendSamples = [];
+                        this.trendLastSeq = 0n;
+                        this.requestUpdate();
+                      }}
+                    >
+                      ${c.label}
+                    </button>
+                  `,
+                )}
+              </div>
+              <div class="plc-trend">
+                ${sparkline(this.trendSamples, 320, 48)}
+                <span class="plc-dim">
+                  ${chans[this.trendCh]?.name ?? ''}
+                  ${
+                    this.trendSamples.length
+                      ? `= ${this.trendSamples[this.trendSamples.length - 1]}`
+                      : '—'
+                  }
+                  (${this.trendSamples.length} samples)
+                </span>
+              </div>
+            `
+          : html`<p class="plc-dim">no historian channels armed</p>`
+      }
     `;
   }
 
@@ -2958,110 +3559,194 @@ export class TetherPlcIde extends LitElement {
     return rows.slice(0, 200);
   }
 
+  /** Events & Alarms — the Debug section: rules, live events, the
+      merged journal stream, and the historian trend. */
   private eventsPane(): TemplateResult {
-    const conns = this.mqttConns ?? [];
-    const feed = this.mqttFeed();
-    const anyConn = conns.length > 0;
-    const live = conns.filter((c) => c.state === 2).length;
+    const st = this.alarmStats;
+    const live = this.alarms ?? [];
+    const chans = this.histChans ?? [];
     return html`
       <div class="tile-scroll">
         <h3>
-          Events
-          <span class="plc-dim">
-            MQTT message feed · ${live}/${conns.length} broker${conns.length === 1 ? '' : 's'}
-            connected
-          </span>
+          Events &amp; Alarms
+          ${
+            st
+              ? html`<span class="plc-dim">
+                  live ${st.live} · raised ${st.raised} · cleared ${st.cleared} · confirmed
+                  ${st.confirmed}${st.dropped ? ` · dropped ${st.dropped}` : ''}
+                </span>`
+              : nothing
+          }
         </h3>
+        ${this.ctlOk === false ? this.ctlOfflineNote() : nothing}
+        <h4>Rules <span class="plc-dim">compiled into the AlarmRules program</span></h4>
+        ${this.alarmRulesEditor()}
+        <h4>Live events</h4>
         ${
-          this.ctlOk === false
-            ? html`<p class="plc-dim">ctl unreachable — connect on the Deploy pane.</p>`
-            : nothing
-        }
-        <h4>Brokers</h4>
-        ${
-          anyConn
+          live.length
             ? html`
                 <table class="plc-table">
                   <thead>
                     <tr>
-                      <th>hdl</th>
-                      <th>broker</th>
-                      <th>transport</th>
+                      <th>id</th>
+                      <th>sev</th>
                       <th>state</th>
-                      <th>journaled</th>
+                      <th>event</th>
+                      <th>text</th>
+                      <th>raised</th>
+                      <th>ack</th>
                     </tr>
                   </thead>
                   <tbody>
-                    ${conns.map(
-                      (c) => html`
+                    ${live.map(
+                      (e) => html`
                         <tr>
-                          <td>#${c.handle}</td>
+                          <td>#${e.id}</td>
+                          <td>${this.sevName(e.severity)}</td>
+                          <td>${this.evStateName(e.state)}</td>
+                          <td>cls${e.cls}/evt${e.eventId}</td>
+                          <td>${e.text}</td>
+                          <td>${this.fmtNs(e.raisedNs)}</td>
                           <td>
-                            ${this.mqttConnLabel(c)}<br /><span class="plc-dim"
-                              >${c.clientId || '—'}</span
-                            >
+                            ${
+                              e.state === 1
+                                ? html`<button
+                                    class="chip-btn"
+                                    @click=${() => void this.confirmAlarm(e.id)}
+                                  >
+                                    ack
+                                  </button>`
+                                : '—'
+                            }
                           </td>
-                          <td>
-                            ${this.mqttTransportName(c.transport)}${c.tls ? ' 🔒' : ''} ·
-                            mqtt${c.mqttVersion}
-                          </td>
-                          <td>
-                            ${c.state === 2 ? 'connected' : c.state === 1 ? 'connecting' : 'down'}
-                          </td>
-                          <td>${this.mqttJournals.get(c.handle)?.total ?? 0}</td>
                         </tr>
                       `,
                     )}
                   </tbody>
                 </table>
               `
-            : html`<p class="plc-dim">
-                no MQTT brokers connected — the journal fills when a program polls FB_MqttRx /
-                FB_Mqtt / FB_HaEntity.
-              </p>`
+            : html`<p class="plc-dim">no live events</p>`
         }
-        <h4>
-          Message history <span class="plc-dim">inbound PUBLISH, newest first · 64/conn</span>
-        </h4>
-        ${
-          feed.length
-            ? html`
-                <table class="plc-table">
-                  <thead>
-                    <tr>
-                      <th>time</th>
-                      <th>broker</th>
-                      <th>topic</th>
-                      <th>payload</th>
-                      <th>qos</th>
-                      <th>ret</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${feed.map(
-                      ({ conn, e }) => html`
-                        <tr>
-                          <td>${this.fmtMs(e.tsMs)}</td>
-                          <td class="plc-dim">#${conn.handle}</td>
-                          <td>${e.topic}</td>
-                          <td class="plc-mono">${this.mqttPayloadText(e.payload)}</td>
-                          <td>${e.qos}</td>
-                          <td>${e.retain ? 'R' : ''}</td>
-                        </tr>
-                      `,
-                    )}
-                  </tbody>
-                </table>
-              `
-            : html`<p class="plc-dim">${anyConn ? 'no messages journaled yet' : '—'}</p>`
-        }
+        <h4>Journal <span class="plc-dim">program events + MQTT feed, merged</span></h4>
+        ${this.mergedEvents()}
+        ${chans.length || this.histNamesInput ? this.historianCard(chans) : nothing}
       </div>
     `;
   }
 
-  /** ~1.5 s poll while the Events pane is open. */
+  /** Merged journal stream — alarm transitions + MQTT messages, one
+      filterable timeline. Shared by the Debug section and the dock. */
+  private mergedEvents(): TemplateResult {
+    interface Row {
+      ms: number;
+      src: string;
+      sev: string;
+      text: string;
+    }
+    const rows: Row[] = [
+      ...(this.alarmHist ?? []).map((r) => ({
+        ms: Number(r.tsNs / 1_000_000n),
+        src: `evt#${r.journalId}`,
+        sev: this.sevName(r.severity),
+        text: `${this.evStateName(r.state)} · cls${r.cls}/evt${r.eventId} · ${r.text}`,
+      })),
+      ...this.mqttFeed().map(({ conn, e }) => ({
+        ms: Number(e.tsMs),
+        src: `mqtt#${conn.handle}`,
+        sev: e.qos ? `qos${e.qos}` : 'rx',
+        text: `${e.topic} · ${this.mqttPayloadText(e.payload)}`,
+      })),
+    ].sort((a, b) => b.ms - a.ms);
+    const q = this.evFilter.trim().toLowerCase();
+    const shown = q
+      ? rows.filter((r) => `${r.src} ${r.sev} ${r.text}`.toLowerCase().includes(q))
+      : rows;
+    return html`
+      <input
+        class="fbd-in wide"
+        placeholder="filter source / severity / text…"
+        .value=${this.evFilter}
+        @input=${(e: Event) => {
+          this.evFilter = (e.target as HTMLInputElement).value;
+          this.requestUpdate();
+        }}
+      />
+      ${
+        shown.length
+          ? html`<table class="plc-table">
+              <thead>
+                <tr><th>time</th><th>src</th><th>sev</th><th>event</th></tr>
+              </thead>
+              <tbody>
+                ${shown.slice(0, 200).map(
+                  (r) => html`<tr>
+                    <td>${this.fmtMs(BigInt(r.ms))}</td>
+                    <td class="plc-dim">${r.src}</td>
+                    <td>${r.sev}</td>
+                    <td>${r.text}</td>
+                  </tr>`,
+                )}
+              </tbody>
+            </table>`
+          : html`<p class="plc-dim">${q ? 'no matching events' : 'no events journaled yet'}</p>`
+      }
+    `;
+  }
+
+  /** MQTT broker connection table — shared by Debug → Events and
+      Configure → Services. */
+  private mqttBrokersCard(): TemplateResult {
+    const conns = this.mqttConns ?? [];
+    return html`
+      <h4>MQTT brokers</h4>
+      ${
+        conns.length
+          ? html`
+              <table class="plc-table">
+                <thead>
+                  <tr>
+                    <th>hdl</th>
+                    <th>broker</th>
+                    <th>transport</th>
+                    <th>state</th>
+                    <th>journaled</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${conns.map(
+                    (c) => html`
+                      <tr>
+                        <td>#${c.handle}</td>
+                        <td>
+                          ${this.mqttConnLabel(c)}<br /><span class="plc-dim"
+                            >${c.clientId || '—'}</span
+                          >
+                        </td>
+                        <td>
+                          ${this.mqttTransportName(c.transport)}${c.tls ? ' 🔒' : ''} ·
+                          mqtt${c.mqttVersion}
+                        </td>
+                        <td>
+                          ${c.state === 2 ? 'connected' : c.state === 1 ? 'connecting' : 'down'}
+                        </td>
+                        <td>${this.mqttJournals.get(c.handle)?.total ?? 0}</td>
+                      </tr>
+                    `,
+                  )}
+                </tbody>
+              </table>
+            `
+          : html`<p class="plc-dim">
+              no MQTT brokers connected yet — the journal fills once a program uses an MQTT
+              block (FB_MqttRx / FB_Mqtt / FB_HaEntity).
+            </p>`
+      }
+    `;
+  }
+
+  /** ~1.5 s poll while an mqtt-backed section is open. */
   private mqttTick = async (): Promise<void> => {
-    if (this.pane !== 'events' || !this.ctlOk) {
+    if ((this.pane !== 'events' && this.pane !== 'services') || !this.ctlOk) {
       if (this.mqttTimer !== undefined) {
         clearInterval(this.mqttTimer);
         this.mqttTimer = undefined;
@@ -3078,15 +3763,20 @@ export class TetherPlcIde extends LitElement {
 
   // ---- deploy --------------------------------------------------------
 
-  private deployPane(): TemplateResult {
+  // ---- Configure: target / discovery / i/o map ----------------------
+
+  /** Target — which backend + machine the IDE is bound to. */
+  private targetSection(): TemplateResult {
     const ctl = this.ctl;
+    const hubState = this.hub?.client.state ?? 'disconnected';
     return html`
       <div class="tile-scroll">
-        <h3>Deploy</h3>
+        <h3>Target <span class="plc-dim">compile/deploy backend + machine connection</span></h3>
+        <h4>plc backend</h4>
         <div class="plc-ctlbar">
-          backend
           <input
             class="fbd-in wide"
+            title="URL of the tplc serve backend on the PLC host"
             .value=${ctl.url}
             @change=${(e: Event) => this.setCtlUrl((e.target as HTMLInputElement).value)}
           />
@@ -3100,45 +3790,367 @@ export class TetherPlcIde extends LitElement {
           }
         </div>
         ${this.ctlErr ? html`<p class="fbd-warn">${this.ctlErr}</p>` : nothing}
+        <p class="plc-dim">
+          Deploy works through the <code>tplc serve</code> backend on the PLC host — the same
+          service this page was loaded from.
+        </p>
+        <h4>machine connection</h4>
+        <p class="plc-dim">
+          ${this.hub?.prefs.url ?? '—'} · ${hubState}
+        </p>
+        ${
+          this.rt
+            ? html`<p class="plc-dim">
+                rt: up ${this.rt.uptimeS}s · ${this.rt.progCount} progs
+                (${this.rt.runningCount} running) · master ${this.rt.masterStatus} plc
+                ${this.rt.plcStatus}${this.rt.version ? ` · ${this.rt.version}` : ''}
+              </p>`
+            : nothing
+        }
+      </div>
+    `;
+  }
+
+  /** Discovery — what the project talks to + bus-scan status. */
+  private discoverySection(): TemplateResult {
+    if (!this.busData) void this.refreshBus();
+    const devices = this.project.fbd.pous.flatMap((p) =>
+      p.networks.flatMap((n) =>
+        n.blocks
+          .filter((b) => b.kind === 'device')
+          .map((b) => ({ pou: p.name, b })),
+      ),
+    );
+    return html`
+      <div class="tile-scroll">
+        <h3>Discovery <span class="plc-dim">fieldbus terminals + endpoints</span></h3>
+        <h4>
+          project endpoints
+          <span class="plc-dim">${devices.length ? ` · ${devices.length}` : ''}</span>
+        </h4>
+        ${
+          devices.length
+            ? html`<table class="plc-table">
+                <thead>
+                  <tr><th>pou</th><th>instance</th><th>device</th><th>endpoint</th><th>channels</th></tr>
+                </thead>
+                <tbody>
+                  ${devices.map(
+                    ({ pou, b }) => html`<tr>
+                      <td>${pou}</td>
+                      <td>${b.instance ?? b.name ?? ''}</td>
+                      <td>${b.type_ref}</td>
+                      <td class="plc-dim">${b.endpoint || '(file channel)'}</td>
+                      <td>${b.pins?.length ?? 0}</td>
+                    </tr>`,
+                  )}
+                </tbody>
+              </table>`
+            : html`<p class="plc-dim">
+                no device blocks yet — drop a terminal from the FBD palette's device group,
+                or add channels on the I/O Map section.
+              </p>`
+        }
+        <h4>
+          live bus
+          <span class="plc-dim">ecpump artifacts in ${this.busData?.simdir ?? '…'}</span>
+        </h4>
         <div class="plc-ops">
-          <input type="file" id="plc-pkg" accept=".tplc" hidden @change=${this.onPkgFile} />
+          <input
+            class="fbd-in"
+            style="width:110px"
+            title="UDP peer hosting the slave chain"
+            placeholder="peer"
+            .value=${this.busPeer}
+            @input=${(e: Event) => (this.busPeer = (e.target as HTMLInputElement).value)}
+          />
+          <input
+            class="fbd-in"
+            style="width:70px"
+            title="UDP port"
+            type="number"
+            .value=${String(this.busPort)}
+            @input=${(e: Event) => (this.busPort = parseInt((e.target as HTMLInputElement).value, 10) || 34980)}
+          />
+          <input
+            class="fbd-in"
+            style="width:90px"
+            title="raw NIC name — overrides peer/port"
+            placeholder="iface"
+            .value=${this.busIface}
+            @input=${(e: Event) => (this.busIface = (e.target as HTMLInputElement).value)}
+          />
           <button
             class="chip-btn"
-            ?disabled=${this.compiling}
-            @click=${() => void this.onBuildDeploy()}
+            ?disabled=${this.busScanBusy}
+            @click=${() => void this.onBusScan()}
           >
-            ${this.compiling ? 'building…' : 'build & deploy'}
+            ${this.busScanBusy ? 'scanning…' : 'scan bus'}
           </button>
-          <button
-            class="chip-btn"
-            @click=${() => this.querySelector<HTMLInputElement>('#plc-pkg')?.click()}
-          >
-            deploy .tplc…
-          </button>
-          <button class="chip-btn" @click=${() => this.ctlOp('start', () => ctl.progStart())}>
-            start
-          </button>
-          <button class="chip-btn" @click=${() => this.ctlOp('stop', () => ctl.progStop())}>
-            stop
-          </button>
-          <button class="chip-btn" @click=${() => this.ctlOp('rollback', () => ctl.progRollback())}>
-            rollback
-          </button>
-          ${
-            this.deployFrac !== undefined
-              ? html`<span class="plc-dim">uploading ${(this.deployFrac * 100).toFixed(0)}%</span>`
-              : nothing
-          }
+          <button class="chip-btn" @click=${() => void this.refreshBus()}>refresh</button>
         </div>
+        ${this.busScanLog ? html`<pre class="plc-dim plc-simlog">${this.busScanLog}</pre>` : nothing}
+        ${this.busTopologyTable()}
+        ${
+          this.busData?.fleet
+            ? html`<h4>fleet <span class="plc-dim">.fleet — reusable as pump --fleet input</span></h4>
+                <pre class="plc-dim plc-simlog">${this.busData.fleet}</pre>`
+            : nothing
+        }
+        ${
+          this.busData?.bus
+            ? html`<h4>pdo catalog <span class="plc-dim">.bus — valid pdo= endpoints</span></h4>
+                ${this.busCatalogTable(this.busData.bus)}`
+            : nothing
+        }
+        ${
+          !this.busData?.topology && !this.busData?.fleet && !this.busData?.bus
+            ? html`<p class="plc-dim">
+                no artifacts yet — run a scan, or start the EtherCAT pump
+                (<code>tplc-ec-pump --simdir ${this.busData?.simdir ?? '…'}</code>).
+              </p>`
+            : nothing
+        }
+      </div>
+    `;
+  }
+
+  /** GET /bus — ecpump's published artifacts (.topology/.fleet/.bus). */
+  private async refreshBus(): Promise<void> {
+    try {
+      const r = await fetch(`${this.ctl.url}/bus`);
+      if (!r.ok) return;
+      this.busData = (await r.json()) as typeof this.busData;
+    } catch {
+      /* backend down — leave stale/empty state */
+    }
+    this.requestUpdate();
+  }
+
+  private async onBusScan(): Promise<void> {
+    this.busScanBusy = true;
+    this.busScanLog = '';
+    this.requestUpdate();
+    try {
+      const r = await this.ctl.meta<{ exit: number; stderr: string; fleet: string }>(
+        'bus_scan',
+        {
+          peer: this.busPeer,
+          port: this.busPort,
+          ...(this.busIface.trim() ? { iface: this.busIface.trim() } : {}),
+        },
+      );
+      this.busScanLog = r.stderr?.trim() ?? '';
+      if (r.exit !== 0)
+        this.busScanLog += `${this.busScanLog ? '\n' : ''}(scan exited ${r.exit} — EtherCAT discovery needs a live bus or UDP slave chain)`;
+      await this.refreshBus();
+    } catch (e) {
+      this.busScanLog = `bus scan failed: ${e instanceof Error ? e.message : e}`;
+    } finally {
+      this.busScanBusy = false;
+      this.requestUpdate();
+    }
+  }
+
+  /** .topology is JSON {slaves:[{i,part,key,coupler,vendor,product,tx,rx}]}. */
+  private busTopologyTable(): TemplateResult | typeof nothing {
+    const text = this.busData?.topology;
+    if (!text) return nothing;
+    const slaves = parseBusTopology(text);
+    if (!slaves.length)
+      return html`<pre class="plc-dim plc-simlog">${text}</pre>`;
+    return html`
+      <h4>topology <span class="plc-dim">${slaves.length} slave(s)</span></h4>
+      <table class="plc-table">
+        <thead>
+          <tr><th>#</th><th>part</th><th>key</th><th>tx→%I</th><th>rx→%Q</th></tr>
+        </thead>
+        <tbody>
+          ${slaves.map(
+            (s) => html`<tr>
+              <td>${s.i}</td>
+              <td>${s.part}${s.coupler ? ' (coupler)' : ''}</td>
+              <td class="plc-dim">${s.key}</td>
+              <td>${s.tx || '—'}</td>
+              <td>${s.rx || '—'}</td>
+            </tr>`,
+          )}
+        </tbody>
+      </table>
+    `;
+  }
+
+  private busCatalogTable(text: string): TemplateResult {
+    const eps = parseBusCatalog(text);
+    return html`
+      <table class="plc-table">
+        <thead>
+          <tr><th>dir</th><th>endpoint</th><th>bytes</th></tr>
+        </thead>
+        <tbody>
+          ${eps.map(
+            (e) => html`<tr>
+              <td>${e.tx ? 'tx→%I' : 'rx→%Q'}</td>
+              <td>${e.key}</td>
+              <td>${e.size}</td>
+            </tr>`,
+          )}
+        </tbody>
+      </table>
+    `;
+  }
+
+  /** I/O Mapping — deploy map moved out of the old Deploy pane. */
+  private iomapSection(): TemplateResult {
+    return html`
+      <div class="tile-scroll">
+        <h3>
+          I/O Mapping
+          <span class="plc-dim">process image ↔ transport channels, saved with the project</span>
+        </h3>
+        ${this.ioMapCard()}
+      </div>
+    `;
+  }
+
+  // ---- Configure: libraries / services / commissioning --------------
+
+  /** Libraries — sources resolved into the project. */
+  private librariesSection(): TemplateResult {
+    const libs = this.catalogLibs ?? [];
+    const groupCount = this.catGroups.length;
+    return html`
+      <div class="tile-scroll">
+        <h3>Libraries <span class="plc-dim">sources compiled into the project</span></h3>
+        ${this.libraryRows()}
+        <h4>installed catalog</h4>
+        ${
+          libs.length
+            ? html`<p class="plc-dim">
+                ${libs.map((l) => l.name).join(', ')} — ${groupCount} source file
+                group${groupCount === 1 ? '' : 's'}. Blocks you use resolve automatically:
+                their source is fetched and embedded when a block, pin, or ST reference
+                appears — nothing to attach by hand.
+              </p>`
+            : html`<p class="plc-dim">
+                no installed-library catalog — start <code>tplc serve</code> with a
+                libraries dir (<code>--libdir</code>) and the blocks appear in the FBD
+                palette with automatic source resolution.
+              </p>`
+        }
+      </div>
+    `;
+  }
+
+  /** Services — runtime service connections (MQTT brokers, …). */
+  private servicesSection(): TemplateResult {
+    return html`
+      <div class="tile-scroll">
+        <h3>Services <span class="plc-dim">runtime service connections</span></h3>
+        ${this.ctlOk === false ? this.ctlOfflineNote() : nothing}
+        ${this.mqttBrokersCard()}
+      </div>
+    `;
+  }
+
+  /** Sections that host re-homed rail tiles (commissioning,
+      diagnostics, explore) — the tile elements mount in updated(). */
+  private tilesSection(name: string): TemplateResult {
+    return html`
+      <div class="tile-scroll">
+        <h3>${name}</h3>
+        <div class="plc-tiles"></div>
+      </div>
+    `;
+  }
+
+  // ---- Debug: run control / task runtime ----------------------------
+
+  /** Run-control header — always visible while the Debug activity is
+      active: program state + deploy/start/stop actions. The detailed
+      cards stay in the Run section below. */
+  private runHeader(): TemplateResult {
+    const ctl = this.ctl;
+    const p = this.prog;
+    const state = p ? (['stopped', 'running', 'fault'][p.state] ?? `s${p.state}`) : 'no program';
+    const retainKb =
+      p?.retainDirtyBytes !== undefined ? `${(Number(p.retainDirtyBytes) / 1024).toFixed(1)}kB` : '';
+    return html`
+      <div class="plc-runbar">
+        <span class="plc-runstate ${p ? `s${p.state}` : ''}">
+          ${p ? '●' : '○'} ${state}
+        </span>
+        <span class="plc-dim">
+          ${p ? `${p.name}${p.epoch !== undefined ? ` · epoch ${p.epoch}` : ''}${p.version ? ` · ${p.version}` : ''}${p.deployedAtNs ? ` · deployed ${new Date(Number(p.deployedAtNs / 1_000_000n)).toLocaleTimeString()}` : ''}` : 'connect to a target — Debug → Run refreshes'}
+        </span>
+        <span class="spacer"></span>
+        <input type="file" id="plc-pkg" accept=".tplc" hidden @change=${this.onPkgFile} />
+        <button
+          class="chip-btn"
+          ?disabled=${this.compiling}
+          @click=${() => void this.onBuildDeploy()}
+        >
+          ${this.compiling ? 'building…' : 'build & deploy'}
+        </button>
+        <button
+          class="chip-btn"
+          @click=${() => this.querySelector<HTMLInputElement>('#plc-pkg')?.click()}
+        >
+          .tplc…
+        </button>
+        <button class="chip-btn" @click=${() => this.ctlOp('start', () => ctl.progStart())}>
+          start
+        </button>
+        <button class="chip-btn" @click=${() => this.ctlOp('stop', () => ctl.progStop())}>
+          stop
+        </button>
+        <button class="chip-btn" @click=${() => this.ctlOp('rollback', () => ctl.progRollback())}>
+          rollback
+        </button>
+        ${
+          this.deployFrac !== undefined
+            ? html`<span class="plc-dim">uploading ${(this.deployFrac * 100).toFixed(0)}%</span>`
+            : nothing
+        }
+        ${retainKb ? html`<span class="plc-dim" title="dirty retain bytes">retain ${retainKb}</span>` : nothing}
+        ${
+          p?.shadowState !== undefined
+            ? html`<span class="plc-dim">shadow ${p.shadowState}</span>`
+            : nothing
+        }
+      </div>
+    `;
+  }
+
+  /** Run — program/task detail tables (the old Deploy pane's run
+      half; its configuration passengers live under Configure). */
+  private runSection(): TemplateResult {
+    return html`
+      <div class="tile-scroll">
+        <h3>Run <span class="plc-dim">program + task detail</span></h3>
+        ${this.ctlOk === false ? this.ctlOfflineNote() : nothing}
+        ${this.ctlErr ? html`<p class="fbd-warn">${this.ctlErr}</p>` : nothing}
         ${this.prog ? this.progTable(this.prog) : nothing} ${this.shadowCard()}
-        ${this.dbg ? this.debugCard(this.dbg) : nothing}
-        ${this.retain ? this.retainCard(this.retain) : nothing} ${this.ioMapCard()} ${this.odCard()}
+        ${this.retain ? this.retainCard(this.retain) : nothing} ${this.odCard()}
         ${this.journalCard()}
         ${this.rt ? html`<p class="plc-dim">rt: up ${this.rt.uptimeS}s · ${this.rt.progCount} progs (${this.rt.runningCount} running) · master ${this.rt.masterStatus} plc ${this.rt.plcStatus}${this.rt.version ? ` · ${this.rt.version}` : ''}</p>` : nothing}
-        <p class="plc-dim">
-          Requires <code>tplc serve</code> running on the plc host. Online-change (state-preserving
-          swap + rollback) is live through PROG_SWAP / PROG_ROLLBACK.
-        </p>
+      </div>
+    `;
+  }
+
+  /** Tasks (runtime) — suspend/step/resume + trigger/watch channels. */
+  private tasksRtSection(): TemplateResult {
+    return html`
+      <div class="tile-scroll">
+        <h3>Tasks <span class="plc-dim">runtime control — suspend, step, triggers</span></h3>
+        ${this.ctlOk === false ? this.ctlOfflineNote() : nothing}
+        ${
+          this.dbg
+            ? this.debugCard(this.dbg)
+            : html`<p class="plc-dim">
+                no debug state yet — connect to a running PLC (Debug → Run → refresh).
+              </p>`
+        }
       </div>
     `;
   }
@@ -3617,10 +4629,12 @@ export class TetherPlcIde extends LitElement {
       });
       await this.ctl.shadowLoad(uuid);
       this.ctlErr = '';
-      this.flash(`shadow ${file.name} → ${uuid.slice(0, 8)}`);
+      this.flash(
+        `shadow candidate loaded: ${file.name} (${uuid.slice(0, 8)}) — it now runs beside the active program`,
+      );
       await this.refreshCtl();
     } catch (e2) {
-      this.ctlErr = `shadow load: ${e2 instanceof Error ? e2.message : e2}`;
+      this.ctlErr = `online change: ${e2 instanceof Error ? e2.message : e2}`;
     } finally {
       this.deployFrac = undefined;
       this.requestUpdate();
@@ -3642,7 +4656,7 @@ export class TetherPlcIde extends LitElement {
     if (!window.confirm(sum)) return;
     void this.ctlOp('shadow promote', async () => {
       const r = await this.ctl.shadowPromote();
-      this.flash(`promoted ${r.uuid.slice(0, 8)} → epoch ${r.epoch}`);
+      this.flash(`shadow program promoted — running epoch ${r.epoch}`);
     });
   }
 
@@ -3847,7 +4861,7 @@ export class TetherPlcIde extends LitElement {
       ${
         this.traceChs.length > 0
           ? html`<div class="plc-forces">
-              <span class="plc-dim">rec ch:</span>
+              <span class="plc-dim">record:</span>
               ${this.traceChs.map(
                 (c, i) =>
                   html`<span class="plc-force-tag">
@@ -3871,7 +4885,7 @@ export class TetherPlcIde extends LitElement {
                   @change=${(e: Event) =>
                     (this.traceNoFreeze = (e.target as HTMLInputElement).checked)}
                 />
-                nofreeze
+                don't freeze on trigger
               </label>
             </div>`
           : nothing
@@ -3968,7 +4982,7 @@ export class TetherPlcIde extends LitElement {
           title="what the last swap's migrate rules did"
           @click=${() => void this.onStateDiff()}
         >
-          state.diff
+          state diff
         </button>
         ${
           this.stateDiff
@@ -4002,7 +5016,7 @@ export class TetherPlcIde extends LitElement {
       this.ctlErr = '';
     } catch (e) {
       this.stateDiff = undefined;
-      this.ctlErr = `state.diff: ${e instanceof CtlError ? e.message : e}`;
+      this.ctlErr = `state diff: ${e instanceof CtlError ? e.message : e}`;
     }
     this.requestUpdate();
   }
@@ -4021,7 +5035,7 @@ export class TetherPlcIde extends LitElement {
     } catch (e) {
       this.dbgSym = undefined;
       this.dbgSymShadow = false;
-      this.ctlErr = `resolve: ${e instanceof CtlError ? e.message : e}`;
+      this.ctlErr = `symbol lookup: ${e instanceof CtlError ? e.message : e}`;
     }
     this.requestUpdate();
   }
@@ -4038,7 +5052,7 @@ export class TetherPlcIde extends LitElement {
       this.dbgTypedDirty = false;
       this.ctlErr = '';
     } catch (e) {
-      this.ctlErr = `read: ${e instanceof CtlError ? e.message : e}`;
+      this.ctlErr = `read failed: ${e instanceof CtlError ? e.message : e}`;
     }
     this.requestUpdate();
   }
@@ -4090,7 +5104,7 @@ export class TetherPlcIde extends LitElement {
       try {
         const b = c.encode(t);
         if (b.length === s.size) return b;
-        this.ctlErr = `${c.label} encodes to ${b.length}B, symbol is ${s.size}B`;
+        this.ctlErr = `the ${c.label} format writes ${b.length} B but the symbol is ${s.size} B — pick a matching format`;
         this.requestUpdate();
         return undefined;
       } catch (e) {
@@ -4105,7 +5119,7 @@ export class TetherPlcIde extends LitElement {
   private dbgHexBytes(): Uint8Array | undefined {
     const hex = this.dbgWriteHex.replace(/\s+/g, '');
     if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length % 2) {
-      this.ctlErr = 'hex string expected';
+      this.ctlErr = 'enter the value as hexadecimal bytes (e.g. 01 FF 2A)';
       this.requestUpdate();
       return undefined;
     }
@@ -4132,7 +5146,8 @@ export class TetherPlcIde extends LitElement {
     let mask: Uint8Array | undefined;
     if (mh) {
       if (mh.length !== bytes.length * 2 || !/^[0-9a-fA-F]+$/.test(mh)) {
-        this.ctlErr = 'force mask: hex, same byte count as value';
+        this.ctlErr =
+          'the force mask must be hexadecimal with the same byte count as the value';
         this.requestUpdate();
         return;
       }
@@ -4161,13 +5176,13 @@ export class TetherPlcIde extends LitElement {
         for (let i = b.length - 1; i >= 0; i--) v = (v << 8n) | BigInt(b[i]!);
         value = v;
       } catch (e2) {
-        this.ctlErr = `break: ${e2 instanceof Error ? e2.message : e2}`;
+        this.ctlErr = `trigger: ${e2 instanceof Error ? e2.message : e2}`;
         this.requestUpdate();
         return;
       }
     }
     if (isNaN(taskIdx)) {
-      this.ctlErr = 'break: task index required';
+      this.ctlErr = 'pick the task this trigger applies to (0 = the first task)';
       this.requestUpdate();
       return;
     }
@@ -4188,7 +5203,7 @@ export class TetherPlcIde extends LitElement {
     const taskIdx = parseInt(this.brkTask, 10);
     const expr = this.brkExpr.trim();
     if (isNaN(taskIdx)) {
-      this.ctlErr = 'break: task index required';
+      this.ctlErr = 'pick the task this trigger applies to (0 = the first task)';
       this.requestUpdate();
       return;
     }
@@ -4203,12 +5218,12 @@ export class TetherPlcIde extends LitElement {
     const s = this.dbgSym;
     if (!s) return;
     if (s.size > 8) {
-      this.ctlErr = 'rec channel must be ≤ 8 B';
+      this.ctlErr = 'a recorded channel can be at most 8 bytes';
       this.requestUpdate();
       return;
     }
     if (this.traceChs.length >= 8) {
-      this.ctlErr = 'max 8 rec channels';
+      this.ctlErr = 'at most 8 channels can be recorded at once';
       this.requestUpdate();
       return;
     }
@@ -4224,12 +5239,12 @@ export class TetherPlcIde extends LitElement {
     const s = this.dbgSym;
     if (!s) return;
     if (s.size > 64) {
-      this.ctlErr = 'watch item must be ≤ 64 B';
+      this.ctlErr = 'a watched item can be at most 64 bytes';
       this.requestUpdate();
       return;
     }
     if (this.watchChs.length >= 16) {
-      this.ctlErr = 'max 16 watch items';
+      this.ctlErr = 'at most 16 items can be watched at once';
       this.requestUpdate();
       return;
     }
@@ -4479,7 +5494,7 @@ export class TetherPlcIde extends LitElement {
       this.odVals = {};
       this.ctlErr = '';
     } catch (e) {
-      this.ctlErr = `od list: ${e instanceof Error ? e.message : e}`;
+      this.ctlErr = `object dictionary: ${e instanceof Error ? e.message : e}`;
     }
     this.requestUpdate();
   }
@@ -4492,7 +5507,7 @@ export class TetherPlcIde extends LitElement {
       this.odTypes = { ...(this.odTypes ?? {}), [`${e.index}.${e.sub}`]: v.type };
       this.ctlErr = '';
     } catch (err) {
-      this.ctlErr = `od read: ${err instanceof Error ? err.message : err}`;
+      this.ctlErr = `object dictionary read: ${err instanceof Error ? err.message : err}`;
     }
     this.requestUpdate();
   }
@@ -4523,7 +5538,7 @@ export class TetherPlcIde extends LitElement {
     const key = `${e.index}.${e.sub}`;
     const text = (this.odWriteHex[key] ?? '').trim();
     if (!text) {
-      this.ctlErr = 'od write: empty value';
+      this.ctlErr = 'object dictionary: enter a value first';
       return;
     }
     /* declared OD_T_* type wins (learned on read); write-only objects
@@ -4542,23 +5557,25 @@ export class TetherPlcIde extends LitElement {
         else bytes = parseHex(text);
       }
     } catch (err) {
-      this.ctlErr = `od write: ${err instanceof Error ? err.message : err}`;
+      this.ctlErr = `object dictionary write: ${err instanceof Error ? err.message : err}`;
       return;
     }
     /* length check applies to fixed-width types only — for STR/BYTES
        the listed len is the *current* value size, not a capacity */
     const fixedWidth = odType === undefined || odType <= 4;
     if (fixedWidth && declaredLen && bytes.length !== declaredLen) {
-      this.ctlErr = `od write: ${bytes.length}B != declared ${declaredLen}B`;
+      this.ctlErr = `object dictionary: value is ${bytes.length} B but the object declares ${declaredLen} B`;
       return;
     }
     try {
       const ok = await this.ctl.odWrite(e.index, e.sub, bytes);
-      this.ctlErr = ok ? '' : `od write 0x${e.index.toString(16)}/sub${e.sub}: refused`;
+      this.ctlErr = ok
+        ? ''
+        : `object dictionary write refused (0x${e.index.toString(16)}/sub${e.sub})`;
       delete this.odWriteHex[key];
       await this.onOdRead(e);
     } catch (err) {
-      this.ctlErr = `od write: ${err instanceof Error ? err.message : err}`;
+      this.ctlErr = `object dictionary write: ${err instanceof Error ? err.message : err}`;
     }
     this.requestUpdate();
   }
@@ -4811,8 +5828,9 @@ export class TetherPlcIde extends LitElement {
     const stBinds = stIoBindings(this.project.stSources);
     return html`
       <h4>
-        io map
-        <span class="plc-dim">${chans.length ? `${chans.length} channels` : ''}</span>
+        i/o map
+        <span class="plc-dim">which process-image bytes go to which transport channel</span>
+        <span class="plc-dim">${chans.length ? ` · ${chans.length} channels` : ''}</span>
         ${overlaps.length ? html`<span class="plc-warn"> ⚠ ${overlaps.length} overlap${overlaps.length > 1 ? 's' : ''}</span>` : nothing}
         ${saved ? html`<span class="plc-dim"> · saved for deploy</span>` : nothing}
       </h4>
@@ -4988,7 +6006,7 @@ export class TetherPlcIde extends LitElement {
       this.mapEdit = r.text;
       this.mapViolations = validateDeployMapText(r.text);
     } catch (e) {
-      this.ctlErr = `gen-map: ${e instanceof Error ? e.message : e}`;
+      this.ctlErr = `map generation: ${e instanceof Error ? e.message : e}`;
     }
     this.requestUpdate();
   }
@@ -5014,7 +6032,7 @@ export class TetherPlcIde extends LitElement {
       this.ctlErr = '';
     } catch (e) {
       this.ioMap = undefined;
-      this.ctlErr = `io map: ${e instanceof Error ? e.message : e}`;
+      this.ctlErr = `i/o map: ${e instanceof Error ? e.message : e}`;
     }
     this.requestUpdate();
   }
@@ -5063,7 +6081,7 @@ export class TetherPlcIde extends LitElement {
       this.journal = await this.ctl.journalTail(n);
       this.ctlErr = '';
     } catch (e) {
-      this.ctlErr = `journal: ${e instanceof Error ? e.message : e}`;
+      this.ctlErr = `audit journal: ${e instanceof Error ? e.message : e}`;
     }
     this.requestUpdate();
   }
@@ -5131,11 +6149,11 @@ export class TetherPlcIde extends LitElement {
     this.evOff = this.ctl.events((e) => {
       if (e.type === EV.FAULT && e.payload.length >= 4) {
         const rc = new DataView(e.payload.buffer, e.payload.byteOffset).getInt32(0, true);
-        this.flash(`plc fault rc=${rc}`);
+        this.flash(`PLC fault (rc=${rc}) — see Debug → Run for details`);
       }
       if (e.type === EV.DBG_BREAK && e.payload.length >= 8) {
         const d = new DataView(e.payload.buffer, e.payload.byteOffset);
-        this.flash(`break h${d.getUint32(0, true)} hit · task ${d.getUint32(4, true)}`);
+        this.flash(`trigger ${d.getUint32(0, true)} hit on task ${d.getUint32(4, true)}`);
       }
       if (e.type === EV.DBG_WATCH && e.payload.length >= 16) {
         /* {u32 handle, u64 seq, u32 n, {u32 len, u8 data[]}*} */
@@ -5159,8 +6177,8 @@ export class TetherPlcIde extends LitElement {
       if (e.type === EV.USER && e.payload.length >= 20) {
         const d = new DataView(e.payload.buffer, e.payload.byteOffset);
         this.flash(
-          `event #${d.getUint32(0, true)} state=${d.getUint32(4, true)} ` +
-            `sev=${d.getUint32(16, true)}`,
+          `event #${d.getUint32(0, true)}: ${this.evStateName(d.getUint32(4, true))} ` +
+            `(${this.sevName(d.getUint32(16, true))} severity)`,
         );
       }
       if (

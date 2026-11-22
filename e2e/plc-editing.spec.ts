@@ -1,5 +1,13 @@
 import { expect, test, type Page } from '@playwright/test';
-import { newPou, openFreshIde, pane, projectJson, setStSource } from './plc-helpers';
+import {
+  act,
+  edKind,
+  newPou,
+  openFreshIde,
+  pane,
+  projectJson,
+  setStSource,
+} from './plc-helpers';
 
 /** accept the next window.prompt/dialog with `text` */
 async function acceptPrompt(page: Page, text: string): Promise<void> {
@@ -20,7 +28,8 @@ test.describe('IDE editing features', () => {
   test('alarm rules designer builds the AlarmRules FBD program', async ({ page }) => {
     await openFreshIde(page);
     await dismissPicker(page);
-    await pane(page, 'Alarms');
+    await act(page, 'Debug');
+    await pane(page, 'Events & Alarms');
 
     await page.locator('button', { hasText: '+ rule' }).click();
     await page.locator('button', { hasText: '+ rule' }).click();
@@ -77,7 +86,7 @@ test.describe('IDE editing features', () => {
     await openFreshIde(page);
     await dismissPicker(page);
     await newPou(page, 'program');
-    await pane(page, 'FBD');
+    await edKind(page, 'FBD');
 
     await page.locator('fbd-canvas .chip-btn', { hasText: 'note' }).click();
     const svg = page.locator('fbd-canvas svg').first();
@@ -103,7 +112,7 @@ test.describe('IDE editing features', () => {
     await openFreshIde(page);
     await dismissPicker(page);
     await newPou(page, 'program');
-    await pane(page, 'FBD');
+    await edKind(page, 'FBD');
 
     // place two blocks via palette and wire them
     const { block, pin } = await import('./plc-helpers');
@@ -128,7 +137,7 @@ test.describe('IDE editing features', () => {
     await openFreshIde(page);
     await dismissPicker(page);
     await newPou(page, 'program');
-    await pane(page, 'FBD');
+    await edKind(page, 'FBD');
     await page.locator('button', { hasText: '+ ld' }).click();
     await expect(page.locator('ld-canvas')).toBeVisible();
 
@@ -170,7 +179,7 @@ test.describe('IDE editing features', () => {
     await openFreshIde(page);
     await dismissPicker(page);
     await newPou(page, 'program');
-    await pane(page, 'ST');
+    await edKind(page, 'ST');
 
     const src = `PROGRAM Main\nVAR\n  x : INT;\n  y : INT;\nEND_VAR\nx := y + 1;\nEND_PROGRAM`;
     await setStSource(page, src);
@@ -203,7 +212,8 @@ test.describe('IDE editing features', () => {
   test('deploy map: graphical channel grid round-trips to bridge text', async ({ page }) => {
     await openFreshIde(page);
     await dismissPicker(page);
-    await pane(page, 'Deploy');
+    await act(page, 'Configure');
+    await pane(page, 'I/O Map');
 
     await page.locator('button', { hasText: 'generate' }).click();
     await page.locator('button', { hasText: 'edit channels…' }).click();
