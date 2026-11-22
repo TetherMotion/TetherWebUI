@@ -652,6 +652,10 @@ export class TetherPlcIde extends LitElement {
   private busIfaceCustom = false;
   /** why the NIC select fell back to manual entry (iface_list failed). */
   private busIfaceErr = '';
+  /** iface_list `raw_capable` — false ⇒ AF_PACKET would EPERM (no
+      CAP_NET_RAW), so raw-NIC scans can't work on this host. null =
+      backend didn't report (older tplc). */
+  private busRawCapable: boolean | null = null;
   /** recent UDP peers — filled after each successful scan request. */
   private busPeerRecent: string[] = [];
   private busScanBusy = false;
@@ -3949,9 +3953,11 @@ export class TetherPlcIde extends LitElement {
       const r = await this.ctl.meta<{
         ifaces: { name: string; kind: string; state: string; mac: string; mtu: string }[];
         auto: string;
+        raw_capable?: boolean;
       }>('iface_list');
       this.busIfaces = r.ifaces ?? [];
       this.busIfaceAuto = r.auto ?? '';
+      this.busRawCapable = r.raw_capable ?? null;
       if (!this.busLink) this.busLink = this.busIfaceAuto ? 'raw' : 'udp';
       if (this.busIfaceAuto && !this.busIface) this.busIface = this.busIfaceAuto;
       this.busIfaceErr = '';
@@ -4031,9 +4037,19 @@ export class TetherPlcIde extends LitElement {
   }
 
   private busRawFields(): TemplateResult {
+    const capWarn =
+      this.busRawCapable === false
+        ? html`<span
+            class="plc-warn"
+            style="align-self:center;cursor:help"
+            title=${'raw EtherCAT (AF_PACKET) needs CAP_NET_RAW — run: sudo setcap cap_net_raw+ep tplc-ec-pump — or switch to EtherCAT/UDP'}
+          >
+            ⚠ no CAP_NET_RAW
+          </span>`
+        : nothing;
     const ifs = this.busIfaces;
     if (!ifs?.length || this.busIfaceCustom)
-      return html`<input
+      return html`${capWarn}<input
           class="fbd-in"
           style="width:110px"
           title="raw NIC name (e.g. enp3s0)"
@@ -4064,7 +4080,7 @@ export class TetherPlcIde extends LitElement {
     </option>`;
     const phys = ifs.filter((i) => i.kind === 'ethernet' || i.kind === 'wireless');
     const virt = ifs.filter((i) => i.kind !== 'ethernet' && i.kind !== 'wireless');
-    return html`<select
+    return html`${capWarn}<select
         class="fbd-in"
         title="raw NIC — AF_PACKET EtherCAT master"
         @change=${(e: Event) => {

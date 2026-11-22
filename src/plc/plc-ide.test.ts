@@ -357,6 +357,44 @@ describe('plc-ide discovery card', () => {
     el.remove();
   });
 
+  it('warns about missing CAP_NET_RAW in raw mode when the backend says so', async () => {
+    seed();
+    const el = await mount();
+    stubCtl(el, async (op) =>
+      op === 'iface_list'
+        ? {
+            ifaces: [{ name: 'eth0', kind: 'ethernet', state: 'up', mac: 'aa', mtu: '1500' }],
+            auto: 'eth0',
+            raw_capable: false,
+          }
+        : { exit: 0, stderr: '', fleet: '' },
+    );
+    await showDiscovery(el);
+
+    const warn = el.querySelector('.plc-ops .plc-warn');
+    expect(warn).toBeTruthy();
+    expect(warn!.textContent).toContain('CAP_NET_RAW');
+    expect(warn!.getAttribute('title')).toContain('setcap');
+    el.remove();
+  });
+
+  it('shows no CAP_NET_RAW warning when the backend does not report it', async () => {
+    seed();
+    const el = await mount();
+    stubCtl(el, async (op) =>
+      op === 'iface_list'
+        ? {
+            ifaces: [{ name: 'eth0', kind: 'ethernet', state: 'up', mac: 'aa', mtu: '1500' }],
+            auto: 'eth0',
+            raw_capable: true,
+          }
+        : { exit: 0, stderr: '', fleet: '' },
+    );
+    await showDiscovery(el);
+    expect(el.querySelector('.plc-ops .plc-warn')).toBeFalsy();
+    el.remove();
+  });
+
   it('blocks a raw scan until an interface is chosen', async () => {
     seed();
     const el = await mount();
