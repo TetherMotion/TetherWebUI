@@ -205,6 +205,7 @@ export class TetherIOClient extends EventTarget {
    */
   unavailable = false;
   private unavailableLogged = false;
+  private pendingRetryMs = 0;
   private manualDisconnect = false;
 
   /** Current connection state (readable by the UI). */
@@ -333,6 +334,7 @@ export class TetherIOClient extends EventTarget {
     const delay = this.unavailable
       ? UNCONFIGURED_RETRY_MS
       : Math.min(maximum, initial * 2 ** this.reconnectAttempt);
+    this.pendingRetryMs = delay;
     this.reconnectAttempt += 1;
     this.state = 'reconnecting';
     this.dispatchEvent(
@@ -370,6 +372,20 @@ export class TetherIOClient extends EventTarget {
         `[TetherIO] bridge not configured on server — probing every ${UNCONFIGURED_RETRY_MS / 1000} s`,
       );
       this.unavailableLogged = true;
+    }
+    // The probe resolves after the first 'reconnecting' event already
+    // went out — re-dispatch so consumers see the classification
+    // (status label switches to "io unavailable…").
+    if (unconfigured && this.state === 'reconnecting') {
+      this.dispatchEvent(
+        new CustomEvent('reconnecting', {
+          detail: {
+            attempt: this.reconnectAttempt,
+            delayMs: this.pendingRetryMs,
+            unavailable: true,
+          },
+        }),
+      );
     }
   }
 
