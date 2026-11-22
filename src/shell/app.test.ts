@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DataHub } from '../data/hub';
 import './app';
 import type { TetherShell } from './app';
+import type { TetherPlcIde } from '../plc/plc-ide';
 import '../tiles';
 
 function makeHub(): DataHub {
@@ -54,6 +55,31 @@ describe('tether-shell', () => {
     expect(shell.querySelectorAll('.board-tab').length).toBeGreaterThanOrEqual(4);
     expect(shell.querySelector('board-view')).toBeTruthy();
     expect(shell.querySelector<HTMLElement>('tether-plc-ide')!.hidden).toBe(true);
+    shell.remove();
+  });
+
+  it('follows plc-navigate deep links back out of Operate', async () => {
+    localStorage.clear();
+    const shell = document.createElement('tether-shell') as TetherShell;
+    shell.hub = makeHub();
+    document.body.appendChild(shell);
+    await shell.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+    await customElements.whenDefined('tether-plc-ide');
+    const ide = shell.querySelector('tether-plc-ide') as TetherPlcIde;
+    await ide.updateComplete;
+    // park on Operate — the IDE is hidden there
+    activity(shell, 'Operate').click();
+    await shell.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ide.hidden).toBe(true);
+    // a deep link (status strip, ⌘K, in-IDE nav) must un-hide the IDE —
+    // regression: the plc-navigate handler set activity without
+    // requestUpdate, so the shell never re-rendered
+    ide.navigate('debug', 'run');
+    await shell.updateComplete;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(ide.hidden).toBe(false);
     shell.remove();
   });
 

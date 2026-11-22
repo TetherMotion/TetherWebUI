@@ -1162,9 +1162,11 @@ export class TetherShell extends TileElement {
               ?hidden=${operate}
               @plc-navigate=${(e: CustomEvent<{ activity: PlcActivity }>) => {
                 this.activity = e.detail.activity;
+                this.requestUpdate();
               }}
               @plc-state=${(e: CustomEvent<PlcStatePayload>) => {
                 this.plcState = e.detail;
+                this.requestUpdate();
               }}
             ></tether-plc-ide>
           </main>
