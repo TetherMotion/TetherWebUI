@@ -279,7 +279,13 @@ export class TetherIOClient extends EventTarget {
       socket.onerror = (e) => {
         if (!isCurrent()) return;
         const err = new Error('WebSocket connection failed');
-        console.error('[TetherIO] WebSocket error:', e);
+        // Unavailable bridge: expected failures stay out of the default
+        // console — the browser logs the WS failure itself anyway.
+        if (this.unavailable) {
+          console.debug('[TetherIO] WebSocket error:', e);
+        } else {
+          console.error('[TetherIO] WebSocket error:', e);
+        }
         this.rejectPending(err);
         if (this.state !== 'reconnecting') this.state = 'disconnected';
         reject(err);
@@ -287,7 +293,15 @@ export class TetherIOClient extends EventTarget {
 
       socket.onclose = (e) => {
         if (!isCurrent()) return;
-        console.log(`[TetherIO] WebSocket closed (code=${e.code}, reason=${e.reason || '(none)'})`);
+        if (this.unavailable) {
+          console.debug(
+            `[TetherIO] WebSocket closed (code=${e.code}, reason=${e.reason || '(none)'})`,
+          );
+        } else {
+          console.log(
+            `[TetherIO] WebSocket closed (code=${e.code}, reason=${e.reason || '(none)'})`,
+          );
+        }
         // Drop the reference first: the reconnect timer only opens a socket
         // when none is live, so leaving a closed socket here would silently
         // disable every automatic reconnect.
