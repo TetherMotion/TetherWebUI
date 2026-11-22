@@ -1817,6 +1817,180 @@ tile-frame {
   padding: 1px 5px;
 }
 
+/* ---- FBD block library dialog ---- */
+.fbd-libbtn .fbd-libcount {
+  font-size: 9px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-muted);
+}
+
+.fbd-libwrap {
+  z-index: 30;
+}
+
+.fbd-lib {
+  display: flex;
+  flex-direction: column;
+  width: min(760px, 94%);
+  max-height: min(640px, 86%);
+  border-radius: 10px;
+  border: 1px solid var(--glass-border);
+  background: var(--panel-bg, #1c1f26);
+  color: var(--text);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+  font-size: 12px;
+}
+
+.fbd-lib-castdlg {
+  width: min(480px, 92%);
+}
+
+.fbd-lib-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--glass-border);
+  flex-shrink: 0;
+}
+
+.fbd-lib-head b {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.fbd-lib-q {
+  flex: 1;
+  min-width: 0;
+}
+
+.fbd-lib-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.fbd-lib-body {
+  overflow-y: auto;
+  padding: 10px 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.fbd-lib-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fbd-lib-gname {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.fbd-lib-gname span {
+  font-weight: 400;
+  opacity: 0.7;
+}
+
+.fbd-lib-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+  gap: 4px;
+}
+
+.fbd-lib-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  min-width: 0;
+}
+
+.fbd-lib-item:hover {
+  border-color: var(--accent, #6cf);
+  background: rgba(108, 204, 255, 0.08);
+}
+
+.fbd-lib-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fbd-lib-kind {
+  flex-shrink: 0;
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+}
+
+.fbd-lib-kind.k-device {
+  color: #8ef0a1;
+}
+
+.fbd-lib-kind.k-lib {
+  color: #c9a7ff;
+}
+
+.fbd-lib-empty {
+  padding: 28px 12px;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.fbd-lib-cast {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 20px 14px;
+  flex-wrap: wrap;
+}
+
+.fbd-lib-cast label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.fbd-lib-sel {
+  min-width: 130px;
+}
+
+.fbd-lib-arrow {
+  font-size: 16px;
+  color: var(--text-muted);
+}
+
+.fbd-lib-hint {
+  padding: 0 14px 14px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
 .fbd-wirepick {
   flex-basis: 100%;
   display: flex;

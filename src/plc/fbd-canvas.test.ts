@@ -70,25 +70,33 @@ describe('fbd-canvas', () => {
     cv.remove();
   });
 
-  it('offers the full operator + builtin set in a searchable palette', async () => {
+  it('offers the full operator + builtin set in a searchable block library', async () => {
     const { cv } = mount();
     await cv.updateComplete;
-    const labels = [...cv.querySelectorAll('.fbd-palette .fbd-pitem')].map((b) => b.textContent);
+    cv.querySelector<HTMLButtonElement>('.fbd-libbtn')!.click();
+    await cv.updateComplete;
+    const labels = [...cv.querySelectorAll('.fbd-lib .fbd-lib-label')].map((b) => b.textContent);
     for (const t of ['AND', 'OR', 'XOR', 'NOT', 'ADD', 'SUB', 'MUL', 'DIV', 'MOD', 'ABS',
       'MIN', 'MAX', 'GT', 'GE', 'LT', 'LE', 'EQ', 'NE', 'SEL', 'LIMIT', 'MUX', 'MOVE',
       'SHL', 'SHR', 'ROL', 'ROR', 'TON', 'TOF', 'TP', 'R_TRIG', 'F_TRIG', 'CTU', 'CTD',
       'CTUD', 'SR', 'RS'])
       expect(labels).toContain(t);
-    // conversions + groups are present
-    expect(labels).toContain('REAL→DINT');
-    expect(cv.querySelectorAll('.fbd-pgroup').length).toBeGreaterThanOrEqual(8);
-    // search narrows the palette
-    const q = cv.querySelector<HTMLInputElement>('.fbd-palette-q')!;
+    // conversions collapse to a picker tile until searched
+    expect(labels).toContain('Convert value…');
+    expect(cv.querySelectorAll('.fbd-lib-group').length).toBeGreaterThanOrEqual(8);
+    // search narrows the library
+    const q = cv.querySelector<HTMLInputElement>('.fbd-lib-q')!;
     q.value = 'tON';
     q.dispatchEvent(new Event('input'));
     await cv.updateComplete;
-    const filtered = [...cv.querySelectorAll('.fbd-palette .fbd-pitem')].map((b) => b.textContent);
+    const filtered = [...cv.querySelectorAll('.fbd-lib .fbd-lib-label')].map((b) => b.textContent);
     expect(filtered).toEqual(['TON']);
+    // …and casts surface as real items under search
+    q.value = 'real→dint';
+    q.dispatchEvent(new Event('input'));
+    await cv.updateComplete;
+    const casts = [...cv.querySelectorAll('.fbd-lib .fbd-lib-label')].map((b) => b.textContent);
+    expect(casts).toContain('REAL→DINT');
     cv.remove();
   });
 
@@ -195,8 +203,10 @@ describe('fbd-canvas', () => {
   it('adds a block from the palette', async () => {
     const { cv, pou } = mount();
     await cv.updateComplete;
-    const btn = [...cv.querySelectorAll<HTMLButtonElement>('.fbd-palette .chip-btn')].find(
-      (b) => b.textContent === 'TON',
+    cv.querySelector<HTMLButtonElement>('.fbd-libbtn')!.click();
+    await cv.updateComplete;
+    const btn = [...cv.querySelectorAll<HTMLButtonElement>('.fbd-lib-item')].find(
+      (b) => b.querySelector('.fbd-lib-label')?.textContent === 'TON',
     )!;
     btn.click();
     await cv.updateComplete;
@@ -291,8 +301,10 @@ describe('fbd-canvas', () => {
     const { cv, pou } = mount();
     await cv.updateComplete;
     const before = pou.networks[0]!.blocks.length;
-    const btn = [...cv.querySelectorAll<HTMLButtonElement>('.fbd-palette .chip-btn')].find(
-      (b) => b.textContent === 'TON',
+    cv.querySelector<HTMLButtonElement>('.fbd-libbtn')!.click();
+    await cv.updateComplete;
+    const btn = [...cv.querySelectorAll<HTMLButtonElement>('.fbd-lib-item')].find(
+      (b) => b.querySelector('.fbd-lib-label')?.textContent === 'TON',
     )!;
     btn.click();
     await cv.updateComplete;
@@ -461,14 +473,16 @@ describe('fbd-canvas', () => {
   it('offers EK device templates and creates a device block via the wizard', async () => {
     const { cv, pou } = mount();
     await cv.updateComplete;
-    const btn = [...cv.querySelectorAll<HTMLButtonElement>('.fbd-palette .chip-btn')].find(
-      (b) => b.textContent === 'EK1123 DO',
+    cv.querySelector<HTMLButtonElement>('.fbd-libbtn')!.click();
+    await cv.updateComplete;
+    const btn = [...cv.querySelectorAll<HTMLButtonElement>('.fbd-lib-item')].find(
+      (b) => b.querySelector('.fbd-lib-label')?.textContent === 'EK1123 DO',
     )!;
     expect(btn).toBeTruthy();
     btn.click();
     await cv.updateComplete;
     // wizard dialog is open with the template prefilled
-    const dlg = cv.querySelector('.fbd-devdlg')!;
+    const dlg = cv.querySelector('.fbd-devdlg-box')!.parentElement!;
     expect(dlg).toBeTruthy();
     const nameIn = dlg.querySelector<HTMLInputElement>('input.fbd-in')!;
     expect(nameIn.value).toBe('EK1123');
@@ -500,13 +514,15 @@ describe('fbd-canvas', () => {
   it('mixed template (EK1110) creates DI+DO channel groups in one block', async () => {
     const { cv, pou } = mount();
     await cv.updateComplete;
-    const btn = [...cv.querySelectorAll<HTMLButtonElement>('.fbd-palette .chip-btn')].find(
-      (b) => b.textContent === 'EK1110 DI/DO',
+    cv.querySelector<HTMLButtonElement>('.fbd-libbtn')!.click();
+    await cv.updateComplete;
+    const btn = [...cv.querySelectorAll<HTMLButtonElement>('.fbd-lib-item')].find(
+      (b) => b.querySelector('.fbd-lib-label')?.textContent === 'EK1110 DI/DO',
     )!;
     expect(btn).toBeTruthy();
     btn.click();
     await cv.updateComplete;
-    const dlg = cv.querySelector('.fbd-devdlg')!;
+    const dlg = cv.querySelector('.fbd-devdlg-box')!.parentElement!;
     // dialog previews the second channel group
     expect(dlg.textContent).toContain('4× DO');
     const add = [...dlg.querySelectorAll<HTMLButtonElement>('button')].find(
@@ -820,9 +836,11 @@ describe('fbd-canvas wire-drop block picker', () => {
     await cv.updateComplete;
     expect(cv.wirePick).toBeDefined();
     expect(cv.querySelector('.fbd-wirepick')).toBeTruthy();
-    // pick AND from the palette — block lands at drop point, wire lands on input 0
-    const btn = [...cv.querySelectorAll<HTMLElement>('.fbd-pitem')]
-      .find((b) => b.textContent === 'AND')!;
+    // the wire-drop auto-opens the library — pick AND, block lands at
+    // the drop point and the wire lands on input 0
+    expect(cv.libOpen).toBe(true);
+    const btn = [...cv.querySelectorAll<HTMLElement>('.fbd-lib-item')]
+      .find((b) => b.querySelector('.fbd-lib-label')?.textContent === 'AND')!;
     btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     await cv.updateComplete;
     expect(cv.wirePick).toBeUndefined();

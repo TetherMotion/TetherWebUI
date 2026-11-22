@@ -17,6 +17,7 @@ import { Assoc, Block, IfaceVar, Network, PortSel, Pou, Wire, nextNodeId, portLa
 import { probeKeys, resolveKey, varKeys } from './mon';
 import { blockSig, builtinFbSig, inIndex, opRequiredIns, outIndex } from './sigs';
 import {
+  CAST_TYPES,
   filterGroup,
   castGroup,
   libraryFbItems,
@@ -100,6 +101,23 @@ interface SelNote {
   id: number;
 }
 
+/** Pseudo-item opening the FROM→TO conversion picker inside the
+    block library (real casts surface via search instead). */
+const CONVERT_ITEM: PaletteItem = {
+  kind: 'operator',
+  type: 'CAST',
+  label: 'Convert value…',
+  hint: 'type conversion — pick FROM → TO',
+};
+
+/** Short kind badge shown on library items. */
+const KIND_TAG: Record<string, string> = {
+  operator: 'op',
+  fb: 'FB',
+  function: 'fn',
+  device: 'dev',
+};
+
 /** "add device" wizard form state. */
 interface DeviceForm {
   name: string;
@@ -132,6 +150,10 @@ export class FbdCanvas extends LitElement {
     ioBindings: { attribute: false },
     catalog: { attribute: false },
     paletteQ: { state: true },
+    libOpen: { state: true },
+    libCast: { state: true },
+    castFrom: { state: true },
+    castTo: { state: true },
     selIds: { state: true },
     selWire: { state: true },
     selNote: { state: true },
@@ -158,6 +180,13 @@ export class FbdCanvas extends LitElement {
   declare ioBindings?: ProjectBinding[];
   /** installed-library palette groups (from the /ws blocks catalog). */
   declare catalog?: PaletteGroup[];
+  /** block-library dialog open. */
+  declare libOpen?: boolean;
+  /** library dialog showing the conversion picker instead of groups. */
+  declare libCast?: boolean;
+  /** conversion picker selections. */
+  declare castFrom?: string;
+  declare castTo?: string;
   /** palette search filter. */
   declare paletteQ: string;
 
@@ -654,9 +683,14 @@ export class FbdCanvas extends LitElement {
       this.pendingRec = undefined;
       this.placing = undefined;
       this.wirePick = undefined;
+      this.libOpen = false;
+      this.libCast = false;
       this.selIds = new Set();
       this.selWire = undefined;
       this.selNote = undefined;
+    } else if ((e.key === 'b' || e.key === 'B') && !this.devDlg) {
+      this.toggleLib();
+      e.preventDefault();
     } else if ((e.key === 'p' || e.key === 'P') && this.selWire !== undefined) {
       this.toggleProbe();
       e.preventDefault();
@@ -1019,6 +1053,7 @@ export class FbdCanvas extends LitElement {
           gy: Math.round(p.y / GX),
           ty,
         };
+        this.libOpen = true; // pop the library for the pick
       }
       this.pending = undefined;
       return;
@@ -1281,47 +1316,9 @@ export class FbdCanvas extends LitElement {
     `;
   }
 
-  /** Grouped, searchable block palette (operators, builtins, POUs, libraries). */
+  /** Slim toolbar: quick actions + the block-library dialog trigger. */
   private paletteSvg(): TemplateResult {
-    const allPous = this.pous ?? [];
-    const projPous = allPous.filter((p) => !p.id.startsWith('lib:'));
-    const groups = [
-      ...PALETTE,
-      castGroup(),
-      ...(this.catalog ?? []),
-      { name: 'Project', items: projectFbItems(projPous, this.pou) },
-      { name: 'Libraries', items: libraryFbItems(this.libSources ?? [], projPous) },
-    ]
-      .map((g) => filterGroup(g, this.paletteQ))
-      .filter((g): g is NonNullable<typeof g> => !!g);
-    const add = (i: PaletteItem) => {
-      // catalog blocks need their library source attached to compile —
-      // the host fetches the libsrc meta-op and stores it in stSources
-      if (i.lib && i.srcFile) {
-        this.dispatchEvent(
-          new CustomEvent('need-libsrc', {
-            bubbles: true,
-            composed: true,
-            detail: { lib: i.lib, file: i.srcFile },
-          }),
-        );
-      }
-      /* wire-drop armed: any pickable block lands at the drop point
-         with the pending wire auto-connected to a compatible input */
-      if (
-        this.wirePick &&
-        (i.kind === 'fb' || i.kind === 'function' || i.kind === 'operator')
-      ) {
-        this.addFromPalette(
-          i.type,
-          i.kind === 'function' ? 'function' : undefined,
-        );
-        return;
-      }
-      if (i.kind === 'fb' || i.kind === 'function') this.addFb(i.type, i.kind);
-      else if (i.kind === 'device') this.openDeviceWizard(i.template);
-      else this.addOperator(i.type);
-    };
+    const total = this.libGroups().reduce((n, g) => n + g.items.length, 0);
     return html`
       <div class="fbd-palette">
         ${
@@ -1339,14 +1336,11 @@ export class FbdCanvas extends LitElement {
               </div>`
             : nothing
         }
-        <input
-          class="fbd-in fbd-palette-q"
-          placeholder="find block…"
-          .value=${this.paletteQ}
-          @input=${(e: Event) => {
-            this.paletteQ = (e.target as HTMLInputElement).value;
-          }}
-        />
+        <button
+          class="chip-btn fbd-libbtn"
+          title="block library (B)"
+          @click=${() => this.toggleLib()}
+        >blocks <span class="fbd-libcount">${total}</span></button>
         <button class="chip-btn" title="add an interface variable input" @click=${() => this.addBlock('variable', '', 'in')}>
           var-in
         </button>
@@ -1378,17 +1372,6 @@ export class FbdCanvas extends LitElement {
           title="place a return marker"
           @click=${() => this.armPlacing('return')}
         >ret</button>
-        ${groups.map(
-          (g) => html`
-            <span class="fbd-pgroup">
-              <b class="fbd-pgroup-name">${g.name}</b>
-              ${g.items.map(
-                (i) =>
-                  html`<button class="chip-btn fbd-pitem" title=${i.hint} @click=${() => add(i)}>${i.label}</button>`,
-              )}
-            </span>
-          `,
-        )}
         <span class="spacer"></span>
         <button
           class="chip-btn ${this.selWire !== undefined && this.net?.wires.find((w) => w.id === this.selWire)?.probe ? 'active' : ''}"
@@ -1398,7 +1381,224 @@ export class FbdCanvas extends LitElement {
         <button class="chip-btn" title="Undo (ctrl-z)" @click=${this.undo}>↶</button>
         <button class="chip-btn" title="Redo (ctrl-y)" @click=${this.redo}>↷</button>
       </div>
+      ${this.libOpen ? this.blockLibrary() : nothing}
     `;
+  }
+
+  /** Palette groups for the library dialog — conversions collapse to a
+      single picker tile until the user searches (then real X_TO_Y
+      items match the query). */
+  private libGroups(): PaletteGroup[] {
+    const q = this.paletteQ;
+    const conv: PaletteGroup = q.trim()
+      ? castGroup()
+      : { name: 'Conversions', items: [CONVERT_ITEM] };
+    const allPous = this.pous ?? [];
+    const projPous = allPous.filter((p) => !p.id.startsWith('lib:'));
+    return [
+      ...PALETTE,
+      conv,
+      ...(this.catalog ?? []),
+      { name: 'Project', items: projectFbItems(projPous, this.pou) },
+      { name: 'Libraries', items: libraryFbItems(this.libSources ?? [], projPous) },
+    ]
+      .map((g) => filterGroup(g, q))
+      .filter((g): g is PaletteGroup => !!g && g.items.length > 0);
+  }
+
+  private toggleLib(): void {
+    this.libOpen = !this.libOpen;
+    if (!this.libOpen) this.libCast = false;
+  }
+
+  /** Pick a library item — the single dispatch point for toolbar,
+      dialog and wire-pick flows. */
+  private pickItem(i: PaletteItem): void {
+    // catalog blocks need their library source attached to compile —
+    // the host fetches the libsrc meta-op and stores it in stSources
+    if (i.lib && i.srcFile) {
+      this.dispatchEvent(
+        new CustomEvent('need-libsrc', {
+          bubbles: true,
+          composed: true,
+          detail: { lib: i.lib, file: i.srcFile },
+        }),
+      );
+    }
+    if (i.type === 'CAST') {
+      this.libCast = true;
+      return;
+    }
+    /* wire-drop armed: any pickable block lands at the drop point
+       with the pending wire auto-connected to a compatible input */
+    if (
+      this.wirePick &&
+      (i.kind === 'fb' || i.kind === 'function' || i.kind === 'operator')
+    ) {
+      this.libOpen = false;
+      this.libCast = false;
+      this.addFromPalette(
+        i.type,
+        i.kind === 'function' ? 'function' : undefined,
+      );
+      return;
+    }
+    if (i.kind === 'fb' || i.kind === 'function') this.addFb(i.type, i.kind);
+    else if (i.kind === 'device') {
+      this.libOpen = false;
+      this.libCast = false;
+      this.openDeviceWizard(i.template);
+      return;
+    } else this.addOperator(i.type);
+    this.libOpen = false;
+    this.libCast = false;
+  }
+
+  /** Block-library dialog: search + categorized item grid, or the
+      FROM→TO conversion picker. */
+  private blockLibrary(): TemplateResult {
+    const close = () => {
+      this.libOpen = false;
+      this.libCast = false;
+    };
+    const backdrop = (e: Event) => {
+      if (e.target === e.currentTarget) close();
+    };
+    if (this.libCast) {
+      const from = this.castFrom || 'INT';
+      const to = this.castTo || 'REAL';
+      const sel = (val: string, set: (v: string) => void) => html`
+        <select
+          class="fbd-in fbd-lib-sel"
+          .value=${val}
+          @change=${(e: Event) => set((e.target as HTMLSelectElement).value)}
+        >
+          ${CAST_TYPES.map((t) => html`<option value=${t}>${t}</option>`)}
+        </select>`;
+      return html`
+        <div
+          class="fbd-devdlg fbd-libwrap"
+          @pointerdown=${(e: Event) => e.stopPropagation()}
+          @click=${backdrop}
+        >
+          <div class="fbd-lib fbd-lib-castdlg" @keydown=${this.onLibKey}>
+            <div class="fbd-lib-head">
+              <b>Type conversion</b>
+              <button class="chip-btn" @click=${() => { this.libCast = false; }}>← blocks</button>
+              <span class="spacer"></span>
+              <button class="chip-btn" title="close (Esc)" @click=${close}>✕</button>
+            </div>
+            <div class="fbd-lib-cast">
+              <label>from ${sel(from, (v) => { this.castFrom = v; })}</label>
+              <span class="fbd-lib-arrow">→</span>
+              <label>to ${sel(to, (v) => { this.castTo = v; })}</label>
+              <button
+                class="chip-btn primary"
+                ?disabled=${from === to}
+                @click=${() => this.addCast()}
+              >Add ${from}_TO_${to}</button>
+            </div>
+            <div class="fbd-lib-hint">
+              inserts a conversion block — wire IN/OUT like any operator
+            </div>
+          </div>
+        </div>
+      `;
+    }
+    const groups = this.libGroups();
+    const total = groups.reduce((n, g) => n + g.items.length, 0);
+    return html`
+      <div
+        class="fbd-devdlg fbd-libwrap"
+        @pointerdown=${(e: Event) => e.stopPropagation()}
+        @click=${backdrop}
+      >
+        <div class="fbd-lib" @keydown=${this.onLibKey}>
+          <div class="fbd-lib-head">
+            <b>Block library</b>
+            <input
+              class="fbd-in fbd-lib-q"
+              placeholder="find block…  (Enter = first match)"
+              .value=${this.paletteQ}
+              @input=${(e: Event) => {
+                this.paletteQ = (e.target as HTMLInputElement).value;
+              }}
+            />
+            <span class="fbd-lib-count">${total} block${total === 1 ? '' : 's'}</span>
+            <button class="chip-btn" title="close (Esc)" @click=${close}>✕</button>
+          </div>
+          <div class="fbd-lib-body">
+            ${
+              groups.length
+                ? groups.map(
+                    (g) => html`
+                      <section class="fbd-lib-group">
+                        <header class="fbd-lib-gname">
+                          ${g.name}<span>${g.items.length}</span>
+                        </header>
+                        <div class="fbd-lib-grid">
+                          ${g.items.map(
+                            (i) => html`
+                              <button
+                                class="fbd-lib-item"
+                                title=${i.hint}
+                                @click=${() => this.pickItem(i)}
+                              >
+                                <span class="fbd-lib-label">${i.label}</span>
+                                <span class="fbd-lib-kind ${i.lib ? 'k-lib' : `k-${i.kind}`}">${
+                                  i.lib ? 'lib' : (KIND_TAG[i.kind] ?? i.kind)
+                                }</span>
+                              </button>`,
+                          )}
+                        </div>
+                      </section>`,
+                  )
+                : html`<div class="fbd-lib-empty">no blocks match “${this.paletteQ}”</div>`
+            }
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  /** Esc closes the library; Enter in the search picks the first
+      visible item (the Convert tile opens the cast picker). */
+  private onLibKey = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape') {
+      this.libOpen = false;
+      this.libCast = false;
+      e.stopPropagation();
+      return;
+    }
+    if (e.key === 'Enter') {
+      const t = e.target as HTMLElement;
+      if (t?.classList?.contains('fbd-lib-q')) {
+        const first = this.libGroups().flatMap((g) => g.items)[0];
+        if (first) {
+          e.preventDefault();
+          this.pickItem(first);
+        }
+      }
+    }
+  };
+
+  private _libWasOpen = false;
+  override updated(): void {
+    if (this.libOpen && !this._libWasOpen) {
+      void this.updateComplete.then(() =>
+        this.renderRoot.querySelector<HTMLInputElement>('.fbd-lib-q')?.focus(),
+      );
+    }
+    this._libWasOpen = !!this.libOpen;
+  }
+
+  private addCast(): void {
+    const from = this.castFrom || 'INT';
+    const to = this.castTo || 'REAL';
+    if (from === to) return;
+    this.libOpen = false;
+    this.libCast = false;
+    this.addOperator(`${from}_TO_${to}`);
   }
 
   /** Add an operator block of `type` (AND/ADD/…/X_TO_Y). */
