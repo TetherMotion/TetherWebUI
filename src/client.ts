@@ -152,6 +152,8 @@ const MAX_FRAME_BYTES = 1 << 20;
 const MAX_PENDING_REQUESTS = 512;
 /** Upper bound on streamed entry IDs per stream configuration. */
 const MAX_STREAM_ENTRIES = 256;
+/** Poll cadence while the server reports the bridge unconfigured (404). */
+const UNCONFIGURED_RETRY_MS = 30_000;
 
 // ---------------------------------------------------------------------------
 // TetherIOClient
@@ -195,6 +197,14 @@ export class TetherIOClient extends EventTarget {
   private reconnect?: ReconnectOptions;
   private reconnectAttempt = 0;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * True while the server reports the tether-io bridge as not configured
+   * (plain GET on the ws endpoint returns 404). Reconnects still happen,
+   * just on a slow background cadence — the bridge may appear later
+   * (e.g. `tplc dev` spawns tplc-io once a program runs).
+   */
+  unavailable = false;
+  private unavailableLogged = false;
   private manualDisconnect = false;
 
   /** Current connection state (readable by the UI). */
@@ -247,6 +257,8 @@ export class TetherIOClient extends EventTarget {
           }
           const resynced = this.reconnectAttempt > 0;
           this.reconnectAttempt = 0;
+          this.unavailable = false;
+          this.unavailableLogged = false;
           this.state = 'connected';
           this.dispatchEvent(new Event('connected'));
           if (resynced) this.dispatchEvent(new Event('resynchronized'));
@@ -309,23 +321,56 @@ export class TetherIOClient extends EventTarget {
   }
 
   private scheduleReconnect(): void {
+    const url = this.url;
+    if (!url) return;
     const initial = this.reconnect?.initialDelayMs ?? 500;
     const maximum = this.reconnect?.maxDelayMs ?? 10_000;
-    const delay = Math.min(maximum, initial * 2 ** this.reconnectAttempt);
+    // A failed WS handshake gives no hint WHY (1006).  A plain GET on
+    // the same endpoint does: 404 = the server has no tether-io bridge
+    // configured.  The probe runs in the background and refines the
+    // NEXT attempt's cadence — an unconfigured bridge is polled every
+    // UNCONFIGURED_RETRY_MS instead of hammered with backoff retries.
+    const delay = this.unavailable
+      ? UNCONFIGURED_RETRY_MS
+      : Math.min(maximum, initial * 2 ** this.reconnectAttempt);
     this.reconnectAttempt += 1;
     this.state = 'reconnecting';
     this.dispatchEvent(
       new CustomEvent('reconnecting', {
-        detail: { attempt: this.reconnectAttempt, delayMs: delay },
+        detail: {
+          attempt: this.reconnectAttempt,
+          delayMs: delay,
+          unavailable: this.unavailable,
+        },
       }),
     );
     this.reconnectTimer = setTimeout(() => {
-      const url = this.url;
-      if (!url || this.manualDisconnect || this.socket) return;
-      this.open(url).catch(() => {
+      const u = this.url;
+      if (!u || this.manualDisconnect || this.socket) return;
+      this.open(u).catch(() => {
         // onclose schedules the next attempt
       });
     }, delay);
+    void this.refreshUnavailable(url);
+  }
+
+  /** GET the ws:// endpoint over http: 404 = bridge not configured. */
+  private async refreshUnavailable(url: string): Promise<void> {
+    let unconfigured = false;
+    try {
+      const r = await fetch(url.replace(/^ws/, 'http'), { method: 'GET' });
+      unconfigured = r.status === 404;
+    } catch {
+      // Server unreachable entirely — normal reconnect backoff applies.
+    }
+    if (this.manualDisconnect || this.socket) return;
+    this.unavailable = unconfigured;
+    if (unconfigured && !this.unavailableLogged) {
+      console.info(
+        `[TetherIO] bridge not configured on server — probing every ${UNCONFIGURED_RETRY_MS / 1000} s`,
+      );
+      this.unavailableLogged = true;
+    }
   }
 
   /** Close the WebSocket, cancel pending requests, and stop reconnecting. */

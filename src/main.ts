@@ -285,9 +285,15 @@ class TetherApp extends HTMLElement {
       this.showToast('Reconnected · catalogs re-synchronized', 'info');
     });
     this.client.addEventListener('reconnecting', (event: Event) => {
-      const { attempt, delayMs } = (event as CustomEvent<{ attempt: number; delayMs: number }>)
-        .detail;
-      this.setStatus(`Reconnecting (attempt ${attempt}, in ${Math.round(delayMs)} ms)`, false);
+      const { attempt, delayMs, unavailable } = (
+        event as CustomEvent<{ attempt: number; delayMs: number; unavailable?: boolean }>
+      ).detail;
+      this.setStatus(
+        unavailable
+          ? `IO bridge unavailable (retry in ${Math.round(delayMs / 1000)} s)`
+          : `Reconnecting (attempt ${attempt}, in ${Math.round(delayMs)} ms)`,
+        false,
+      );
     });
     this.client.addEventListener('stale', () => {
       this.querySelector('#freshness-label')!.textContent = 'Data: stale / connection lost';

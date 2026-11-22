@@ -166,6 +166,7 @@ export class DataHub extends EventTarget {
   private streamQueued = false;
 
   private pollTimer?: number;
+  private ioUnavailableToasted = false;
   private polling = false;
   private pollingEvents = false;
   private pollingBounds = false;
@@ -282,8 +283,20 @@ export class DataHub extends EventTarget {
   private wireClient(): void {
     this.client.addEventListener('connected', () => this.emit('connection'));
     this.client.addEventListener('reconnecting', (event: Event) => {
-      const { attempt } = (event as CustomEvent<{ attempt: number }>).detail;
+      const { attempt, unavailable } = (
+        event as CustomEvent<{ attempt: number; unavailable?: boolean }>
+      ).detail;
       this.emit('connection');
+      // Bridge unconfigured on the server: retries run on a slow
+      // background cadence — toast once per episode, not per attempt.
+      if (unavailable) {
+        if (!this.ioUnavailableToasted) {
+          this.ioUnavailableToasted = true;
+          this.toast('IO bridge unavailable — retrying in background', 'info');
+        }
+        return;
+      }
+      this.ioUnavailableToasted = false;
       this.toast(`Reconnecting (attempt ${attempt})`, 'info');
     });
     this.client.addEventListener('resynchronized', () => {

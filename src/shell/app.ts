@@ -397,7 +397,9 @@ export class TetherShell extends TileElement {
       case 'connecting':
         return 'connecting…';
       case 'reconnecting':
-        return 'reconnecting…';
+        return this.hub?.client.unavailable
+          ? 'io unavailable…'
+          : 'reconnecting…';
       default:
         return 'offline';
     }
