@@ -4002,6 +4002,7 @@ export class TetherPlcIde extends LitElement {
 
   /** I/O Mapping — deploy map moved out of the old Deploy pane. */
   private iomapSection(): TemplateResult {
+    if (!this.busData) void this.refreshBus();
     return html`
       <div class="tile-scroll">
         <h3>
@@ -5670,13 +5671,14 @@ export class TetherPlcIde extends LitElement {
       safety: [],
     });
     this.mapRows = undefined;
-    this.mapViolations = undefined;
+    this.mapViolations = validateDeployMapText(this.mapEdit, this.busEndpoints());
     this.requestUpdate();
   }
 
   /** editable channel/binding grid — the graphical deploy-map editor. */
   private mapRowsEditor(): TemplateResult {
     const r = this.mapRows!;
+    const epKeys = [...new Set((this.busEndpoints() ?? []).map((e) => e.key))];
     const cell = (i: number, k: string, v: string | number | undefined, w = 6) =>
       html` <input
         class="plc-mapcell"
@@ -5743,7 +5745,16 @@ export class TetherPlcIde extends LitElement {
                 </td>
                 <td>${cell(i, 'off', c.off)}</td>
                 <td>${cell(i, 'size', c.size)}</td>
-                <td>${cell(i, c.pdo ? 'pdo' : 'key', c.pdo ?? c.key, 14)}</td>
+                <td>
+                  <input
+                    class="plc-mapcell"
+                    style="width:14ch"
+                    list="plc-pdo-ep"
+                    placeholder=${c.pdo ? 'pdo endpoint' : 'file key'}
+                    .value=${c.pdo ?? c.key}
+                    @change=${(e: Event) => this.mapRow(`${i}:${c.pdo ? 'pdo' : 'key'}`, (e.target as HTMLInputElement).value)}
+                  />
+                </td>
                 <td>${cell(i, 'type', c.type, 8)}</td>
                 <td>${cell(i, 'safe', c.safe, 8)}</td>
                 <td>
@@ -5794,7 +5805,28 @@ export class TetherPlcIde extends LitElement {
             </table>`
           : nothing
       }
+      ${
+        epKeys.length
+          ? html`<datalist id="plc-pdo-ep">
+              ${epKeys.map((k) => html`<option value=${k}></option>`)}
+            </datalist>`
+          : nothing
+      }
     </div>`;
+  }
+
+  /** parsed .bus PDO catalog — undefined until a scan/pump publishes
+      artifacts (or the backend is unreachable). */
+  private busEndpoints() {
+    const t = this.busData?.bus;
+    return t ? parseBusCatalog(t) : undefined;
+  }
+
+  /** true when the channel's pdo endpoint exists in the discovered
+      catalog (unknown until /bus answers — then only real misses warn). */
+  private pdoOnBus(c: DeployMapChannel, bus?: ReturnType<typeof parseBusCatalog>): boolean {
+    if (!c.pdo || !bus?.length) return true;
+    return bus.some((e) => e.key === c.pdo && e.tx === (c.dir === 'in'));
   }
 
   private ioMapCard(): TemplateResult {
@@ -5802,6 +5834,8 @@ export class TetherPlcIde extends LitElement {
     const chans = m.channels;
     const overlaps = deployMapOverlaps(chans);
     const overlapIdx = new Set(overlaps);
+    const bus = this.busEndpoints();
+    const pdoMiss = (i: number) => !this.pdoOnBus(chans[i]!, bus);
     const dirRows = (dir: 'in' | 'out') =>
       chans
         .map((c, i) => ({ c, i }))
@@ -5809,12 +5843,13 @@ export class TetherPlcIde extends LitElement {
         .sort((a, b) => a.c.off - b.c.off || a.c.size - b.c.size);
     const chanRow = (dir: 'in' | 'out') => (e: { c: DeployMapChannel; i: number }) => {
       const c = e.c;
-      return html`<tr class=${overlapIdx.has(e.i) ? 'plc-row-warn' : nothing}>
+      const warn = overlapIdx.has(e.i) || pdoMiss(e.i);
+      return html`<tr class=${warn ? 'plc-row-warn' : nothing}>
         <td>%${dir === 'in' ? 'I' : 'Q'}</td>
         <td>${c.off}</td>
         <td>${c.size}</td>
         <td>${c.key}</td>
-        <td>${c.pdo ?? ''}</td>
+        <td>${c.pdo ?? ''}${c.pdo && pdoMiss(e.i) ? ' ⚠' : nothing}</td>
         <td>${c.type ?? ''}</td>
         <td>${c.safe ?? ''}${m.safety.includes(c.key) ? ' 🔒' : ''}</td>
       </tr>`;
@@ -5832,7 +5867,9 @@ export class TetherPlcIde extends LitElement {
         <span class="plc-dim">which process-image bytes go to which transport channel</span>
         <span class="plc-dim">${chans.length ? ` · ${chans.length} channels` : ''}</span>
         ${overlaps.length ? html`<span class="plc-warn"> ⚠ ${overlaps.length} overlap${overlaps.length > 1 ? 's' : ''}</span>` : nothing}
+        ${chans.some((_, i) => pdoMiss(i)) ? html`<span class="plc-warn"> ⚠ pdo not on bus</span>` : nothing}
         ${saved ? html`<span class="plc-dim"> · saved for deploy</span>` : nothing}
+        ${bus?.length ? html`<span class="plc-dim"> · bus ${bus.length} endpoints</span>` : nothing}
       </h4>
       <div class="plc-ops">
         <button class="chip-btn" @click=${() => void this.onIoMap()}>load</button>
@@ -6004,7 +6041,7 @@ export class TetherPlcIde extends LitElement {
       const r = await generateDeployMap(this.project);
       this.genMap = { text: r.text, warnings: r.warnings };
       this.mapEdit = r.text;
-      this.mapViolations = validateDeployMapText(r.text);
+      this.mapViolations = validateDeployMapText(r.text, this.busEndpoints());
     } catch (e) {
       this.ctlErr = `map generation: ${e instanceof Error ? e.message : e}`;
     }
@@ -6012,7 +6049,7 @@ export class TetherPlcIde extends LitElement {
   }
 
   private onValidateMap(): void {
-    this.mapViolations = validateDeployMapText(this.mapEdit ?? '');
+    this.mapViolations = validateDeployMapText(this.mapEdit ?? '', this.busEndpoints());
     this.requestUpdate();
   }
 
