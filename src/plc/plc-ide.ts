@@ -88,6 +88,7 @@ import {
   loadProject,
   loadRemoteProject,
   PlcProject,
+  plcProjectFromJson,
   remoteProjectInfo,
   saveProject,
   saveProjectRemote,
@@ -577,6 +578,10 @@ export class TetherPlcIde extends LitElement {
     super.connectedCallback();
     this.syncHub();
     void this.loadCatalog();
+    /* bring the ctl plane up on load: status, /ws event subscription,
+       and the one-shot manifest.ui → project hydrate all live inside
+       refreshCtl — without this they only ran on Deploy/Events visits */
+    void this.refreshCtl();
     /* first-run guidance: offer project templates on a fresh empty
        project until the user picks one, starts blank, or opts out */
     if (this.project.fbd.pous.length === 0 && tplPickerWanted(sessionStorage, localStorage)) {
@@ -588,6 +593,8 @@ export class TetherPlcIde extends LitElement {
   private applyTemplate(t: ProjectTemplate): void {
     this.project = instantiateTemplate(t);
     this.project.stSources = {};
+    this.selPou = this.project.fbd.pous[0]?.id ?? '';
+    this.selNet = 0;
     this.tplPicker = false;
     this.save();
     this.flash(`loaded template "${t.name}"`);
@@ -1830,7 +1837,14 @@ export class TetherPlcIde extends LitElement {
   private fbdPane(): TemplateResult {
     const pou = this.project.fbd.pous.find((p) => p.id === this.selPou);
     const net = pou?.networks[this.selNet];
-    if (!pou || !net) return html`<p class="plc-dim">Select a network in the explorer.</p>`;
+    if (!pou || !net) {
+      return this.project.fbd.pous.length === 0
+        ? html`<p class="plc-dim">
+            No POUs yet — add one with <b>+PRG</b>, <b>+FB</b> or <b>+FN</b> in the Explorer,
+            or load a template / project.
+          </p>`
+        : html`<p class="plc-dim">Select a network in the explorer.</p>`;
+    }
     return html`
       <div class="plc-fbd-pane">
         <div class="plc-fbd-head">
@@ -3175,6 +3189,15 @@ export class TetherPlcIde extends LitElement {
     try {
       const info = await pa.projectOpen(this.ctl, path);
       this.projInfo = info;
+      /* the project's saved IDE document round-trips in manifest.ui —
+         adopt it so the canvas shows this project's POUs/networks */
+      const rp = plcProjectFromJson(info.manifest?.ui);
+      if (rp) {
+        this.project = rp;
+        this.selPou = rp.fbd.pous[0]?.id ?? '';
+        this.selNet = 0;
+        saveProject(rp);
+      }
       this.flash(`project opened: ${info.root}`);
       await this.refreshProjectPane();
     } catch (e) {
@@ -5173,6 +5196,8 @@ export class TetherPlcIde extends LitElement {
           void loadRemoteProject(this.ctl).then((rp) => {
             if (rp) {
               this.project = rp;
+              this.selPou = rp.fbd.pous[0]?.id ?? '';
+              this.selNet = 0;
               saveProject(rp);
               this.requestUpdate();
             }

@@ -68,7 +68,7 @@ export function saveProject(p: PlcProject): void {
    as the offline fallback / pre-project cache. */
 
 /** Parse a persisted UI document (manifest.ui or localStorage value). */
-function plcProjectFromJson(parsed: unknown): PlcProject | undefined {
+export function plcProjectFromJson(parsed: unknown): PlcProject | undefined {
   if (parsed && typeof parsed === 'object') {
     const u = parsed as Record<string, unknown>;
     if (u.fbd && isFbdProject(u.fbd)) {
