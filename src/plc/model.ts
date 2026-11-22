@@ -11,13 +11,7 @@ export type NetworkKind = 'fbd' | 'ld';
 export type IfaceKind =
   'var_input' | 'var_output' | 'var_in_out' | 'var' | 'var_temp' | 'var_external' | 'var_global';
 export type BlockKind =
-  | 'variable'
-  | 'operator'
-  | 'fb'
-  | 'function'
-  | 'jump_target'
-  | 'st'
-  | 'device';
+  'variable' | 'operator' | 'fb' | 'function' | 'jump_target' | 'st' | 'device';
 export type VarRole = 'in' | 'out' | 'in_out';
 export type PortSel = number | string;
 
@@ -138,11 +132,25 @@ export interface Pou {
   ret_ty?: string;
 }
 
+export type TaskKind = 'cyclic' | 'freewheeling' | 'event';
+export type TaskTrigType = 'rise' | 'level' | 'manual';
+
+export interface TaskTrigger {
+  type: TaskTrigType;
+  /** sym name ("PROG.var"/"var"/"GVL.var") or "%IX<b>.<bit>"/"%QX<b>.<bit>";
+      unused for "manual". */
+  signal?: string;
+}
+
 export interface Task {
   name: string;
   period_ns: number;
   programs: string[];
   priority: number;
+  /** scheduling kind — default "cyclic" */
+  kind?: TaskKind;
+  /** required when kind === 'event' */
+  trigger?: TaskTrigger;
 }
 
 export interface FbdProject {

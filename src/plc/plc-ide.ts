@@ -67,7 +67,7 @@ import {
 } from './stnav';
 import type { DefTarget, StWorld, Usage } from './stnav';
 import { ALARM_OPS, buildAlarmPou, defaultRule, ruleStem, type AlarmRule } from './alarms';
-import { FbdProject, IfaceKind, IfaceVar, Pou, Task } from './model';
+import { FbdProject, IfaceKind, IfaceVar, Pou, Task, TaskTrigger } from './model';
 import { entryWritable, writeScalar } from './mon';
 import {
   codecFromSchema,
@@ -82,7 +82,16 @@ import {
 } from './typedval';
 import { exportPlcopenXml, importPlcopenXml } from './plcopen';
 import type { CatalogEntry } from '../protocol';
-import { exportFbdJson, importFbdJson, loadProject, loadRemoteProject, PlcProject, remoteProjectInfo, saveProject, saveProjectRemote } from './store';
+import {
+  exportFbdJson,
+  importFbdJson,
+  loadProject,
+  loadRemoteProject,
+  PlcProject,
+  remoteProjectInfo,
+  saveProject,
+  saveProjectRemote,
+} from './store';
 import * as pa from './projectapi';
 import { deleteSnapshot, diffSummary, getSnapshot, historyIndex, pushSnapshot } from './history';
 import { parseStInterfaces } from './stiface';
@@ -113,7 +122,16 @@ import {
 } from './templates';
 
 type Pane =
-  | 'explorer' | 'st' | 'fbd' | 'curves' | 'tasks' | 'watch' | 'alarms' | 'events' | 'deploy' | 'project';
+  | 'explorer'
+  | 'st'
+  | 'fbd'
+  | 'curves'
+  | 'tasks'
+  | 'watch'
+  | 'alarms'
+  | 'events'
+  | 'deploy'
+  | 'project';
 
 /** migrate rule kinds shared with the runtime's MIGD encoding */
 const DBG_DIFF_KIND = ['copy', 'xform', 'init', 'drop', 'deny', 'alias'];
@@ -589,8 +607,8 @@ export class TetherPlcIde extends LitElement {
       <div
         class="plc-tpl-overlay"
         @click=${(e: Event) => {
-        if (e.target === e.currentTarget) this.historyOpen = false;
-      }}
+          if (e.target === e.currentTarget) this.historyOpen = false;
+        }}
       >
         <div class="plc-tpl-dialog" style="max-width:34rem">
           <div class="plc-tpl-title">Project history</div>
@@ -610,9 +628,9 @@ export class TetherPlcIde extends LitElement {
                     <button
                       class="chip-btn"
                       @click=${() => {
-                      deleteSnapshot(h.id);
-                      this.requestUpdate();
-                    }}
+                        deleteSnapshot(h.id);
+                        this.requestUpdate();
+                      }}
                     >
                       delete
                     </button>
@@ -626,17 +644,17 @@ export class TetherPlcIde extends LitElement {
             <button
               class="chip-btn"
               @click=${() => {
-              pushSnapshot(this.project, 'manual', false);
-              this.requestUpdate();
-            }}
+                pushSnapshot(this.project, 'manual', false);
+                this.requestUpdate();
+              }}
             >
               snapshot now
             </button>
             <button
               class="chip-btn"
               @click=${() => {
-              this.historyOpen = false;
-            }}
+                this.historyOpen = false;
+              }}
             >
               close
             </button>
@@ -663,8 +681,8 @@ export class TetherPlcIde extends LitElement {
       <div
         class="plc-tpl-overlay"
         @click=${(e: Event) => {
-        if (e.target === e.currentTarget) this.dismissTplPicker(false);
-      }}
+          if (e.target === e.currentTarget) this.dismissTplPicker(false);
+        }}
       >
         <div class="plc-tpl-dialog">
           <div class="plc-tpl-title">Start a project</div>
@@ -1190,8 +1208,8 @@ export class TetherPlcIde extends LitElement {
           <button
             class="chip-btn"
             @click=${() => {
-            this.tplPicker = true;
-          }}
+              this.tplPicker = true;
+            }}
           >
             Templates…
           </button>
@@ -1199,8 +1217,8 @@ export class TetherPlcIde extends LitElement {
           <button
             class="chip-btn"
             @click=${() => {
-            this.historyOpen = true;
-          }}
+              this.historyOpen = true;
+            }}
           >
             History
           </button>
@@ -1750,11 +1768,11 @@ export class TetherPlcIde extends LitElement {
                             </button>
                           </div>
                           ${this.usagesPanel.list.map(
-                          (u) =>
-                            html`<div class="plc-usage" @click=${() => this.onUsageClick(u)}>
-                              ${u.where.replace(/^st:/, '')}:${u.line}:${u.col}
-                            </div>`,
-                        )}
+                            (u) =>
+                              html`<div class="plc-usage" @click=${() => this.onUsageClick(u)}>
+                                ${u.where.replace(/^st:/, '')}:${u.line}:${u.col}
+                              </div>`,
+                          )}
                         </div>`
                       : nothing
                   }
@@ -2028,7 +2046,9 @@ export class TetherPlcIde extends LitElement {
                   <thead>
                     <tr>
                       <th>name</th>
+                      <th>kind</th>
                       <th>period (ms)</th>
+                      <th>trigger</th>
                       <th>priority</th>
                       <th>programs</th>
                       <th></th>
@@ -2047,17 +2067,80 @@ export class TetherPlcIde extends LitElement {
                             />
                           </td>
                           <td>
-                            <input
+                            <select
                               class="fbd-in"
-                              type="number"
-                              min="1"
-                              .value=${String(t.period_ns / 1e6)}
+                              .value=${t.kind ?? 'cyclic'}
                               @change=${(e: Event) =>
                                 this.editTask(ti, {
-                                  period_ns:
-                                    Math.max(1, Number((e.target as HTMLInputElement).value)) * 1e6,
+                                  kind: (e.target as HTMLSelectElement).value as Task['kind'],
+                                  trigger:
+                                    (e.target as HTMLSelectElement).value === 'event'
+                                      ? (t.trigger ?? { type: 'rise' })
+                                      : undefined,
                                 })}
-                            />
+                            >
+                              <option value="cyclic">cyclic</option>
+                              <option value="freewheeling">freewheel</option>
+                              <option value="event">event</option>
+                            </select>
+                          </td>
+                          <td>
+                            ${
+                              (t.kind ?? 'cyclic') === 'cyclic'
+                                ? html`<input
+                                    class="fbd-in"
+                                    type="number"
+                                    min="1"
+                                    .value=${String(t.period_ns / 1e6)}
+                                    @change=${(e: Event) =>
+                                    this.editTask(ti, {
+                                      period_ns:
+                                        Math.max(1, Number((e.target as HTMLInputElement).value)) *
+                                        1e6,
+                                    })}
+                                  />`
+                                : html`<span class="plc-dim">—</span>`
+                            }
+                          </td>
+                          <td>
+                            ${
+                              (t.kind ?? 'cyclic') === 'event'
+                                ? html`<span class="plc-task-trig">
+                                    <select
+                                      class="fbd-in"
+                                      .value=${t.trigger?.type ?? 'rise'}
+                                      @change=${(e: Event) =>
+                                      this.editTask(ti, {
+                                        trigger: {
+                                          type: (e.target as HTMLSelectElement)
+                                            .value as TaskTrigger['type'],
+                                          signal: t.trigger?.signal,
+                                        },
+                                      })}
+                                    >
+                                      <option value="rise">rise</option>
+                                      <option value="level">level</option>
+                                      <option value="manual">manual</option>
+                                    </select>
+                                    ${
+                                    (t.trigger?.type ?? 'rise') !== 'manual'
+                                      ? html`<input
+                                          class="fbd-in"
+                                          placeholder="GVL.sig / PROG.var / %IX0.0"
+                                          .value=${t.trigger?.signal ?? ''}
+                                          @change=${(e: Event) =>
+                                          this.editTask(ti, {
+                                            trigger: {
+                                              type: t.trigger?.type ?? 'rise',
+                                              signal: (e.target as HTMLInputElement).value,
+                                            },
+                                          })}
+                                        />`
+                                      : ''
+                                  }
+                                  </span>`
+                                : html`<span class="plc-dim">—</span>`
+                            }
                           </td>
                           <td>
                             <input
@@ -2232,10 +2315,10 @@ export class TetherPlcIde extends LitElement {
                           <button
                             class="chip-btn"
                             @click=${() => {
-                        this.watchExprs.splice(i, 1);
-                        this.exprHistories.splice(i, 1);
-                        this.requestUpdate();
-                      }}
+                              this.watchExprs.splice(i, 1);
+                              this.exprHistories.splice(i, 1);
+                              this.requestUpdate();
+                            }}
                           >
                             ×
                           </button>
@@ -3039,8 +3122,8 @@ export class TetherPlcIde extends LitElement {
         ${this.journalCard()}
         ${this.rt ? html`<p class="plc-dim">rt: up ${this.rt.uptimeS}s · ${this.rt.progCount} progs (${this.rt.runningCount} running) · master ${this.rt.masterStatus} plc ${this.rt.plcStatus}${this.rt.version ? ` · ${this.rt.version}` : ''}</p>` : nothing}
         <p class="plc-dim">
-          Requires <code>tplc serve</code> running on the plc host. Online-change
-          (state-preserving swap + rollback) is live through PROG_SWAP / PROG_ROLLBACK.
+          Requires <code>tplc serve</code> running on the plc host. Online-change (state-preserving
+          swap + rollback) is live through PROG_SWAP / PROG_ROLLBACK.
         </p>
       </div>
     `;
@@ -3106,7 +3189,11 @@ export class TetherPlcIde extends LitElement {
     const info = this.projInfo;
     if (!info) return;
     const e = this.projEdit;
-    const csv = (s: string) => s.split(',').map((x) => x.trim()).filter(Boolean);
+    const csv = (s: string) =>
+      s
+        .split(',')
+        .map((x) => x.trim())
+        .filter(Boolean);
     const manifest: pa.ProjectManifest = {
       ...(info.manifest ?? {}),
       name: e.name || info.name,
@@ -3170,8 +3257,8 @@ export class TetherPlcIde extends LitElement {
                 ${info.git ? html`· git <code>${info.branch || '?'}</code>` : html`· no git`}
               </div>`
             : html`<p class="fbd-warn">
-                No project open — the IDE document persists in this browser only.
-                Open a project directory to get file persistence + git versioning.
+                No project open — the IDE document persists in this browser only. Open a project
+                directory to get file persistence + git versioning.
               </p>`
         }
 
@@ -3189,51 +3276,62 @@ export class TetherPlcIde extends LitElement {
             class="chip-btn"
             ?disabled=${this.projBusy || !this.projOpenPath.trim()}
             @click=${() => void this.projOpenDir(this.projOpenPath.trim())}
-            >open</button
           >
+            open
+          </button>
           <button
             class="chip-btn"
             ?disabled=${this.projBusy}
             @click=${() => void this.refreshProjectPane()}
-            >refresh</button
           >
+            refresh
+          </button>
         </div>
         ${
           this.projRecent.length
             ? html`<div class="plc-dim">recent:</div>
                 ${this.projRecent.map(
-                  (r) => html`<div class="plc-projrecent" @click=${() => void this.projOpenDir(r)}>${r}</div>`,
+                  (r) =>
+                    html`<div class="plc-projrecent" @click=${() => void this.projOpenDir(r)}>
+                      ${r}
+                    </div>`,
                 )}`
             : nothing
         }
-
         ${
           info
             ? html`
                 <h4>Manifest</h4>
                 <div class="plc-projgrid">
-                  ${field('name', 'name')}
-                  ${field('description', 'description')}
+                  ${field('name', 'name')} ${field('description', 'description')}
                   ${field('sources', 'sources', 'src/main.st, src/other.st')}
                   ${field('libs', 'library dirs', 'libs, ../TetherPLC/libraries/tempctrl')}
                   ${field('taskPeriodNs', 'task period ns', '10000000')}
                   ${field('imageIn', 'image %I bytes', '64')}
                   ${field('imageOut', 'image %Q bytes', '64')}
                 </div>
-                <button class="chip-btn" @click=${() => void this.projSaveManifest()}>save manifest</button>
+                <button class="chip-btn" @click=${() => void this.projSaveManifest()}>
+                  save manifest
+                </button>
                 <span class="plc-dim"> (ui document is saved automatically on edit)</span>
 
                 <h4>Files (${this.projFiles.length})</h4>
                 <div class="plc-projfiles">
                   ${this.projFiles.slice(0, 200).map(
-                    (f) => html`<div class="plc-projfile" title=${f.path}>
-                      <code>${f.path}</code> <span class="plc-dim">${f.size} B</span>
-                      <button
-                        class="chip-btn"
-                        @click=${() => void pa.gitDiff(this.ctl, f.path).then((d) => { this.gitDiffText = d; this.requestUpdate(); })}
-                        >diff</button
-                      >
-                    </div>`,
+                    (f) =>
+                      html`<div class="plc-projfile" title=${f.path}>
+                        <code>${f.path}</code> <span class="plc-dim">${f.size} B</span>
+                        <button
+                          class="chip-btn"
+                          @click=${() =>
+                          void pa.gitDiff(this.ctl, f.path).then((d) => {
+                            this.gitDiffText = d;
+                            this.requestUpdate();
+                          })}
+                        >
+                          diff
+                        </button>
+                      </div>`,
                   )}
                 </div>
 
@@ -3242,14 +3340,20 @@ export class TetherPlcIde extends LitElement {
                   this.gitEntries.length
                     ? html`<div class="plc-projgit">
                         ${this.gitEntries.map(
-                          (g) => html`<div class="plc-progmeta">
-                            <code>${g.status}</code> ${g.path}
-                            <button
-                              class="chip-btn"
-                              @click=${() => void pa.gitDiff(this.ctl, g.path).then((d) => { this.gitDiffText = d; this.requestUpdate(); })}
-                              >diff</button
-                            >
-                          </div>`,
+                          (g) =>
+                            html`<div class="plc-progmeta">
+                              <code>${g.status}</code> ${g.path}
+                              <button
+                                class="chip-btn"
+                                @click=${() =>
+                                void pa.gitDiff(this.ctl, g.path).then((d) => {
+                                  this.gitDiffText = d;
+                                  this.requestUpdate();
+                                })}
+                              >
+                                diff
+                              </button>
+                            </div>`,
                         )}
                       </div>`
                     : html`<div class="plc-ok">working tree clean</div>`
@@ -3270,8 +3374,9 @@ export class TetherPlcIde extends LitElement {
                     class="chip-btn"
                     ?disabled=${!this.gitMsg.trim()}
                     @click=${() => void this.projGitCommit()}
-                    >commit all</button
                   >
+                    commit all
+                  </button>
                 </div>
                 ${
                   this.gitDiffText != null
@@ -3281,10 +3386,13 @@ export class TetherPlcIde extends LitElement {
                 <h4>History</h4>
                 <div class="plc-projgit">
                   ${this.gitCommits.map(
-                    (c) => html`<div class="plc-progmeta">
-                      <code>${c.short}</code> ${c.message}
-                      <span class="plc-dim">${c.author} · ${new Date(c.time * 1000).toLocaleString()}</span>
-                    </div>`,
+                    (c) =>
+                      html`<div class="plc-progmeta">
+                        <code>${c.short}</code> ${c.message}
+                        <span class="plc-dim"
+                          >${c.author} · ${new Date(c.time * 1000).toLocaleString()}</span
+                        >
+                      </div>`,
                   )}
                 </div>
               `
@@ -3456,14 +3564,14 @@ export class TetherPlcIde extends LitElement {
               </thead>
               <tbody>
                 ${diffs.map(
-                (d) =>
-                  html`<tr>
-                    <td>${d.cycle}</td>
-                    <td>0x${d.imgOff.toString(16)}</td>
-                    <td><code>${hex(d.active)}</code></td>
-                    <td><code>${hex(d.shadow)}</code></td>
-                  </tr>`,
-              )}
+                  (d) =>
+                    html`<tr>
+                      <td>${d.cycle}</td>
+                      <td>0x${d.imgOff.toString(16)}</td>
+                      <td><code>${hex(d.active)}</code></td>
+                      <td><code>${hex(d.shadow)}</code></td>
+                    </tr>`,
+                )}
               </tbody>
             </table>`
           : nothing
@@ -3548,38 +3656,43 @@ export class TetherPlcIde extends LitElement {
                 </span>
                 <button class="chip-btn" @click=${() => void this.onDbgRead()}>read</button>
                 ${
-                !this.dbgSymShadow
-                  ? html`<input
-                        class="fbd-in"
-                        placeholder="hex (e.g. 07000000)"
-                        .value=${this.dbgWriteHex}
-                        @input=${(e: Event) =>
-                      (this.dbgWriteHex = (e.target as HTMLInputElement).value)}
-                      />
-                      ${this.codecPicker()}
-                      <input
-                        class="fbd-in"
-                        placeholder=${this.dbgCodec ? `${this.dbgCodec} value` : 'typed value'}
-                        .value=${this.dbgTypedVal}
-                        @input=${(e: Event) => {
-                      this.dbgTypedVal = (e.target as HTMLInputElement).value;
-                      this.dbgTypedDirty = true;
-                    }}
-                      />
-                      <button class="chip-btn" @click=${() => void this.onDbgWrite()}>write</button>
-                      <input
-                        class="fbd-in plc-brk-task"
-                        title="optional bit mask (hex, same byte count)"
-                        placeholder="mask"
-                        .value=${this.dbgMaskHex}
-                        @input=${(e: Event) =>
-                      (this.dbgMaskHex = (e.target as HTMLInputElement).value)}
-                      />
-                      <button class="chip-btn plc-force-btn" @click=${() => void this.onDbgForce()}>
-                        force
-                      </button>`
-                  : html`<span class="plc-dim">shadow blob is read-only</span>`
-              }
+                  !this.dbgSymShadow
+                    ? html`<input
+                          class="fbd-in"
+                          placeholder="hex (e.g. 07000000)"
+                          .value=${this.dbgWriteHex}
+                          @input=${(e: Event) =>
+                          (this.dbgWriteHex = (e.target as HTMLInputElement).value)}
+                        />
+                        ${this.codecPicker()}
+                        <input
+                          class="fbd-in"
+                          placeholder=${this.dbgCodec ? `${this.dbgCodec} value` : 'typed value'}
+                          .value=${this.dbgTypedVal}
+                          @input=${(e: Event) => {
+                          this.dbgTypedVal = (e.target as HTMLInputElement).value;
+                          this.dbgTypedDirty = true;
+                        }}
+                        />
+                        <button class="chip-btn" @click=${() => void this.onDbgWrite()}>
+                          write
+                        </button>
+                        <input
+                          class="fbd-in plc-brk-task"
+                          title="optional bit mask (hex, same byte count)"
+                          placeholder="mask"
+                          .value=${this.dbgMaskHex}
+                          @input=${(e: Event) =>
+                          (this.dbgMaskHex = (e.target as HTMLInputElement).value)}
+                        />
+                        <button
+                          class="chip-btn plc-force-btn"
+                          @click=${() => void this.onDbgForce()}
+                        >
+                          force
+                        </button>`
+                    : html`<span class="plc-dim">shadow blob is read-only</span>`
+                }
                 <button
                   class="chip-btn"
                   title="stage as a flight-recorder channel"
@@ -3603,24 +3716,24 @@ export class TetherPlcIde extends LitElement {
         this.forces && this.forces.length > 0
           ? html`<div class="plc-forces">
               ${this.forces.map(
-              (f) =>
-                html`<span class="plc-force-tag">
-                  off ${f.offset} =
-                  ${[...f.bytes].map((b) => b.toString(16).padStart(2, '0')).join('')}
-                  ${
-                  f.mask && f.mask.some((m) => m !== 0xff)
-                    ? html` & ${[...f.mask].map((m) => m.toString(16).padStart(2, '0')).join('')}`
-                    : nothing
-                }
-                  <button
-                    class="chip-btn"
-                    @click=${() =>
-                    this.ctlOp('force clear', () => this.ctl.dbgForceClear(f.handle))}
-                  >
-                    ×
-                  </button>
-                </span>`,
-            )}
+                (f) =>
+                  html`<span class="plc-force-tag">
+                    off ${f.offset} =
+                    ${[...f.bytes].map((b) => b.toString(16).padStart(2, '0')).join('')}
+                    ${
+                    f.mask && f.mask.some((m) => m !== 0xff)
+                      ? html` & ${[...f.mask].map((m) => m.toString(16).padStart(2, '0')).join('')}`
+                      : nothing
+                  }
+                    <button
+                      class="chip-btn"
+                      @click=${() =>
+                      this.ctlOp('force clear', () => this.ctl.dbgForceClear(f.handle))}
+                    >
+                      ×
+                    </button>
+                  </span>`,
+              )}
               <button
                 class="chip-btn"
                 @click=${() => this.ctlOp('force clear', () => this.ctl.dbgForceClear())}
@@ -3681,24 +3794,25 @@ export class TetherPlcIde extends LitElement {
         this.breaks && this.breaks.length > 0
           ? html`<div class="plc-forces">
               ${this.breaks.map(
-              (b) =>
-                html`<span class="plc-force-tag">
-                  h${b.handle} ${b.kind ? 'cap' : 'brk'} ${b.stale ? 'stale ' : ''}task ${b.taskIdx}
-                  ${
-                  b.cmp === 0xff
-                    ? 'expr'
-                    : html`blob[${b.offset}..${b.len}] ${DBG_CMP[b.cmp] ?? b.cmp} ${b.value}`
-                }
-                  · hits ${b.hits}
-                  <button
-                    class="chip-btn"
-                    @click=${() =>
-                    this.ctlOp('break clear', () => this.ctl.dbgBreakClear(b.handle))}
-                  >
-                    ×
-                  </button>
-                </span>`,
-            )}
+                (b) =>
+                  html`<span class="plc-force-tag">
+                    h${b.handle} ${b.kind ? 'cap' : 'brk'} ${b.stale ? 'stale ' : ''}task
+                    ${b.taskIdx}
+                    ${
+                    b.cmp === 0xff
+                      ? 'expr'
+                      : html`blob[${b.offset}..${b.len}] ${DBG_CMP[b.cmp] ?? b.cmp} ${b.value}`
+                  }
+                    · hits ${b.hits}
+                    <button
+                      class="chip-btn"
+                      @click=${() =>
+                      this.ctlOp('break clear', () => this.ctl.dbgBreakClear(b.handle))}
+                    >
+                      ×
+                    </button>
+                  </span>`,
+              )}
               <button
                 class="chip-btn"
                 @click=${() => this.ctlOp('break clear', () => this.ctl.dbgBreakClear())}
@@ -3713,27 +3827,27 @@ export class TetherPlcIde extends LitElement {
           ? html`<div class="plc-forces">
               <span class="plc-dim">rec ch:</span>
               ${this.traceChs.map(
-              (c, i) =>
-                html`<span class="plc-force-tag">
-                  ${c.name} ${c.off}:${c.len}
-                  <button
-                    class="chip-btn"
-                    @click=${() => {
-                    this.traceChs.splice(i, 1);
-                    this.requestUpdate();
-                  }}
-                  >
-                    ×
-                  </button>
-                </span>`,
-            )}
+                (c, i) =>
+                  html`<span class="plc-force-tag">
+                    ${c.name} ${c.off}:${c.len}
+                    <button
+                      class="chip-btn"
+                      @click=${() => {
+                      this.traceChs.splice(i, 1);
+                      this.requestUpdate();
+                    }}
+                    >
+                      ×
+                    </button>
+                  </span>`,
+              )}
               <button class="chip-btn" @click=${() => void this.onTraceArm()}>record</button>
               <label class="plc-dim">
                 <input
                   type="checkbox"
                   .checked=${this.traceNoFreeze}
                   @change=${(e: Event) =>
-                  (this.traceNoFreeze = (e.target as HTMLInputElement).checked)}
+                    (this.traceNoFreeze = (e.target as HTMLInputElement).checked)}
                 />
                 nofreeze
               </label>
@@ -3762,20 +3876,20 @@ export class TetherPlcIde extends LitElement {
           ? html`<div class="plc-forces">
               <span class="plc-dim">watch items:</span>
               ${this.watchChs.map(
-              (c, i) =>
-                html`<span class="plc-force-tag">
-                  ${c.name} ${c.off}:${c.len}
-                  <button
-                    class="chip-btn"
-                    @click=${() => {
-                    this.watchChs.splice(i, 1);
-                    this.requestUpdate();
-                  }}
-                  >
-                    ×
-                  </button>
-                </span>`,
-            )}
+                (c, i) =>
+                  html`<span class="plc-force-tag">
+                    ${c.name} ${c.off}:${c.len}
+                    <button
+                      class="chip-btn"
+                      @click=${() => {
+                      this.watchChs.splice(i, 1);
+                      this.requestUpdate();
+                    }}
+                    >
+                      ×
+                    </button>
+                  </span>`,
+              )}
               <button class="chip-btn" @click=${() => void this.onWatchAdd()}>add watch</button>
             </div>`
           : nothing
@@ -3784,36 +3898,36 @@ export class TetherPlcIde extends LitElement {
         this.watches && this.watches.length > 0
           ? html`<div class="plc-forces">
               ${this.watches.map(
-              (wt) =>
-                html`<span class="plc-force-tag">
-                  watch h${wt.handle} ${wt.items}×${wt.totalLen}B
-                  ${wt.rateHz ? ` · ${wt.rateHz}Hz` : ''} ${wt.stale ? ' · STALE' : ''}
-                  ${this.watchVals.get(wt.handle)?.map((v) => html` =${v}`)}
-                  <button
-                    class="chip-btn"
-                    title="one-shot read"
-                    @click=${() => void this.onWatchGet(wt.handle)}
-                  >
-                    get
-                  </button>
-                  <button
-                    class="chip-btn"
-                    title=${wt.rateHz ? 'stop streaming' : 'stream at 10 Hz'}
-                    @click=${() =>
-                    this.ctlOp('watch stream', () =>
-                      this.ctl.dbgWatchStream(wt.handle, wt.rateHz ? 0 : 10),
-                    )}
-                  >
-                    ${wt.rateHz ? 'stop' : 'stream'}
-                  </button>
-                  <button
-                    class="chip-btn"
-                    @click=${() => this.ctlOp('watch rm', () => this.ctl.dbgWatchRemove(wt.handle))}
-                  >
-                    ×
-                  </button>
-                </span>`,
-            )}
+                (wt) =>
+                  html`<span class="plc-force-tag">
+                    watch h${wt.handle} ${wt.items}×${wt.totalLen}B
+                    ${wt.rateHz ? ` · ${wt.rateHz}Hz` : ''} ${wt.stale ? ' · STALE' : ''}
+                    ${this.watchVals.get(wt.handle)?.map((v) => html` =${v}`)}
+                    <button
+                      class="chip-btn"
+                      title="one-shot read"
+                      @click=${() => void this.onWatchGet(wt.handle)}
+                    >
+                      get
+                    </button>
+                    <button
+                      class="chip-btn"
+                      title=${wt.rateHz ? 'stop streaming' : 'stream at 10 Hz'}
+                      @click=${() =>
+                      this.ctlOp('watch stream', () =>
+                        this.ctl.dbgWatchStream(wt.handle, wt.rateHz ? 0 : 10),
+                      )}
+                    >
+                      ${wt.rateHz ? 'stop' : 'stream'}
+                    </button>
+                    <button
+                      class="chip-btn"
+                      @click=${() => this.ctlOp('watch rm', () => this.ctl.dbgWatchRemove(wt.handle))}
+                    >
+                      ×
+                    </button>
+                  </span>`,
+              )}
             </div>`
           : nothing
       }
@@ -3847,13 +3961,13 @@ export class TetherPlcIde extends LitElement {
         this.stateDiff
           ? html`<div class="plc-forces">
               ${this.stateDiff.rules.map(
-              (r) =>
-                html`<span class="plc-force-tag">
-                  ${DBG_DIFF_KIND[r.kind] ?? r.kind} ${r.oldName || '-'}[${r.oldOff}:${r.oldLen}] →
-                  ${r.newName || '-'}[${r.newOff}:${r.newLen}]
-                  ${r.sev === 1 ? ' · degraded' : nothing} ${r.sev === 2 ? ' · deny' : nothing}
-                </span>`,
-            )}
+                (r) =>
+                  html`<span class="plc-force-tag">
+                    ${DBG_DIFF_KIND[r.kind] ?? r.kind} ${r.oldName || '-'}[${r.oldOff}:${r.oldLen}]
+                    → ${r.newName || '-'}[${r.newOff}:${r.newLen}]
+                    ${r.sev === 1 ? ' · degraded' : nothing} ${r.sev === 2 ? ' · deny' : nothing}
+                  </span>`,
+              )}
             </div>`
           : nothing
       }
@@ -4313,7 +4427,7 @@ export class TetherPlcIde extends LitElement {
                               title=${odTy !== undefined ? `write as ${odTypeName(odTy)}` : 'write as hex'}
                               .value=${this.odWriteHex[key] ?? ''}
                               @input=${(ev: Event) =>
-                              (this.odWriteHex[key] = (ev.target as HTMLInputElement).value)}
+                                (this.odWriteHex[key] = (ev.target as HTMLInputElement).value)}
                             />`
                           : nothing
                       }
@@ -4576,69 +4690,71 @@ export class TetherPlcIde extends LitElement {
         </thead>
         <tbody>
           ${r.channels.map(
-              (c, i) =>
-                html` <tr>
-                  <td>
-                    <select
-                      class="plc-mapcell"
-                      .value=${c.dir}
-                      @change=${(e: Event) => this.mapRow(`${i}:dir`, (e.target as HTMLSelectElement).value)}
-                    >
-                      <option value="in">in</option>
-                      <option value="out">out</option>
-                    </select>
-                  </td>
-                  <td>${cell(i, 'off', c.off)}</td>
-                  <td>${cell(i, 'size', c.size)}</td>
-                  <td>${cell(i, c.pdo ? 'pdo' : 'key', c.pdo ?? c.key, 14)}</td>
-                  <td>${cell(i, 'type', c.type, 8)}</td>
-                  <td>${cell(i, 'safe', c.safe, 8)}</td>
-                  <td>
-                    <button class="chip-btn" @click=${() => this.delMapRow('chan', i)}>✕</button>
-                  </td>
-                </tr>`,
-            )}
+            (c, i) =>
+              html` <tr>
+                <td>
+                  <select
+                    class="plc-mapcell"
+                    .value=${c.dir}
+                    @change=${(e: Event) => this.mapRow(`${i}:dir`, (e.target as HTMLSelectElement).value)}
+                  >
+                    <option value="in">in</option>
+                    <option value="out">out</option>
+                  </select>
+                </td>
+                <td>${cell(i, 'off', c.off)}</td>
+                <td>${cell(i, 'size', c.size)}</td>
+                <td>${cell(i, c.pdo ? 'pdo' : 'key', c.pdo ?? c.key, 14)}</td>
+                <td>${cell(i, 'type', c.type, 8)}</td>
+                <td>${cell(i, 'safe', c.safe, 8)}</td>
+                <td>
+                  <button class="chip-btn" @click=${() => this.delMapRow('chan', i)}>✕</button>
+                </td>
+              </tr>`,
+          )}
         </tbody>
       </table>
       ${
-          r.bindings.length
-            ? html` <table class="plc-table plc-mapgrid-tbl">
-                <thead>
-                  <tr>
-                    <th>bind at</th>
-                    <th>→ key</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${r.bindings.map(
-                (b, i) =>
-                  html` <tr>
-                    <td>
-                      <input
-                        class="plc-mapcell"
-                        style="width:12ch"
-                        .value=${b.at}
-                        @change=${(e: Event) => this.mapBindRow(i, 'at', (e.target as HTMLInputElement).value)}
-                      />
-                    </td>
-                    <td>
-                      <input
-                        class="plc-mapcell"
-                        style="width:16ch"
-                        .value=${b.key}
-                        @change=${(e: Event) => this.mapBindRow(i, 'key', (e.target as HTMLInputElement).value)}
-                      />
-                    </td>
-                    <td>
-                      <button class="chip-btn" @click=${() => this.delMapRow('bind', i)}>✕</button>
-                    </td>
-                  </tr>`,
-              )}
-                </tbody>
-              </table>`
-            : nothing
-        }
+        r.bindings.length
+          ? html` <table class="plc-table plc-mapgrid-tbl">
+              <thead>
+                <tr>
+                  <th>bind at</th>
+                  <th>→ key</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                ${r.bindings.map(
+                    (b, i) =>
+                      html` <tr>
+                        <td>
+                          <input
+                            class="plc-mapcell"
+                            style="width:12ch"
+                            .value=${b.at}
+                            @change=${(e: Event) => this.mapBindRow(i, 'at', (e.target as HTMLInputElement).value)}
+                          />
+                        </td>
+                        <td>
+                          <input
+                            class="plc-mapcell"
+                            style="width:16ch"
+                            .value=${b.key}
+                            @change=${(e: Event) => this.mapBindRow(i, 'key', (e.target as HTMLInputElement).value)}
+                          />
+                        </td>
+                        <td>
+                          <button class="chip-btn" @click=${() => this.delMapRow('bind', i)}>
+                            ✕
+                          </button>
+                        </td>
+                      </tr>`,
+                  )}
+              </tbody>
+            </table>`
+          : nothing
+      }
     </div>`;
   }
 
