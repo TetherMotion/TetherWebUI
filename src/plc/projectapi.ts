@@ -81,6 +81,15 @@ export async function projectOpen(ch: MetaChannel, path: string): Promise<Projec
   return ch.meta<ProjectInfo>('project_open', { path });
 }
 
+/** Create a new project in `path` (scaffolds .tplc/, src/, git repo). */
+export async function projectNew(
+  ch: MetaChannel,
+  path: string,
+  name?: string,
+): Promise<ProjectInfo> {
+  return ch.meta<ProjectInfo>('project_new', { path, name });
+}
+
 /** Persist the manifest (incl. the `ui` document) to .tplc/project.json. */
 export async function projectSave(ch: MetaChannel, manifest: ProjectManifest): Promise<void> {
   await ch.meta('project_save', { manifest });

@@ -1621,6 +1621,58 @@ tile-frame {
   gap: 0 16px;
 }
 
+.plc-projrecent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 180px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+
+.plc-projrecent-list .plc-projrecent {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+}
+
+.plc-projrecent-list .plc-projrecent.current {
+  color: var(--text, inherit);
+  font-weight: 600;
+}
+
+.plc-projrecent-list .plc-projrecent:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.plc-tree-proj {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  text-transform: none;
+  letter-spacing: normal;
+  padding: 6px 2px;
+  border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  margin-bottom: 4px;
+}
+
+.plc-tree-projname {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text, inherit);
+}
+
+.plc-tree-proot {
+  font-size: 10px;
+  word-break: break-all;
+  max-width: 100%;
+}
+
 .plc-projrecent,
 .plc-projfile {
   font-size: 12px;
@@ -2853,6 +2905,84 @@ tile-frame {
   padding: 4px 8px;
   font-size: 11px;
   width: 130px;
+}
+
+/* bus tree — segmented EtherCAT topology, one card per EK1100 segment */
+.plc-busseg {
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin: 6px 0;
+}
+.plc-busseg-h {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.plc-busterm {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 3px 0;
+  border-top: 1px solid var(--row-border);
+  font-size: 12px;
+}
+.plc-busterm b {
+  min-width: 64px;
+}
+.plc-busterm-uns {
+  opacity: 0.6;
+}
+.plc-busterm-stale {
+  border-top: none;
+}
+.plc-busterm-ok {
+  border-color: var(--ok, #2ea043) !important;
+  color: var(--ok, #2ea043) !important;
+}
+.plc-busraw {
+  margin: 8px 0;
+}
+.plc-busraw summary {
+  cursor: pointer;
+  font-size: 11px;
+}
+
+/* Devices document — the workbench tab / rail entry; bus + entities +
+   terminals all land in the chosen target POU. */
+.plc-dev-doc {
+  padding: 10px 14px;
+  font-size: 12px;
+  overflow-y: auto;
+}
+.plc-dev-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.plc-dev-head h3 {
+  margin: 0;
+}
+.plc-dev-sec {
+  margin-top: 6px;
+}
+.plc-dev-seg {
+  margin: 4px 0 2px;
+  font-size: 11px;
+}
+.plc-dev-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.plc-dev-term {
+  display: inline-flex;
+  gap: 2px;
+}
+.plc-dev-zap {
+  padding: 0 4px;
 }
 
 /* phase 3 — workflow progress in the status strip */

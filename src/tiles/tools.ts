@@ -292,6 +292,7 @@ export class TileCatalog extends TileElement {
     const tab = (id: CatalogTab, label: string) =>
       html`<button
         class="tab${this.tab === id ? ' active' : ''}"
+        title="filter the catalog to ${label.toLowerCase()} entries"
         @click=${() => {
           this.tab = id;
           this.requestUpdate();

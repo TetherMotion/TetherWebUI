@@ -339,11 +339,16 @@ export class TileScope extends TileElement {
           >${this.paused ? icon('pause') : icon('activity')}
           ${this.paused ? 'PAUSED' : 'LIVE'}</span
         >
-        <button class="secondary" @click=${this.togglePause}>
+        <button
+          class="secondary"
+          title="pause or resume the scope trace"
+          @click=${this.togglePause}
+        >
           ${this.paused ? 'Resume' : 'Pause'}
         </button>
         <button
           class="secondary"
+          title="reset the scope zoom to full scale"
           ?hidden=${!this.paused}
           @click=${() => this.scopeEl()?.resetView()}
         >
@@ -351,7 +356,13 @@ export class TileScope extends TileElement {
         </button>
         ${
           optString(this.def, 'fft') || this.def?.options?.['fft'] === true
-            ? html`<button class="secondary" @click=${() => void this.showFft()}>FFT</button>`
+            ? html`<button
+                class="secondary"
+                title="show the magnitude spectrum of the first channel"
+                @click=${() => void this.showFft()}
+              >
+                FFT
+              </button>`
             : ''
         }
       </div>
@@ -377,6 +388,7 @@ export class TileScope extends TileElement {
             <h3>Frequency spectrum</h3>
             <button
               class="secondary"
+              title="close the frequency plot"
               @click=${() => {
                 this.querySelector<HTMLElement>('.scope-plot-overlay')!.hidden = true;
                 this.plot?.destroy();

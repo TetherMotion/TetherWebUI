@@ -8,9 +8,9 @@ export function machineShellTemplate(views: NavigationItem[]): string {
       <main class="shell machine-shell">
         <header class="topbar">
           <div class="brand"><span class="brand-mark">T</span><div><strong id="machine-display-name">Tether Machine Console</strong><small>EtherCAT observability · browser controls are not safety functions</small></div></div>
-          <div class="connection"><input id="url" aria-label="WebSocket URL"><input id="auth-token" type="password" aria-label="Access token" placeholder="Token" autocomplete="off"><button id="connect">Connect</button><button id="theme-toggle" class="theme-toggle" aria-label="Toggle theme">◐</button><span id="status" class="status">Offline</span></div>
+          <div class="connection"><input id="url" aria-label="WebSocket URL"><input id="auth-token" type="password" aria-label="Access token" placeholder="Token" autocomplete="off"><button id="connect" title="connect to the machine WebSocket at the URL and token above">Connect</button><button id="theme-toggle" class="theme-toggle" aria-label="Toggle theme" title="toggle dark/light theme">◐</button><span id="status" class="status">Offline</span></div>
         </header>
-        <nav class="app-nav" aria-label="Machine console navigation">${views.map((view) => `<button class="app-nav-item${view.id === 'overview' ? ' active' : ''}" data-view="${view.id}">${view.label}</button>`).join('')}</nav>
+        <nav class="app-nav" aria-label="Machine console navigation">${views.map((view) => `<button class="app-nav-item${view.id === 'overview' ? ' active' : ''}" data-view="${view.id}" title="open the ${view.label} view">${view.label}</button>`).join('')}</nav>
         <div class="safety-notice" role="note"><strong>Read-only session</strong><span>This interface is not an E-stop, STO, safety PLC, or safety-rated control. Use the machine's independent hardware safety system.</span><div class="global-state"><span id="role-label">Role: unverified</span><span id="authority-label">Control owner: none</span><span id="freshness-label">Data: waiting</span><span id="alarm-label">Alarms: unavailable</span></div></div>
         <section id="machine-view" class="machine-view" aria-live="polite">
           <div class="view-heading"><div><p class="eyebrow" id="view-kicker">Machine overview</p><h1 id="view-title">Overview</h1></div><span id="profile-badge" class="badge">Profile unavailable</span></div>
@@ -28,7 +28,7 @@ export function machineShellTemplate(views: NavigationItem[]): string {
               <div id="drive-state-widgets" class="drive-state-widgets"><p class="widget-empty">Connect to a machine profile to load EtherCAT and CiA 402 widgets.</p></div>
             </section>
             <article class="machine-card overview-callout"><h2>System status</h2><p id="overview-message">Connect to a schema-negotiated machine application to load coherent fleet state.</p></article>
-            <article class="machine-card"><div class="panel-title"><div><span class="eyebrow">Fleet health</span><h2>Drive summary</h2></div><button class="secondary" data-open-view="drives">Open drives</button></div><div id="overview-drive-list" class="overview-drive-list"></div></article>
+            <article class="machine-card"><div class="panel-title"><div><span class="eyebrow">Fleet health</span><h2>Drive summary</h2></div><button class="secondary" data-open-view="drives" title="open the Drives view">Open drives</button></div><div id="overview-drive-list" class="overview-drive-list"></div></article>
           </section>
           <section id="drives-page" class="machine-page" hidden><div id="drive-card-list" class="drive-card-list"><p class="widget-empty">No drive snapshots discovered.</p></div></section>
           <section id="alarms-page" class="machine-page" hidden>
@@ -45,7 +45,7 @@ export function machineShellTemplate(views: NavigationItem[]): string {
             <article class="machine-card"><div class="panel-title"><div><span class="eyebrow">Guided sequence</span><h2>Homing</h2></div><span class="widget-source">Prepare → start → verify · cancelable</span></div>
               <div id="homing-panel"></div>
             </article>
-            <article class="machine-card"><div class="panel-title"><div><span class="eyebrow">In-flight & history</span><h2>Operations</h2></div><button id="operations-refresh" class="secondary">Refresh</button></div>
+            <article class="machine-card"><div class="panel-title"><div><span class="eyebrow">In-flight & history</span><h2>Operations</h2></div><button id="operations-refresh" class="secondary" title="reload the operations table">Refresh</button></div>
               <div id="operations-table-wrap" class="table-wrap"><table class="drive-table"><thead><tr><th>Operation</th><th>Action</th><th>Target</th><th>State</th><th>Progress</th><th>Message</th></tr></thead><tbody id="operations-table-body"><tr><td colspan="6" class="widget-empty">No operations.</td></tr></tbody></table></div>
             </article>
           </section>
@@ -74,13 +74,13 @@ export function machineShellTemplate(views: NavigationItem[]): string {
             <article class="machine-card"><span class="eyebrow">Live signals</span><h2>Trend workspace</h2>
               <p>Each pane has its own channel set over one shared stream. "Freeze all" halts every pane at the same instant so traces stay comparable. Derived channels and FFT are computed in this browser; capture replay decodes exported records via the server's record layout.</p>
               <div class="trend-toolbar">
-                <button id="trend-freeze-all" class="secondary">Freeze all</button>
-                <button id="trend-resume-all" class="secondary" hidden>Resume all</button>
+                <button id="trend-freeze-all" class="secondary" title="freeze every trend pane at the same instant so traces stay comparable">Freeze all</button>
+                <button id="trend-resume-all" class="secondary" title="resume all frozen trend panes" hidden>Resume all</button>
                 <span class="trend-layout">
                   <select id="layout-select" aria-label="Saved layouts"><option value="">Saved layouts…</option></select>
                   <input id="layout-name" type="text" maxlength="64" placeholder="Layout name" aria-label="Layout name">
-                  <button id="layout-save" class="secondary">Save</button>
-                  <button id="layout-delete" class="secondary">Delete</button>
+                  <button id="layout-save" class="secondary" title="save the current trend panes as a named layout">Save</button>
+                  <button id="layout-delete" class="secondary" title="delete the selected saved layout">Delete</button>
                 </span>
                 <label class="trend-replay">Replay capture <input id="capture-replay-file" type="file" accept=".bin,application/octet-stream"></label>
               </div>
@@ -97,7 +97,7 @@ export function machineShellTemplate(views: NavigationItem[]): string {
                       <select id="trend-preset-0" class="trend-preset" aria-label="Pane A preset"><option value="">Preset…</option><option value="motion">Position/velocity/torque</option><option value="error">Following error</option><option value="network">Network health</option></select>
                       <select id="trend-derive-0" class="trend-derive" aria-label="Pane A derived channel"><option value="">derived: none</option><option value="diff">A−B</option><option value="sum">Σ all</option><option value="abs">|A|</option></select>
                       <button class="secondary trend-fft" data-pane="0" title="Magnitude spectrum of the first channel's retained samples">FFT</button>
-                      <button class="secondary trend-freeze" data-pane="0">Freeze</button>
+                      <button class="secondary trend-freeze" data-pane="0" title="freeze this trend pane">Freeze</button>
                     </div>
                   </div>
                   <tether-webgpu-scope id="trend-scope-0"></tether-webgpu-scope>
@@ -113,7 +113,7 @@ export function machineShellTemplate(views: NavigationItem[]): string {
                       <select id="trend-preset-1" class="trend-preset" aria-label="Pane B preset"><option value="">Preset…</option><option value="motion">Position/velocity/torque</option><option value="error">Following error</option><option value="network">Network health</option></select>
                       <select id="trend-derive-1" class="trend-derive" aria-label="Pane B derived channel"><option value="">derived: none</option><option value="diff">A−B</option><option value="sum">Σ all</option><option value="abs">|A|</option></select>
                       <button class="secondary trend-fft" data-pane="1" title="Magnitude spectrum of the first channel's retained samples">FFT</button>
-                      <button class="secondary trend-freeze" data-pane="1">Freeze</button>
+                      <button class="secondary trend-freeze" data-pane="1" title="freeze this trend pane">Freeze</button>
                     </div>
                   </div>
                   <tether-webgpu-scope id="trend-scope-1"></tether-webgpu-scope>
@@ -124,7 +124,7 @@ export function machineShellTemplate(views: NavigationItem[]): string {
                 <div class="trend-plot-dialog" role="dialog" aria-label="Frequency plot">
                   <div class="trend-plot-head">
                     <h3 id="trend-plot-title">Plot</h3>
-                    <button id="trend-plot-close" class="secondary">Close</button>
+                    <button id="trend-plot-close" class="secondary" title="close the frequency plot">Close</button>
                   </div>
                   <canvas id="trend-plot-canvas"></canvas>
                 </div>
@@ -138,13 +138,13 @@ export function machineShellTemplate(views: NavigationItem[]): string {
                 <label>Default WebSocket URL <input id="settings-url" aria-label="Default WebSocket URL"></label>
                 <label>Telemetry poll interval (ms) <input id="settings-poll-ms" type="number" min="200" max="60000" step="100"></label>
                 <label>Trend stream interval (ms) <input id="settings-stream-ms" type="number" min="1" max="10000"></label>
-                <div class="config-actions"><button type="submit">Save preferences</button><button type="button" id="settings-reset" class="secondary">Reset to defaults</button><button type="button" id="support-bundle" class="secondary">Download support bundle</button></div>
+                <div class="config-actions"><button type="submit" title="save connection and display preferences">Save preferences</button><button type="button" id="settings-reset" class="secondary" title="reset preferences to defaults">Reset to defaults</button><button type="button" id="support-bundle" class="secondary" title="download a redacted JSON snapshot of machine state for support">Download support bundle</button></div>
               </form>
               <p class="event-history-note">The support bundle is a JSON snapshot of catalog metadata, machine state, events, and service status — tokens, credentials, and network addresses are redacted before download.</p>
               <p id="build-info" class="event-history-note"></p>
             </article>
           </section>
-          <section id="explore-page" class="machine-page" hidden><div class="workspace explore-workspace"><aside class="panel catalog-panel"><div class="panel-title"><div><span class="eyebrow">Expert tool</span><h2>Generic catalog</h2></div><span id="catalog-count" class="badge">0</span></div><nav class="tabs"><button class="tab active" data-tab="all">All</button><button class="tab" data-tab="signals">Signals</button><button class="tab" data-tab="params">Parameters</button><button class="tab" data-tab="functions">Functions</button></nav><tether-catalog id="catalog"></tether-catalog></aside><section class="content"><div class="scope panel"><div class="scope-head"><div><span class="eyebrow">Oscilloscope</span><h2>Selected signal trace</h2></div><div class="scope-actions"><span id="live-dot" class="live-dot">● LIVE</span><button id="pause-btn" class="secondary">Pause</button><button id="reset-zoom-btn" class="secondary" hidden>Reset zoom</button></div></div><tether-webgpu-scope id="scope"></tether-webgpu-scope></div><article class="machine-card"><h2>Generic function catalog</h2><p>Functions are descriptive only here. Motion-affecting actions are not invoked from this expert catalog.</p><tether-function-list id="functions"></tether-function-list></article></section></div></section>
+          <section id="explore-page" class="machine-page" hidden><div class="workspace explore-workspace"><aside class="panel catalog-panel"><div class="panel-title"><div><span class="eyebrow">Expert tool</span><h2>Generic catalog</h2></div><span id="catalog-count" class="badge">0</span></div><nav class="tabs"><button class="tab active" data-tab="all" title="show every catalog entry">All</button><button class="tab" data-tab="signals" title="show only signal entries">Signals</button><button class="tab" data-tab="params" title="show only parameter entries">Parameters</button><button class="tab" data-tab="functions" title="show only function entries">Functions</button></nav><tether-catalog id="catalog"></tether-catalog></aside><section class="content"><div class="scope panel"><div class="scope-head"><div><span class="eyebrow">Oscilloscope</span><h2>Selected signal trace</h2></div><div class="scope-actions"><span id="live-dot" class="live-dot">● LIVE</span><button id="pause-btn" class="secondary" title="pause or resume the scope trace">Pause</button><button id="reset-zoom-btn" class="secondary" title="reset the scope zoom to full scale" hidden>Reset zoom</button></div></div><tether-webgpu-scope id="scope"></tether-webgpu-scope></div><article class="machine-card"><h2>Generic function catalog</h2><p>Functions are descriptive only here. Motion-affecting actions are not invoked from this expert catalog.</p><tether-function-list id="functions"></tether-function-list></article></section></div></section>
           <section id="placeholder-page" class="machine-page" hidden><article class="machine-card unavailable-card"><span class="state-label">Service unavailable</span><h2 id="placeholder-title">Not advertised</h2><p id="placeholder-copy">No state is inferred from generic registry names. This server does not provide the typed, versioned service required for this view.</p></article></section>
         </section>
         <footer><span>Typed V6 telemetry · server remains authoritative</span><span>Hardware safety functions are independent</span></footer>

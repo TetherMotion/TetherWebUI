@@ -235,6 +235,7 @@ function appendOverviewDrive(
   const condition = interpretDrive(model);
   const card = document.createElement('button');
   card.className = 'overview-drive-row';
+  card.title = 'open this drive’s detail card';
   card.textContent = `${model.name} · ${condition.pill} · ${condition.interp}`;
   card.addEventListener('click', () => onSelect(model.entry, model.snapshot, model.ageMs));
   container.append(card);

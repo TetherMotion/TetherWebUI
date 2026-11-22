@@ -442,7 +442,8 @@ are received — comms loss stops the axis automatically">
                 ? (this.groupRateSel.get(gname) ?? 0)
                 : (this.groupStepSel.get(gname) ?? 0);
             return `<button class="jog-chip ${i === sel ? 'jog-chip-active' : ''}"
-                      data-kind="${kind}" data-group="${gname}" data-index="${i}">${p}</button>`;
+                      data-kind="${kind}" data-group="${gname}" data-index="${i}"
+                      title="set the group jog ${kind} to ${p}${unit}${kind === 'rate' ? '/s' : ''}">${p}</button>`;
           })
           .join('')}
         <small>${unit}${kind === 'rate' ? '/s' : ''}</small>
@@ -489,13 +490,17 @@ are received — comms loss stops the axis automatically">
         </div>
         <div class="jog-controls">
           <button class="jog-btn jog-minus" data-hold="${axis.name}:-1"
-                  aria-label="Jog ${axis.name} negative">−</button>
+                  aria-label="Jog ${axis.name} negative"
+                  title="hold to jog ${axis.name} in the negative direction">−</button>
           <button class="jog-btn jog-plus" data-hold="${axis.name}:1"
-                  aria-label="Jog ${axis.name} positive">+</button>
+                  aria-label="Jog ${axis.name} positive"
+                  title="hold to jog ${axis.name} in the positive direction">+</button>
         </div>
         <div class="jog-inc-row">
-          <button class="jog-inc" data-move="${axis.name}:-1">◄ step</button>
-          <button class="jog-inc" data-move="${axis.name}:1">step ►</button>
+          <button class="jog-inc" data-move="${axis.name}:-1"
+                  title="step ${axis.name} one increment in the negative direction">◄ step</button>
+          <button class="jog-inc" data-move="${axis.name}:1"
+                  title="step ${axis.name} one increment in the positive direction">step ►</button>
         </div>
         ${
           showAxisPresets
@@ -506,7 +511,8 @@ are received — comms loss stops the axis automatically">
                      .map(
                        (p, i) =>
                          `<button class="jog-chip ${i === 0 ? 'jog-chip-active' : ''}"
-                            data-kind="rate" data-group="${gname}" data-index="${i}">${p}</button>`,
+                            data-kind="rate" data-group="${gname}" data-index="${i}"
+                            title="set this axis's jog rate to ${p}${axis.unit}/s">${p}</button>`,
                      )
                      .join('')}
                  </div>
@@ -516,7 +522,8 @@ are received — comms loss stops the axis automatically">
                      .map(
                        (p, i) =>
                          `<button class="jog-chip ${i === 0 ? 'jog-chip-active' : ''}"
-                            data-kind="step" data-group="${gname}" data-index="${i}">${p}</button>`,
+                            data-kind="step" data-group="${gname}" data-index="${i}"
+                            title="set this axis's step size to ${p}${axis.unit}">${p}</button>`,
                      )
                      .join('')}
                  </div>

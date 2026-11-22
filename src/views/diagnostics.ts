@@ -267,7 +267,7 @@ export function renderDiagnostics(root: HTMLElement, model: DiagnosticsModel): v
             `<td>${e.suspended ? 'yes' : '—'}</td>` +
             `<td>${e.recovering ? 'yes' : '—'}</td>` +
             `<td>${e.attemptCount}</td>` +
-            `<td>${canRetry ? `<button type="button" class="btn-secondary" data-supervisor-retry="${e.slaveIndex}">Retry</button>` : '—'}</td>` +
+            `<td>${canRetry ? `<button type="button" class="btn-secondary" data-supervisor-retry="${e.slaveIndex}" title="request slave recovery for index ${e.slaveIndex} — audited, cannot override safety interlocks">Retry</button>` : '—'}</td>` +
             '</tr>'
           );
         })

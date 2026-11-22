@@ -30,6 +30,7 @@ import {
 } from './palette';
 import { coerce, declaredPins, inferNetwork, tyName, type Inference, type Ty, type TypeIssue } from './types';
 import {
+  deviceChannelPins,
   deviceStDecls,
   nextFreeBaseFor,
   suggestEndpoint,
@@ -1308,8 +1309,8 @@ export class FbdCanvas extends LitElement {
               : nothing}
           </div>
           <div class="fbd-devdlg-btns">
-            <button class="chip-btn primary" @click=${() => this.addDevice()}>Add</button>
-            <button class="chip-btn" @click=${() => { this.devDlg = undefined; this.devForm = undefined; }}>Cancel</button>
+            <button class="chip-btn primary" title="add the configured device to the network" @click=${() => this.addDevice()}>Add</button>
+            <button class="chip-btn" title="close the device dialog without adding" @click=${() => { this.devDlg = undefined; this.devForm = undefined; }}>Cancel</button>
           </div>
         </div>
       </div>
@@ -1484,7 +1485,7 @@ export class FbdCanvas extends LitElement {
           <div class="fbd-lib fbd-lib-castdlg" @keydown=${this.onLibKey}>
             <div class="fbd-lib-head">
               <b>Type conversion</b>
-              <button class="chip-btn" @click=${() => { this.libCast = false; }}>← blocks</button>
+              <button class="chip-btn" title="back to the block library" @click=${() => { this.libCast = false; }}>← blocks</button>
               <span class="spacer"></span>
               <button class="chip-btn" title="close (Esc)" @click=${close}>✕</button>
             </div>
@@ -1494,6 +1495,7 @@ export class FbdCanvas extends LitElement {
               <label>to ${sel(to, (v) => { this.castTo = v; })}</label>
               <button
                 class="chip-btn primary"
+                title="place a ${from}_TO_${to} conversion block on the canvas"
                 ?disabled=${from === to}
                 @click=${() => this.addCast()}
               >Add ${from}_TO_${to}</button>
@@ -1675,27 +1677,7 @@ export class FbdCanvas extends LitElement {
     f: { channel: 'DI' | 'DO' | 'AI' | 'AO'; count: number; ty: string; base: number; pitch?: number },
     prefix?: string,
   ): IfaceVar[] {
-    const p = prefix ?? '';
-    const out: IfaceVar[] = [];
-    const digital = f.channel === 'DI' || f.channel === 'DO';
-    const dir = f.channel === 'DI' || f.channel === 'AI' ? 'var_output' : 'var_input';
-    const region = f.channel === 'DO' || f.channel === 'AO' ? 'Q' : 'I';
-    const width = digital ? 'X' : 'D';
-    const pitch = Math.max(1, f.pitch ?? 4);
-    for (let i = 0; i < f.count; i++) {
-      const name = `${p}${f.channel}${i}`;
-      if (digital) {
-        const byte = f.base + (i >> 3);
-        const bit = i & 7;
-        out.push({ name, kind: dir, type: f.ty, at: `%${region}${width}${byte}.${bit}` });
-      } else {
-        /* analog: pitch-byte channels at byte offsets (EL int16 = 2,
-           virtual REAL terminals = 4) */
-        const byte = f.base + i * pitch;
-        out.push({ name, kind: dir, type: f.ty, at: `%${region}${width}${byte}.0` });
-      }
-    }
-    return out;
+    return deviceChannelPins({ ...f, prefix });
   }
 
   /** Create a device block from the wizard form (+ template group 2). */
@@ -1780,7 +1762,7 @@ export class FbdCanvas extends LitElement {
               </tr>`,
           )}
         </table>
-        <button class="chip-btn" @click=${() =>
+        <button class="chip-btn" title="append a channel pin to the device" @click=${() =>
           set((x) => {
             const cur = x.pins ?? [];
             const last = cur[cur.length - 1];
@@ -2025,7 +2007,7 @@ export class FbdCanvas extends LitElement {
           <button class="chip-btn" title="Align top edges" @click=${() => this.alignSel('y')}>
             align ⤒
           </button>
-          <button class="chip-btn" @click=${() => this.deleteSel()}>Delete</button>
+          <button class="chip-btn" title="delete the selected blocks" @click=${() => this.deleteSel()}>Delete</button>
         </div>
       `;
     }
@@ -2085,7 +2067,7 @@ export class FbdCanvas extends LitElement {
               x.params = p;
             })}
         />
-        <button class="chip-btn" @click=${() => this.deleteSel()}>Delete</button>
+        <button class="chip-btn" title="delete this block" @click=${() => this.deleteSel()}>Delete</button>
       </div>
       ${b.kind === 'device' ? this.deviceEditor(b, set) : nothing}
       ${this.pinParamEditor(b, net, set)}
@@ -2148,6 +2130,7 @@ export class FbdCanvas extends LitElement {
         )}
         <button
           class="chip-btn"
+          title="append an input pin to the ST block"
           @click=${() =>
             set((x) => {
               (x.pins ??= []).push({

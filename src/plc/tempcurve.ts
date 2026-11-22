@@ -468,16 +468,16 @@ export class TempCurve extends LitElement {
                     />
                   </td>
                   <td class="curve-ops">
-                    <button class="chip-btn" @click=${() => this.moveSeg(i, -1)}>↑</button>
-                    <button class="chip-btn" @click=${() => this.moveSeg(i, 1)}>↓</button>
-                    <button class="chip-btn" @click=${() => this.delSeg(i)}>✕</button>
+                    <button class="chip-btn" title="move this segment earlier" @click=${() => this.moveSeg(i, -1)}>↑</button>
+                    <button class="chip-btn" title="move this segment later" @click=${() => this.moveSeg(i, 1)}>↓</button>
+                    <button class="chip-btn" title="delete this segment" @click=${() => this.delSeg(i)}>✕</button>
                   </td>
                 </tr>
               `,
             )}
           </tbody>
         </table>
-        <button class="chip-btn" @click=${this.addSeg}>+ segment</button>
+        <button class="chip-btn" title="append a new profile segment" @click=${this.addSeg}>+ segment</button>
         <span class="plc-dim">
           dwell: p1=s, soak-band holds the timer · ramp: p1=°/s · rampt: p1=s · loop: tgt=seg,
           p1=count · drag points to retune</span

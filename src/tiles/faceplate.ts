@@ -301,6 +301,7 @@ export class TileFaceplate extends TileElement {
     const disabled = !this.writable(r);
     return html`<button
       class="fp-btn ${role === 'fault' ? 'danger' : ''}"
+      title="${label} — press and hold to assert, release to clear"
       ?disabled=${disabled}
       @pointerdown=${(e: Event) => { e.preventDefault(); this.push(r, true); }}
       @pointerup=${() => this.push(r, false)}
@@ -322,7 +323,7 @@ export class TileFaceplate extends TileElement {
             if (Number.isFinite(v)) void this.write(r, v);
           }
         }} />
-      <button class="fp-btn" ?disabled=${disabled}
+      <button class="fp-btn" title="write the entered value to ${ROLE_LABELS[roleName] ?? roleName}" ?disabled=${disabled}
         @click=${(e: Event) => {
           const inp = (e.target as HTMLElement).closest('.fp-sp')?.querySelector('input');
           const v = Number(inp?.value);

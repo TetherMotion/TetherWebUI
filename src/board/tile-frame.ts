@@ -323,9 +323,10 @@ export class TileFrame extends TileElement {
               </datalist>
               ${spec.fields.map((f) => this.renderField(f))}
               <div class="cfg-actions">
-                <button type="submit" class="primary">Apply</button>
+                <button type="submit" class="primary" title="save the edited tile configuration">Apply</button>
                 <button
                   type="button"
+                  title="close the configuration form without saving"
                   @click=${() => {
                     this.configOpen = false;
                     this.requestUpdate();

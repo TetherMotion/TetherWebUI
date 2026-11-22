@@ -151,13 +151,13 @@ export class TileProfile extends TileElement {
   private cmdButton(m: 'RUN' | 'HOLD', label: string): TemplateResult {
     const on = this.bit(m);
     const disabled = !this.writable(m);
-    return html`<button class="fp-btn ${on ? 'on' : ''}" ?disabled=${disabled}
+    return html`<button class="fp-btn ${on ? 'on' : ''}" title="toggle ${label} on the profile" ?disabled=${disabled}
       @click=${() => this.toggle(m)}>${label}</button>`;
   }
 
   private resetButton(): TemplateResult {
     const disabled = !this.writable('RESET');
-    return html`<button class="fp-btn danger" ?disabled=${disabled}
+    return html`<button class="fp-btn danger" title="momentary reset — asserted only while pressed" ?disabled=${disabled}
       @pointerdown=${(e: Event) => { e.preventDefault(); this.momentary('RESET', true); }}
       @pointerup=${() => this.momentary('RESET', false)}
       @pointerleave=${() => this.momentary('RESET', false)}>RESET</button>`;

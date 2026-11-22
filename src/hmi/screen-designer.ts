@@ -209,7 +209,7 @@ export class HmiScreenDesigner extends LitElement {
         <div class="hmi-d-left">
           <div class="hmi-d-palette">
             ${SCREEN_KINDS.map((kd) => html`
-              <button class="chip-btn" @click=${() => this.addWidget(kd.kind)}>${kd.label}</button>
+              <button class="chip-btn" title=${`add a ${kd.label} widget to the screen`} @click=${() => this.addWidget(kd.kind)}>${kd.label}</button>
             `)}
           </div>
           <div class="hmi-d-outer" style="height:${(s.h * k).toFixed(1)}px">
@@ -244,7 +244,7 @@ export class HmiScreenDesigner extends LitElement {
     const showRange = w.kind === 'gauge' || w.kind === 'bar' || w.kind === 'digital';
     return html`
       <h4>${SCREEN_KINDS.find((kd) => kd.kind === w.kind)?.label ?? w.kind}
-        <button class="chip-btn" @click=${() => this.delWidget(w.id)}>delete</button></h4>
+        <button class="chip-btn" title="delete the selected widget from the screen" @click=${() => this.delWidget(w.id)}>delete</button></h4>
       <label>Label<input .value=${w.label ?? ''}
         @change=${(e: Event) => this.setProp('label', (e.target as HTMLInputElement).value)} /></label>
       ${w.kind === 'text' ? html`

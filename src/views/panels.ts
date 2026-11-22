@@ -190,8 +190,8 @@ function renderWidget(widget: AppProfileWidget, model: PanelsModel): string {
       return `<div class="${cls} widget-control">${label}
         <span class="widget-axis">${esc(axisLabel)}</span>${valuePart}
         <div class="jog-pair">
-          <button type="button" class="jog-btn" data-jog-axis="${axis}" data-jog-dir="-1" aria-label="Jog ${esc(widget.label)} negative" ${enabled ? '' : 'disabled'}>−</button>
-          <button type="button" class="jog-btn" data-jog-axis="${axis}" data-jog-dir="1" aria-label="Jog ${esc(widget.label)} positive" ${enabled ? '' : 'disabled'}>+</button>
+          <button type="button" class="jog-btn" data-jog-axis="${axis}" data-jog-dir="-1" aria-label="Jog ${esc(widget.label)} negative" title="hold to jog ${esc(widget.label)} in the negative direction" ${enabled ? '' : 'disabled'}>−</button>
+          <button type="button" class="jog-btn" data-jog-axis="${axis}" data-jog-dir="1" aria-label="Jog ${esc(widget.label)} positive" title="hold to jog ${esc(widget.label)} in the positive direction" ${enabled ? '' : 'disabled'}>+</button>
         </div></div>`;
     }
     case 'command': {
@@ -200,13 +200,13 @@ function renderWidget(widget: AppProfileWidget, model: PanelsModel): string {
       const actionLabel = ACTION_LABELS[action] ?? `Action ${action}`;
       const axis = esc(widget.axis ?? '');
       return `<div class="${cls} widget-control">${label}
-        <button type="button" class="secondary" data-widget-cmd-action="${action}" data-widget-cmd-axis="${axis}" ${enabled ? '' : 'disabled'}>${esc(widget.label || actionLabel)}</button>
+        <button type="button" class="secondary" data-widget-cmd-action="${action}" data-widget-cmd-axis="${axis}" title="dispatch ${esc(actionLabel)} to axis ${esc(widget.axis ?? '')}" ${enabled ? '' : 'disabled'}>${esc(widget.label || actionLabel)}</button>
         ${value !== undefined ? `<span class="widget-state">${esc(shown)}</span>` : ''}</div>`;
     }
     case 'button': {
       const enabled = model.controls?.canCommand ?? false;
       return `<div class="${cls} widget-control">${label}
-        <button type="button" class="secondary" data-widget-fn="${esc(widget.fn!)}" ${enabled ? '' : 'disabled'}>${esc(widget.label)}</button></div>`;
+        <button type="button" class="secondary" data-widget-fn="${esc(widget.fn!)}" title="invoke the ${esc(widget.fn!)} function on the machine" ${enabled ? '' : 'disabled'}>${esc(widget.label)}</button></div>`;
     }
     default:
       return `<div class="${cls}">${label}<span class="widget-value">${shown}${unit}</span></div>`;

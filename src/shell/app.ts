@@ -419,6 +419,17 @@ export class TetherShell extends TileElement {
       <span class="conn-dot ${this.connState()}"></span>
       <strong class="machine-name">${machine}</strong>
       <span class="status-item">${this.connLabel()}</span>
+      ${
+        this.plcState
+          ? html`<button
+              class="status-item ghost plc-item"
+              title=${`project & workspace — ${this.plcState.projectRoot ?? 'browser-local (no backend project)'} — click to select or create`}
+              @click=${() => this.ide()?.openProjectPicker()}
+            >
+              ${icon('folder')} ${this.plcState.project}
+            </button>`
+          : nothing
+      }
       <span class="status-item">${lease}</span>
       ${age !== undefined ? html`<span class="status-item">data ${Math.round(age / 100) / 10}s</span>` : nothing}
       ${this.plcStripItems()}
@@ -426,6 +437,7 @@ export class TetherShell extends TileElement {
         alarms
           ? html`<button
               class="alarm-badge"
+              title="open the alarms drawer"
               @click=${() => {
                 this.drawer = 'alarms';
                 this.requestUpdate();
@@ -462,13 +474,6 @@ export class TetherShell extends TileElement {
       if (ide) fn(ide);
     };
     return html`
-      <button
-        class="status-item ghost plc-item"
-        title="PLC project — Program"
-        @click=${go((ide) => ide.navigate('program', 'explorer'))}
-      >
-        ${icon('plug-zap')} ${s.project}
-      </button>
       ${
         s.runState
           ? html`<button
@@ -577,6 +582,7 @@ export class TetherShell extends TileElement {
         (b) =>
           html`<button
             class="board-tab${b.id === this.activeId ? ' active' : ''}"
+            title="switch to the ${b.title} board"
             @click=${() => {
               this.activeId = b.id;
               this.editing = false;
@@ -608,11 +614,12 @@ export class TetherShell extends TileElement {
           ? html`<span class="board-actions">
               ${
                 board.source === 'profile'
-                  ? html`<button class="chip-btn" @click=${() => this.cloneBoard(board)}>
+                  ? html`<button class="chip-btn" title="clone this profile board into an editable copy" @click=${() => this.cloneBoard(board)}>
                       Clone to editable
                     </button>`
                   : html`<button
                         class="chip-btn"
+                        title="export this board as JSON"
                         @click=${() => {
                           this.exportBoard(board);
                         }}
@@ -654,6 +661,7 @@ export class TetherShell extends TileElement {
                 editable
                   ? html`<button
                       class="chip-btn${this.editing ? ' active' : ''}"
+                      title="toggle board edit mode — add, move and remove tiles"
                       @click=${() => {
                         this.editing = !this.editing;
                         this.galleryOpen = false;
@@ -687,9 +695,20 @@ export class TetherShell extends TileElement {
             ${icon(a.icon)}<span class="rail-act-label">${a.label}</span>
           </button>`,
       )}
+      <button
+        class="rail-btn rail-act${this.plcState?.tab === '__devices' && this.activity === 'program' ? ' active' : ''}"
+        title="Devices — bus terminals, entities, catalogs"
+        @click=${() => {
+          this.activity = 'program';
+          this.ide()?.navigate('program', 'devices');
+          this.requestUpdate();
+        }}
+      >
+        ${icon('cpu')}<span class="rail-act-label">Devices</span>
+      </button>
       <div class="rail-sep"></div>
       <button
-        class="rail-btn${this.drawer === 'alarms' ? ' active' : ''}"
+        class="rail-btn rail-act${this.drawer === 'alarms' ? ' active' : ''}"
         title="Alarms"
         @click=${() => {
           this.drawer = this.drawer === 'alarms' ? undefined : 'alarms';
@@ -699,27 +718,28 @@ export class TetherShell extends TileElement {
         ${icon('triangle-alert')}<span
           class="rail-dot${(this.hub?.activeAlarmCount() ?? 0) ? ' on' : ''}"
         ></span>
+        <span class="rail-act-label">Alarms</span>
       </button>
       <button
-        class="rail-btn${this.drawer === 'events' ? ' active' : ''}"
+        class="rail-btn rail-act${this.drawer === 'events' ? ' active' : ''}"
         title="Events"
         @click=${() => {
           this.drawer = this.drawer === 'events' ? undefined : 'events';
           this.requestUpdate();
         }}
       >
-        ${icon('list')}
+        ${icon('list')}<span class="rail-act-label">Events</span>
       </button>
       <div class="spacer"></div>
       <button
-        class="rail-btn"
+        class="rail-btn rail-act"
         title="Connection settings"
         @click=${() => {
           this.overlay = this.overlay === 'connect' ? undefined : 'connect';
           this.requestUpdate();
         }}
       >
-        ${icon('plug-zap')}
+        ${icon('plug-zap')}<span class="rail-act-label">Connect</span>
       </button>
     </aside>`;
   }
@@ -732,6 +752,7 @@ export class TetherShell extends TileElement {
         <strong>Add tile</strong>
         <button
           class="icon-btn"
+          title="close the tile gallery"
           @click=${() => {
             this.galleryOpen = false;
             this.requestUpdate();
@@ -774,6 +795,7 @@ export class TetherShell extends TileElement {
         <strong>${this.drawer === 'alarms' ? 'Alarms' : 'Events'}</strong>
         <button
           class="icon-btn"
+          title="close the drawer"
           @click=${() => {
             this.drawer = undefined;
             this.requestUpdate();
@@ -834,6 +856,7 @@ export class TetherShell extends TileElement {
           <strong>New board</strong>
           <button
             class="icon-btn"
+            title="close the board picker"
             @click=${() => {
               this.boardPickerOpen = false;
               this.requestUpdate();
@@ -846,6 +869,7 @@ export class TetherShell extends TileElement {
           ${BOARD_TEMPLATES.map(
             (t) => html`<button
               class="bp-card"
+              title="create a board from the ${t.title} template"
               @click=${() => this.createBoard(t.id)}
             >
               <strong>${t.title}</strong>
@@ -854,6 +878,7 @@ export class TetherShell extends TileElement {
           )}
           <button
             class="bp-card"
+            title="generate a board from the live plc.* catalog — widgets bind themselves"
             @click=${() => this.createBoard('auto-plc')}
           >
             <strong>Auto (PLC)</strong>
@@ -882,6 +907,7 @@ export class TetherShell extends TileElement {
           <strong>Settings</strong>
           <button
             class="icon-btn"
+            title="close settings"
             @click=${() => {
               this.overlay = undefined;
               this.requestUpdate();
@@ -911,6 +937,7 @@ export class TetherShell extends TileElement {
           /></label>
           <button
             class="primary"
+            title="save poll/stream intervals and restart data polling"
             @click=${() => {
               const hub = this.hub;
               if (!hub) return;
@@ -927,6 +954,7 @@ export class TetherShell extends TileElement {
           <hr />
           <button
             class="secondary"
+            title="build a redacted JSON snapshot of machine state for support"
             @click=${() => {
               const hub = this.hub;
               if (!hub) return;
@@ -964,6 +992,7 @@ export class TetherShell extends TileElement {
             this.bundle
               ? html`<button
                   class="secondary"
+                  title="download the support bundle JSON"
                   @click=${() => {
                     const blob = new Blob([JSON.stringify(this.bundle, null, 2)], {
                       type: 'application/json',
@@ -1000,6 +1029,7 @@ export class TetherShell extends TileElement {
           <strong>Connection</strong>
           <button
             class="icon-btn"
+            title="close connection settings"
             @click=${() => {
               this.overlay = undefined;
               this.requestUpdate();
@@ -1035,11 +1065,12 @@ export class TetherShell extends TileElement {
               @keydown=${(e: KeyboardEvent) => e.key === 'Enter' && this.doConnect()}
           /></label>
           <div class="row">
-            <button id="conn-connect" class="primary" @click=${() => this.doConnect()}>
+            <button id="conn-connect" class="primary" title="connect to the server at the URL and token above" @click=${() => this.doConnect()}>
               Connect
             </button>
             <button
               class="secondary"
+              title="disconnect from the server"
               ?disabled=${!this.hub?.connected}
               @click=${() => this.hub?.disconnect()}
             >
@@ -1145,6 +1176,7 @@ export class TetherShell extends TileElement {
               operate && this.editing && board?.source !== 'profile'
                 ? html`<button
                     class="gallery-fab"
+                    title="open the tile gallery"
                     @click=${() => {
                       this.galleryOpen = !this.galleryOpen;
                       this.requestUpdate();

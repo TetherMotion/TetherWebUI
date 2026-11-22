@@ -118,9 +118,9 @@ function renderCapture(model: CommissioningModel): string {
         <label>Post <input id="capture-trigger-post" type="number" min="0" value="100"></label>
       </fieldset>
       <div class="trend-pane-tools">
-        <button type="submit" ${model.busy ? 'disabled' : ''}>Apply capture configuration</button>
-        <button type="button" id="capture-cancel" class="secondary" ${model.busy || !s?.enabled ? 'disabled' : ''}>Cancel &amp; discard</button>
-        <button type="button" id="capture-export" class="secondary" ${model.busy || !s || s.recordsAvailable === 0n ? 'disabled' : ''}>Export records</button>
+        <button type="submit" title="save the capture name, sample rate and trigger configuration" ${model.busy ? 'disabled' : ''}>Apply capture configuration</button>
+        <button type="button" id="capture-cancel" class="secondary" title="stop recording and discard this capture" ${model.busy || !s?.enabled ? 'disabled' : ''}>Cancel &amp; discard</button>
+        <button type="button" id="capture-export" class="secondary" title="download the recorded samples in paginated chunks" ${model.busy || !s || s.recordsAvailable === 0n ? 'disabled' : ''}>Export records</button>
       </div>
     </form>`;
 }
@@ -148,11 +148,11 @@ function renderConfig(model: CommissioningModel): string {
       <label>Parameter <select id="config-param" ${model.writableParams.length ? '' : 'disabled'}>${options || '<option value="">No writable parameters</option>'}</select></label>
       <label>Value (hex bytes, little-endian) <input id="config-value" placeholder="2a 00 00 00" pattern="[0-9a-fA-F ]+" required></label>
       <div class="config-actions">
-        <button type="submit" ${model.busy || !model.writableParams.length ? 'disabled' : ''}>Stage write</button>
-        <button type="button" id="config-validate" ${model.busy || t?.state !== ConfigTxnState.Staged ? 'disabled' : ''}>Validate</button>
-        <button type="button" id="config-commit" ${model.busy || !canCommit ? 'disabled' : ''}>Commit</button>
-        <button type="button" id="config-rollback" class="secondary" ${model.busy || !t || t.state === ConfigTxnState.Idle ? 'disabled' : ''}>Roll back</button>
-        <button type="button" id="config-refresh" class="secondary" ${model.busy ? 'disabled' : ''}>Refresh status</button>
+        <button type="submit" title="stage the parameter write — nothing is applied yet" ${model.busy || !model.writableParams.length ? 'disabled' : ''}>Stage write</button>
+        <button type="button" id="config-validate" title="server-side validation of the staged transaction" ${model.busy || t?.state !== ConfigTxnState.Staged ? 'disabled' : ''}>Validate</button>
+        <button type="button" id="config-commit" title="atomically commit the validated transaction (requires technician role)" ${model.busy || !canCommit ? 'disabled' : ''}>Commit</button>
+        <button type="button" id="config-rollback" class="secondary" title="discard the staged transaction without applying it" ${model.busy || !t || t.state === ConfigTxnState.Idle ? 'disabled' : ''}>Roll back</button>
+        <button type="button" id="config-refresh" class="secondary" title="re-read the transaction status from the server" ${model.busy ? 'disabled' : ''}>Refresh status</button>
       </div>
     </form>`;
 }
@@ -200,8 +200,8 @@ function renderSdo(model: CommissioningModel): string {
         <span>New: <code>${hexBytes(pending.data)}</code></span>
         ${pending.error ? `<span>${esc(pending.error)}</span>` : ''}
         <div class="config-actions">
-          <button type="button" id="sdo-confirm" ${model.busy ? 'disabled' : ''}>Confirm write</button>
-          <button type="button" id="sdo-cancel" ${model.busy ? 'disabled' : ''}>Cancel</button>
+          <button type="button" id="sdo-confirm" title="execute the previewed SDO write" ${model.busy ? 'disabled' : ''}>Confirm write</button>
+          <button type="button" id="sdo-cancel" title="discard the previewed SDO write" ${model.busy ? 'disabled' : ''}>Cancel</button>
         </div>
       </div>`
     : '';
@@ -218,7 +218,7 @@ function renderSdo(model: CommissioningModel): string {
     <form id="sdo-form" class="config-form">
       <label>Slave <input id="sdo-slave" type="number" min="0" max="65535" value="${model.sdoSlave}" required></label>
       <div class="config-actions">
-        <button type="button" id="sdo-list" ${model.busy ? 'disabled' : ''}>Enumerate known objects</button>
+        <button type="button" id="sdo-list" title="enumerate the CoE object dictionary for this slave" ${model.busy ? 'disabled' : ''}>Enumerate known objects</button>
       </div>
     </form>
     ${table}
@@ -228,8 +228,8 @@ function renderSdo(model: CommissioningModel): string {
       <label>Max bytes <input id="sdo-max-bytes" type="number" min="1" max="512" value="${esc(model.sdoMaxBytes ?? '256')}"></label>
       <label>Write data (hex bytes) <input id="sdo-data" placeholder="leave empty for read" pattern="[0-9a-fA-F ]*" value="${esc(model.sdoData ?? '')}"></label>
       <div class="config-actions">
-        <button type="button" id="sdo-read" ${model.busy ? 'disabled' : ''}>Read</button>
-        <button type="button" id="sdo-write" ${model.busy ? 'disabled' : ''}>Preview write</button>
+        <button type="button" id="sdo-read" title="read the SDO at the entered index/subindex" ${model.busy ? 'disabled' : ''}>Read</button>
+        <button type="button" id="sdo-write" title="preview the SDO write before executing it" ${model.busy ? 'disabled' : ''}>Preview write</button>
       </div>
     </form>
     ${preview}
@@ -295,10 +295,10 @@ function renderBaseline(model: CommissioningModel): string {
   return `
     <p class="event-history-note">Export downloads every writable parameter as a baseline file. Diff compares a loaded baseline against live values. Import stages the baseline as a transaction — validate + commit still apply; the call is audited.</p>
     <div class="config-actions">
-      <button type="button" id="baseline-export" ${model.busy ? 'disabled' : ''}>Export live baseline</button>
+      <button type="button" id="baseline-export" title="download every writable parameter as a baseline JSON file" ${model.busy ? 'disabled' : ''}>Export live baseline</button>
       <label class="btn-secondary baseline-load">Load baseline file <input id="baseline-file" type="file" accept=".json" hidden></label>
-      <button type="button" id="baseline-diff" class="secondary" ${model.busy || !model.baseline ? 'disabled' : ''}>Diff vs live</button>
-      <button type="button" id="baseline-import" ${model.busy || !model.baseline ? 'disabled' : ''}>Import &amp; stage</button>
+      <button type="button" id="baseline-diff" class="secondary" title="compare the loaded baseline against live values" ${model.busy || !model.baseline ? 'disabled' : ''}>Diff vs live</button>
+      <button type="button" id="baseline-import" class="secondary" title="stage the baseline as a configuration transaction — validate + commit still apply" ${model.busy || !model.baseline ? 'disabled' : ''}>Import &amp; stage</button>
     </div>
     <p class="form-result" role="status">${esc(loaded)}${model.baselineResult ? ` · ${esc(model.baselineResult)}` : ''}</p>
     ${diff}`;
@@ -327,8 +327,8 @@ function renderChecklist(model: CommissioningModel): string {
     <p class="event-history-note">Items are evaluated live by the server. The acceptance report is only generated when every required item passes and is journaled as evidence.</p>
     ${body}
     <div class="config-actions">
-      <button type="button" id="checklist-refresh" class="secondary" ${model.busy ? 'disabled' : ''}>Re-evaluate</button>
-      <button type="button" id="checklist-report" ${model.busy ? 'disabled' : ''}>Generate acceptance report</button>
+      <button type="button" id="checklist-refresh" class="secondary" title="re-evaluate the checklist items against live values" ${model.busy ? 'disabled' : ''}>Re-evaluate</button>
+      <button type="button" id="checklist-report" title="generate the acceptance report — only when every required item passes" ${model.busy ? 'disabled' : ''}>Generate acceptance report</button>
     </div>
     <p class="form-result" role="status">${esc(model.checklistResult ?? '')}</p>`;
 }

@@ -28,6 +28,7 @@ export class TetherValueCard extends HTMLElement {
     name.textContent = this.entry.name;
     const button = document.createElement('button');
     button.className = 'read-button';
+    button.title = 'read this entry’s current value once';
     button.textContent = 'Read';
     button.addEventListener('click', () => void this.read());
     head.append(name, button);

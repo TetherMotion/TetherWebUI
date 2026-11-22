@@ -34,6 +34,15 @@ function fmtLive(v: unknown): string {
 
 type Tool = 'select' | 'no' | 'nc' | 'coil' | 'box' | 'wire';
 
+const TOOL_TITLES: Record<Tool, string> = {
+  select: 'select/move elements — drag to move, click to select',
+  no: 'place a normally-open contact',
+  nc: 'place a normally-closed contact',
+  coil: 'place an output coil',
+  box: 'place a function block',
+  wire: 'start a wire — click destinations to connect',
+};
+
 interface Drag {
   anchor: number;
   starts: Map<number, { x: number; y: number }>;
@@ -920,6 +929,7 @@ export class LdCanvas extends LitElement {
         ${(['select', 'no', 'nc', 'coil', 'box', 'wire'] as Tool[]).map(
           (t) => html`<button
             class="chip-btn ${this.tool === t ? 'active' : ''}"
+            title=${TOOL_TITLES[t]}
             @click=${() => { this.tool = t; if (t !== 'wire') this.wireSrc = 0; }}
           >${{ select: 'select', no: 'NO | |', nc: 'NC |/|', coil: 'coil -( )-', box: 'box', wire: 'wire →' }[t]}</button>`,
         )}

@@ -203,6 +203,7 @@ export class TileJog extends TileElement {
               data-jog-axis="${axis.stableId}"
               data-jog-dir="-1"
               aria-label="Jog ${axis.name} negative (hold)"
+              title="hold to jog ${axis.name} in the negative direction"
               ?disabled=${!canJog || axis.stale}
             >
               ${icon('minus')}
@@ -213,6 +214,7 @@ export class TileJog extends TileElement {
               data-jog-axis="${axis.stableId}"
               data-jog-dir="1"
               aria-label="Jog ${axis.name} positive (hold)"
+              title="hold to jog ${axis.name} in the positive direction"
               ?disabled=${!canJog || axis.stale}
             >
               ${icon('plus')}
@@ -265,6 +267,7 @@ export class TileJogPair extends TileElement {
           data-jog-axis="${axisId}"
           data-jog-dir="-1"
           aria-label="Jog ${label} negative"
+          title="hold to jog ${label} in the negative direction"
           ?disabled=${!enabled}
         >
           ${icon('minus')}
@@ -275,6 +278,7 @@ export class TileJogPair extends TileElement {
           data-jog-axis="${axisId}"
           data-jog-dir="1"
           aria-label="Jog ${label} positive"
+          title="hold to jog ${label} in the positive direction"
           ?disabled=${!enabled}
         >
           ${icon('plus')}
@@ -300,6 +304,7 @@ export class TileCommandButton extends TileElement {
       <button
         type="button"
         class="secondary"
+        title="dispatch ${label} to axis ${axisId}"
         ?disabled=${!enabled}
         @click=${() => void this.hub?.dispatchAction(action, axisId)}
       >
@@ -323,6 +328,7 @@ export class TileFnButton extends TileElement {
       <button
         type="button"
         class="secondary"
+        title="invoke the ${fn} function on the machine"
         ?disabled=${!this.hub?.connected || !advertised}
         @click=${() => void this.hub?.invokeFunction(fn)}
       >

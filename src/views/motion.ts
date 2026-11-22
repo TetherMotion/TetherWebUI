@@ -97,9 +97,9 @@ export function renderAuthorityPanel(host: HTMLElement, model: MotionModel): voi
     <div class="authority-row">
       <label>Scope <input id="authority-scope" value="${esc(lease?.scope ?? 'machine')}" ${lease ? 'disabled' : ''}></label>
       <label>Lease <input id="authority-lease-ms" type="number" min="1000" max="30000" step="1000" value="10000"> ms</label>
-      <button data-authority="acquire" ${model.busy ? 'disabled' : ''}>Acquire</button>
-      <button data-authority="renew" ${!lease || model.busy ? 'disabled' : ''}>Renew</button>
-      <button data-authority="release" class="secondary" ${!lease || model.busy ? 'disabled' : ''}>Release</button>
+      <button data-authority="acquire" title="acquire the motion lease for the entered scope" ${model.busy ? 'disabled' : ''}>Acquire</button>
+      <button data-authority="renew" title="extend the held lease by the configured duration" ${!lease || model.busy ? 'disabled' : ''}>Renew</button>
+      <button data-authority="release" class="secondary" title="release the motion lease and cancel in-flight operations" ${!lease || model.busy ? 'disabled' : ''}>Release</button>
       <button data-authority="takeover" class="secondary" ${model.busy ? 'disabled' : ''}
         title="Force-take the scope lease from its current owner. Requires a controls-engineer or administrator role; the eviction is audited.">Take over</button>
     </div>
@@ -132,9 +132,11 @@ export function renderCommandPanel(host: HTMLElement, model: MotionModel): void 
             <span class="jog-axis">${esc(axis.name)}</span>
             <button type="button" class="jog-btn" data-jog-axis="${esc(axis.stableId)}" data-jog-dir="-1"
               aria-label="Jog ${esc(axis.name)} negative (hold)"
+              title="hold to jog ${esc(axis.name)} in the negative direction"
               ${!model.lease || axis.stale ? 'disabled' : ''}>−</button>
             <button type="button" class="jog-btn" data-jog-axis="${esc(axis.stableId)}" data-jog-dir="1"
               aria-label="Jog ${esc(axis.name)} positive (hold)"
+              title="hold to jog ${esc(axis.name)} in the positive direction"
               ${!model.lease || axis.stale ? 'disabled' : ''}>+</button>
           </div>`,
           )
@@ -162,7 +164,7 @@ export function renderCommandPanel(host: HTMLElement, model: MotionModel): void 
     <fieldset class="command-targets"><legend>Targets (state generation is sent with the command)</legend>${axes || '<p class="widget-empty">No axes discovered</p>'}</fieldset>
     ${jogPad}
     <div class="authority-row">
-      <button id="command-submit" ${!model.lease || model.busy ? 'disabled' : ''}>Dispatch command</button>
+      <button id="command-submit" title="dispatch the selected action to the checked target axes" ${!model.lease || model.busy ? 'disabled' : ''}>Dispatch command</button>
       ${!model.lease ? '<span class="widget-empty">Acquire the motion lease first.</span>' : ''}
     </div>
     ${receiptHtml}`;
@@ -243,10 +245,13 @@ export function renderHomingPanel(
         <span class="homing-step">${step}</span>
         <span class="homing-actions">
           <button type="button" class="secondary" data-home-axis="${esc(axis.stableId)}" data-home-step="prepare"
+            title="run the validated prepare step for ${esc(axis.name)} homing"
             ${!canCommand || !eligible ? 'disabled' : ''}>Prepare</button>
           <button type="button" data-home-axis="${esc(axis.stableId)}" data-home-step="start"
+            title="start the homing sequence on ${esc(axis.name)} (requires Prepare first)"
             ${!canCommand || !eligible || (stage !== 'prepared' && !running) ? 'disabled' : ''}>Start homing</button>
           <button type="button" class="secondary" data-home-axis="${esc(axis.stableId)}" data-home-step="cancel"
+            title="cancel the in-flight homing operation on ${esc(axis.name)}"
             ${!canCommand || (stage === 'idle' && !running) ? 'disabled' : ''}>Cancel</button>
         </span>
       </div>`;
@@ -378,11 +383,11 @@ export function renderAlarms(tbody: HTMLElement, alarms: AlarmView[], canMutate:
         <td>${esc(alarm.actor || '—')}</td>
         <td>${
           canMutate && alarm.state === 0
-            ? `<button class="secondary" data-alarm-ack="${alarm.alarmId.toString()}">Acknowledge</button>`
+            ? `<button class="secondary" data-alarm-ack="${alarm.alarmId.toString()}" title="acknowledge this alarm (does not clear the cause)">Acknowledge</button>`
             : ''
         }${
           canMutate && alarm.state !== 2
-            ? `<button class="secondary" data-alarm-clear="${alarm.alarmId.toString()}">Clear</button>`
+            ? `<button class="secondary" data-alarm-clear="${alarm.alarmId.toString()}" title="clear this alarm after the underlying condition is resolved">Clear</button>`
             : ''
         }</td>
       </tr>`,

@@ -18,7 +18,7 @@
  *  - nextFreeBase / atCollisions: address allocation + duplicate-AT
  *    warnings for the device wizard and io-map card.
  */
-import type { FbdProject, Pou } from './model';
+import type { FbdProject, Pou, IfaceVar } from './model';
 import {
   parseDeployMap,
   projectIoBindings,
@@ -421,16 +421,33 @@ export function parseBusCatalog(text: string): BusEndpoint[] {
 }
 
 /** one row of the ecpump `.topology` artifact — the discovered
-    terminal view. `tx`/`rx` are PDO byte counts per direction. */
+    terminal view. `tx`/`rx` are PDO byte counts per direction.
+    v2 adds SII identity (`name`/`rev`/`serial`), Tether-catalog
+    channel counts (`di`/`do`/`ai`/`ao`), `coupler_idx` grouping
+    and the `supported` flag for non-catalog slaves. */
 export interface BusSlave {
   i: number;
   part: string;
   key: string;
   coupler?: boolean;
+  coupler_idx?: number;
+  name?: string;
   vendor?: number;
   product?: number;
+  rev?: number;
+  serial?: number;
+  /** digital input channels (v2; count, not PDO bytes) */
+  di?: number;
+  /** digital output channels (v2) */
+  do?: number;
+  /** analog input channels, int16 each (v2) */
+  ai?: number;
+  /** analog output channels, int16 each (v2) */
+  ao?: number;
   tx?: number;
   rx?: number;
+  /** false = on the bus but not in Tether's catalog (v2) */
+  supported?: boolean;
 }
 
 /** Parse the `.topology` JSON ({slaves:[…]}); malformed JSON → []. */
@@ -441,6 +458,205 @@ export function parseBusTopology(text: string): BusSlave[] {
   } catch {
     return [];
   }
+}
+
+/** A physical location on the bus: one EK1100 coupler plus the
+    terminals behind it, in chain order. */
+export interface BusSegment {
+  /** coupler slave, or null for terminals found before any coupler */
+  coupler: BusSlave | null;
+  idx: number;
+  terminals: BusSlave[];
+}
+
+/** Group a discovered chain into coupler segments, preserving wire
+    order — one EK1100 ≈ one physical mounting location. Slaves that
+    are themselves couplers start a segment; everything else appends
+    to the segment opened by the most recent coupler (or to idx 0,
+    "no coupler", when the chain starts mid-segment). */
+export function busSegments(slaves: BusSlave[]): BusSegment[] {
+  const segs: BusSegment[] = [];
+  let cur: BusSegment | null = null;
+  for (const s of slaves) {
+    if (s.coupler) {
+      cur = { coupler: s, idx: s.coupler_idx ?? segs.length + 1, terminals: [] };
+      segs.push(cur);
+    } else {
+      if (!cur) {
+        cur = { coupler: null, idx: 0, terminals: [] };
+        segs.push(cur);
+      }
+      cur.terminals.push(s);
+    }
+  }
+  return segs;
+}
+
+/** Compact channel summary for a terminal row: "4 DI", "8 DO · 4 AI". */
+export function channelSummary(s: BusSlave): string {
+  const bits: string[] = [];
+  if (s.di) bits.push(`${s.di} DI`);
+  if (s.do) bits.push(`${s.do} DO`);
+  if (s.ai) bits.push(`${s.ai} AI`);
+  if (s.ao) bits.push(`${s.ao} AO`);
+  if (!bits.length)
+    return s.coupler ? 'coupler'
+         : s.supported === false ? 'unsupported'
+         : '—';
+  return bits.join(' · ');
+}
+
+/* ------------------------------------------------------------------ */
+/* device-block factory (shared: palette wizard ↔ bus-discovery add)    */
+/* ------------------------------------------------------------------ */
+
+/** One channel group of a device block — the same spec the FBD device
+    wizard edits, extracted so discovery-add uses the identical pin
+    layout. `base` is the region byte the group starts at. */
+export interface DeviceChannelSpec {
+  channel: 'DI' | 'DO' | 'AI' | 'AO';
+  count: number;
+  ty: string;
+  base: number;
+  /** bytes per channel in the image (analog: 2 = EL int16, 4 = REAL). */
+  pitch?: number;
+  prefix?: string;
+}
+
+/** Generate located-var channel pins — DI/DO pack bits at
+    `%IX<base>.<bit>`/`%QX<base>.<bit>` (var_output/var_input),
+    AI/AO land pitch-aligned at `%ID`/`%QD`. */
+export function deviceChannelPins(f: DeviceChannelSpec): IfaceVar[] {
+  const p = f.prefix ?? '';
+  const out: IfaceVar[] = [];
+  const digital = f.channel === 'DI' || f.channel === 'DO';
+  const dir = f.channel === 'DI' || f.channel === 'AI' ? 'var_output' : 'var_input';
+  const region = f.channel === 'DO' || f.channel === 'AO' ? 'Q' : 'I';
+  const width = digital ? 'X' : 'D';
+  const pitch = Math.max(1, f.pitch ?? 4);
+  for (let i = 0; i < f.count; i++) {
+    const name = `${p}${f.channel}${i}`;
+    if (digital) {
+      const byte = f.base + (i >> 3);
+      const bit = i & 7;
+      out.push({ name, kind: dir, type: f.ty, at: `%${region}${width}${byte}.${bit}` });
+    } else {
+      const byte = f.base + i * pitch;
+      out.push({ name, kind: dir, type: f.ty, at: `%${region}${width}${byte}.0` });
+    }
+  }
+  return out;
+}
+
+/** Everything a caller needs to insert a device block for a
+    discovered terminal — pins are auto-allocated into free %I/%Q
+    image ranges, `endpoint` is the live PDO key from the scan. */
+export interface DiscoveredDeviceSpec {
+  /** part number → device block type_ref, e.g. 'EL2008'. */
+  type_ref: string;
+  /** PDO endpoint key from .topology, e.g. 'el2008.c1'. */
+  endpoint: string;
+  comment: string;
+  pins: IfaceVar[];
+}
+
+/** Endpoint keys already claimed by project device blocks — used to
+    suggest fresh occurrence names and diff against the bus. */
+export function projectEndpointKeys(fbd: FbdProject): Set<string> {
+  const s = new Set<string>();
+  for (const pou of fbd.pous)
+    for (const net of pou.networks)
+      for (const b of net.blocks)
+        if (b.kind === 'device' && b.endpoint) s.add(b.endpoint);
+  return s;
+}
+
+/** Build a device-block spec for a supported, non-coupler bus slave.
+    Returns undefined for couplers, unsupported slaves, and terminals
+    with no process image (tx==0 && rx==0). EL convention: digital →
+    BOOL bits, analog → INT channels pitched 2 (int16 counts — scale
+    in logic), matching the TERMINALS catalog and .bus PDO sizes. */
+export function mkDiscoveredDevice(
+  project: { fbd: FbdProject; stSources?: Record<string, string> },
+  s: BusSlave,
+): DiscoveredDeviceSpec | undefined {
+  if (s.coupler || s.supported === false) return undefined;
+  const di = s.di ?? 0, dout = s.do ?? 0;
+  const ai = s.ai ?? 0, ao = s.ao ?? 0;
+  const diB = Math.ceil(di / 8), doB = Math.ceil(dout / 8);
+  const needI = diB + ai * 2, needQ = doB + ao * 2;
+  if (!needI && !needQ) return undefined;
+
+  const bindings = projectIoBindingsEx(project);
+  const baseI = needI ? nextFreeBaseFor(bindings, 'I', needI) : 0;
+  const baseQ = needQ ? nextFreeBaseFor(bindings, 'Q', needQ) : 0;
+
+  const pins: IfaceVar[] = [];
+  /* digital groups sit at the region base; analog groups follow the
+     packed digital bytes in the same region — mirrors the wizard's
+     channel2 layout (EK1110/EK1122 style). */
+  if (di) pins.push(...deviceChannelPins({ channel: 'DI', count: di, ty: 'BOOL', base: baseI }));
+  if (ai) pins.push(...deviceChannelPins({ channel: 'AI', count: ai, ty: 'INT', base: baseI + diB, pitch: 2 }));
+  if (dout) pins.push(...deviceChannelPins({ channel: 'DO', count: dout, ty: 'BOOL', base: baseQ }));
+  if (ao) pins.push(...deviceChannelPins({ channel: 'AO', count: ao, ty: 'INT', base: baseQ + doB, pitch: 2 }));
+
+  const summary = channelSummary(s);
+  return {
+    type_ref: s.part,
+    endpoint: s.key,
+    comment: `${s.part} — ${summary}${s.name ? ` — ${s.name}` : ''}`,
+    pins,
+  };
+}
+
+/** Build a device-block spec from the offline terminal catalog
+    (TERMINALS — virtual EK terminals and EL parts when no bus scan is
+    available). Same pin/auto-AT path as discovery-add; the endpoint is
+    a suggested fleet occurrence name for pdoKey terminals, empty for
+    file-transport ones. */
+export function mkTerminalDevice(
+  project: { fbd: FbdProject; stSources?: Record<string, string> },
+  t: TerminalSpec,
+): DiscoveredDeviceSpec | undefined {
+  const grpBytes = (g: TerminalGroup): number =>
+    g.channel === 'DI' || g.channel === 'DO'
+      ? Math.ceil(g.count / 8)
+      : g.count * Math.max(1, g.pitch);
+  const isI = (g: TerminalGroup) => g.channel === 'DI' || g.channel === 'AI';
+  const needI = t.groups.reduce((n, g) => n + (isI(g) ? grpBytes(g) : 0), 0);
+  const needQ = t.groups.reduce((n, g) => n + (isI(g) ? 0 : grpBytes(g)), 0);
+  if (!needI && !needQ) return undefined;
+
+  const bindings = projectIoBindingsEx(project);
+  const baseI = needI ? nextFreeBaseFor(bindings, 'I', needI) : 0;
+  const baseQ = needQ ? nextFreeBaseFor(bindings, 'Q', needQ) : 0;
+
+  const pins: IfaceVar[] = [];
+  let offI = 0, offQ = 0;
+  for (const g of t.groups) {
+    const base = isI(g) ? baseI + offI : baseQ + offQ;
+    pins.push(
+      ...deviceChannelPins({
+        channel: g.channel,
+        count: g.count,
+        ty: g.ty,
+        base,
+        pitch: g.pitch,
+      }),
+    );
+    if (isI(g)) offI += grpBytes(g);
+    else offQ += grpBytes(g);
+  }
+  const endpoint = t.pdoKey
+    ? suggestEndpoint(t.pdoKey, projectEndpointKeys(project.fbd))
+    : '';
+  const label = t.label.split('—')[1]?.trim();
+  return {
+    type_ref: t.part,
+    endpoint,
+    comment: `${t.part}${label ? ` — ${label}` : ''}`,
+    pins,
+  };
 }
 
 export interface MapViolation { rule: string; detail: string }

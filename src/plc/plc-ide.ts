@@ -47,8 +47,12 @@ import {
 import { byteToOffset, compileProject, CompileDiag, diagsForFile, injectDeployMap, projectSources } from './build';
 import {
   atCollisions,
+  busSegments,
+  channelSummary,
   endpointCollisions,
   generateDeployMap,
+  mkDiscoveredDevice,
+  mkTerminalDevice,
   serializeDeployMap,
   parseAt,
   parseBusCatalog,
@@ -56,7 +60,11 @@ import {
   projectIoBindingsEx,
   stIoBindings,
   validateDeployMapText,
+  TERMINALS,
+  type BusSlave,
+  type DiscoveredDeviceSpec,
   type MapViolation,
+  type TerminalSpec,
 } from './deploymap';
 import type { StEditor, StNavEvent } from './st-editor';
 import {
@@ -70,8 +78,9 @@ import {
   stVarSections,
 } from './stnav';
 import type { DefTarget, StWorld, Usage } from './stnav';
+import type { PaletteItem } from './palette';
 import { ALARM_OPS, buildAlarmPou, defaultRule, ruleStem, type AlarmRule } from './alarms';
-import { FbdProject, IfaceKind, IfaceVar, Pou, Task, TaskTrigger } from './model';
+import { Block, FbdProject, IfaceKind, IfaceVar, Pou, Task, TaskTrigger, nextNodeId } from './model';
 import { entryWritable, writeScalar } from './mon';
 import {
   codecFromSchema,
@@ -131,6 +140,7 @@ export type Pane =
   | 'st'
   | 'fbd'
   | 'curves'
+  | 'devices'
   // configure
   | 'project'
   | 'target'
@@ -196,9 +206,9 @@ export const SECTIONS: Record<Activity, { id: Pane; label: string }[]> = {
     '__globals' for globals, the source stem for library tabs. */
 interface EditorTab {
   key: string;
-  kind: 'pou' | 'lib' | 'globals';
-  /** pou tabs can switch editor; lib/globals are fixed. */
-  editor: 'fbd' | 'st' | 'curve' | 'tune' | 'lib' | 'globals';
+  kind: 'pou' | 'lib' | 'globals' | 'devices';
+  /** pou tabs can switch editor; lib/globals/devices are fixed. */
+  editor: 'fbd' | 'st' | 'curve' | 'tune' | 'lib' | 'globals' | 'devices';
 }
 
 export type DockTab = 'problems' | 'watch' | 'events';
@@ -207,6 +217,8 @@ export type DockTab = 'problems' | 'watch' | 'events';
     status strip — the strip's only live view into PLC land. */
 export interface PlcStatePayload {
   project: string;
+  /** backend workspace root (.tplc project dir), when one is open. */
+  projectRoot?: string;
   runState?: 'stopped' | 'running' | 'fault';
   epoch?: number;
   version?: string;
@@ -214,6 +226,8 @@ export interface PlcStatePayload {
   alarms: number;
   errors: number;
   pous: { id: string; name: string; kind: string }[];
+  /** active workbench tab key ('__devices', '__globals', pou.id…). */
+  tab?: string;
 }
 
 /** sections that mount board tiles (the old rail overlay tools,
@@ -660,6 +674,9 @@ export class TetherPlcIde extends LitElement {
   private busPeerRecent: string[] = [];
   private busScanBusy = false;
   private busScanLog = '';
+  /** Devices doc — target POU for insertions ('' → auto: last-open POU,
+      else first program). */
+  private devTargetPou = sessionStorage.getItem('plc.devTarget') ?? '';
   /** Debug → Simulate: steps text + last run output. */
   private simSteps = 'step 4  time=1s\n';
   private simBusy = false;
@@ -680,6 +697,10 @@ export class TetherPlcIde extends LitElement {
   private projFiles: pa.ProjectFile[] = [];
   private projRecent: string[] = [];
   private projOpenPath = '';
+  /** project/workspace picker overlay (opened from the shell navbar). */
+  private projPickerOpen = false;
+  private projPickerPath = '';
+  private projPickerName = '';
   private gitEntries: pa.GitStatusEntry[] = [];
   private gitCommits: pa.GitCommit[] = [];
   private gitBranch = '';
@@ -760,11 +781,16 @@ export class TetherPlcIde extends LitElement {
                   <span class="plc-tpl-name">${new Date(h.ts).toLocaleString()}</span>
                   <span class="plc-tpl-desc">${h.label} · id ${h.id}</span>
                   <span style="display:flex;gap:.4rem;margin-top:.3rem">
-                    <button class="chip-btn" @click=${() => this.restoreSnapshot(h.id)}>
+                    <button
+                      class="chip-btn"
+                      title="restore this snapshot as the current project"
+                      @click=${() => this.restoreSnapshot(h.id)}
+                    >
                       restore
                     </button>
                     <button
                       class="chip-btn"
+                      title="delete this snapshot permanently"
                       @click=${() => {
                         deleteSnapshot(h.id);
                         this.requestUpdate();
@@ -781,6 +807,7 @@ export class TetherPlcIde extends LitElement {
           <div class="plc-tpl-foot">
             <button
               class="chip-btn"
+              title="save a snapshot of the current project immediately"
               @click=${() => {
                 pushSnapshot(this.project, 'manual', false);
                 this.requestUpdate();
@@ -790,6 +817,7 @@ export class TetherPlcIde extends LitElement {
             </button>
             <button
               class="chip-btn"
+              title="close project history"
               @click=${() => {
                 this.historyOpen = false;
               }}
@@ -828,7 +856,11 @@ export class TetherPlcIde extends LitElement {
           <div class="plc-tpl-grid">
             ${PROJECT_TEMPLATES.map(
               (t) => html`
-                <button class="plc-tpl-card" @click=${() => this.applyTemplate(t)}>
+                <button
+                  class="plc-tpl-card"
+                  title=${`create the project from the "${t.name}" template`}
+                  @click=${() => this.applyTemplate(t)}
+                >
                   <span class="plc-tpl-name">${t.name}</span>
                   <span class="plc-tpl-desc">${t.desc}</span>
                 </button>
@@ -836,10 +868,18 @@ export class TetherPlcIde extends LitElement {
             )}
           </div>
           <div class="plc-tpl-foot">
-            <button class="chip-btn" @click=${() => this.dismissTplPicker(false)}>
+            <button
+              class="chip-btn"
+              title="dismiss the picker for this session and keep the blank project"
+              @click=${() => this.dismissTplPicker(false)}
+            >
               Blank project
             </button>
-            <button class="chip-btn" @click=${() => this.dismissTplPicker(true)}>
+            <button
+              class="chip-btn"
+              title="dismiss the picker and never show it again"
+              @click=${() => this.dismissTplPicker(true)}
+            >
               Don't show again
             </button>
           </div>
@@ -890,24 +930,7 @@ export class TetherPlcIde extends LitElement {
 
   /** Canvas placed a catalog block — attach its library source. */
   private onNeedLibSrc(e: CustomEvent<{ lib: string; file: string }>): void {
-    const { lib, file } = e.detail;
-    const stem = libStem(file);
-    const have = Object.keys(this.project.stSources).some(
-      (k) => k.toUpperCase() === stem.toUpperCase(),
-    );
-    if (have) return;
-    void fetchLibSrc(this.ctl, lib, file).then((src) => {
-      if (!src) {
-        this.flash(
-          `could not fetch ${file} from the backend — attach the .st source manually (Explorer → Libraries → + .st)`,
-        );
-        return;
-      }
-      this.project.stSources[stem] = src;
-      this.save();
-      this.requestUpdate();
-      this.flash(`attached ${file}`);
-    });
+    void this.attachLibSrc(e.detail.lib, e.detail.file);
   }
 
   disconnectedCallback(): void {
@@ -1399,26 +1422,33 @@ export class TetherPlcIde extends LitElement {
           <span class="plc-brand">TetherPLC</span>
           <span class="plc-proj">${fbd.project}</span>
           <span class="spacer"></span>
-          <button class="chip-btn" @click=${this.onImport}>Import…</button>
+          <button class="chip-btn" title="import a project file (.fbd.json / ST sources)" @click=${this.onImport}>Import…</button>
           <button
             class="chip-btn"
+            title="open the project template picker"
             @click=${() => {
               this.tplPicker = true;
             }}
           >
             Templates…
           </button>
-          <button class="chip-btn" @click=${this.onExport}>Export .fbd.json</button>
+          <button class="chip-btn" title="download the project as .fbd.json" @click=${this.onExport}>Export .fbd.json</button>
           <button
             class="chip-btn"
+            title="open project snapshot history — restore or delete autosaved states"
             @click=${() => {
               this.historyOpen = true;
             }}
           >
             History
           </button>
-          <button class="chip-btn" @click=${this.onExportXml}>Export .xml</button>
-          <button class="chip-btn" ?disabled=${this.compiling} @click=${() => void this.onCheck()}>
+          <button class="chip-btn" title="export the project as PLCopen XML" @click=${this.onExportXml}>Export .xml</button>
+          <button
+            class="chip-btn"
+            title="compile-check the project and refresh the Problems dock"
+            ?disabled=${this.compiling}
+            @click=${() => void this.onCheck()}
+          >
             ${this.compiling ? 'checking…' : 'check'}
           </button>
           ${this.status ? html`<span class="plc-status">${this.status}</span>` : nothing}
@@ -1431,6 +1461,7 @@ export class TetherPlcIde extends LitElement {
                   (p) => html`
                     <button
                       class="plc-nav-btn ${this.pane === p.id ? 'active' : ''}"
+                      title=${`open the ${p.label} section`}
                       @click=${() => {
                         this.flushStEditors();
                         this.pane = p.id;
@@ -1451,6 +1482,7 @@ export class TetherPlcIde extends LitElement {
         }
         ${this.dock()} ${this.tplPicker ? this.templatePicker() : nothing}
         ${this.historyOpen ? this.historyDialog() : nothing}
+        ${this.projPickerOpen ? this.projectPicker() : nothing}
       </div>
     `;
   }
@@ -1461,7 +1493,13 @@ export class TetherPlcIde extends LitElement {
       library source stem; `editor`: which editor the tab shows. */
   private openTab(key: string, editor: EditorTab['editor']): void {
     const kind: EditorTab['kind'] =
-      key === '__globals' ? 'globals' : editor === 'lib' ? 'lib' : 'pou';
+      key === '__globals'
+        ? 'globals'
+        : key === '__devices'
+          ? 'devices'
+          : editor === 'lib'
+            ? 'lib'
+            : 'pou';
     let tab = this.tabs.find((t) => t.key === key);
     if (!tab) {
       tab = { key, kind, editor };
@@ -1481,6 +1519,9 @@ export class TetherPlcIde extends LitElement {
     } else if (tab.kind === 'lib') {
       this.selLib = tab.key;
       this.selPou = '';
+    } else if (tab.kind === 'devices') {
+      this.selPou = '__devices';
+      this.selLib = undefined;
     } else {
       this.selPou = '__globals';
       this.selLib = undefined;
@@ -1532,10 +1573,13 @@ export class TetherPlcIde extends LitElement {
     const label =
       t.kind === 'globals'
         ? 'globals'
-        : t.kind === 'lib'
-          ? `${t.key}.st`
-          : (this.project.fbd.pous.find((p) => p.id === t.key)?.name ?? t.key);
+        : t.kind === 'devices'
+          ? 'devices'
+          : t.kind === 'lib'
+            ? `${t.key}.st`
+            : (this.project.fbd.pous.find((p) => p.id === t.key)?.name ?? t.key);
     const kind =
+      t.editor === 'devices' ? 'DEV' :
       t.editor === 'fbd' ? 'FBD' : t.editor === 'st' || t.editor === 'lib' ? 'ST'
       : t.editor === 'curve' ? 'Curve' : t.editor === 'tune' ? 'Tune' : 'VAR';
     return html`<span
@@ -1568,6 +1612,7 @@ export class TetherPlcIde extends LitElement {
       ${kinds.map(
         (k) => html`<button
           class="chip-btn ${tab.editor === k.id ? 'active' : ''}"
+          title=${`switch this document to the ${k.label} editor`}
           @click=${() => {
             tab.editor = k.id;
             this.requestUpdate();
@@ -1603,6 +1648,8 @@ export class TetherPlcIde extends LitElement {
         return this.libEditor(tab.key);
       case 'globals':
         return this.globalsDetail();
+      case 'devices':
+        return this.devicesDoc();
     }
   }
 
@@ -1620,8 +1667,24 @@ export class TetherPlcIde extends LitElement {
       return html`
         <h3>${tab.key}.st <span class="plc-dim">library source</span></h3>
         <p class="plc-dim">${src.length} B attached to the project.</p>
-        <button class="chip-btn" @click=${() => this.detachSource(tab.key)}>detach</button>
+        <button
+          class="chip-btn"
+          title="detach this library source from the project"
+          @click=${() => this.detachSource(tab.key)}
+        >
+          detach
+        </button>
       `;
+    }
+    if (tab.kind === 'devices') {
+      const n = this.project.fbd.pous
+        .flatMap((p) => p.networks)
+        .flatMap((x) => x.blocks)
+        .filter((b) => b.kind === 'device').length;
+      return html`<p class="plc-dim">
+        devices — ${n} device block(s) in the project. Pick a target POU in the
+        document and add bus terminals, entities, or catalog devices into it.
+      </p>`;
     }
     return html`<p class="plc-dim">globals — VAR_GLOBAL block shared by every POU.</p>`;
   }
@@ -1644,6 +1707,7 @@ export class TetherPlcIde extends LitElement {
           ${tabs.map(
             (t) => html`<button
               class="plc-dock-tab ${this.dockTab === t.id && this.dockOpen ? 'active' : ''}"
+              title=${this.dockTab === t.id && this.dockOpen ? `collapse the ${t.label} dock` : `open the ${t.label} dock`}
               @click=${() => {
                 if (this.dockTab === t.id) this.dockOpen = !this.dockOpen;
                 else {
@@ -1722,6 +1786,7 @@ export class TetherPlcIde extends LitElement {
        source, project reload) */
     const valid = new Set<string>([
       '__globals',
+      '__devices',
       ...this.project.fbd.pous.map((p) => p.id),
       ...Object.keys(this.project.stSources),
     ]);
@@ -1748,6 +1813,7 @@ export class TetherPlcIde extends LitElement {
     const p = this.prog;
     const state: PlcStatePayload = {
       project: this.project.fbd.project,
+      projectRoot: this.projInfo?.root,
       runState: p
         ? ((['stopped', 'running', 'fault'] as const)[p.state] ?? 'stopped')
         : undefined,
@@ -1757,6 +1823,7 @@ export class TetherPlcIde extends LitElement {
       alarms: this.alarms?.filter((a) => a.state !== 0 && a.state !== 3).length ?? 0,
       errors: this.prevErrCount,
       pous: this.project.fbd.pous.map((x) => ({ id: x.id, name: x.name, kind: x.kind })),
+      tab: this.activeTab,
     };
     const json = JSON.stringify(state, (_k, v) => (typeof v === 'bigint' ? Number(v) : v));
     if (json === this.lastPlcStateJson) return;
@@ -1921,6 +1988,7 @@ export class TetherPlcIde extends LitElement {
       case 'st':
       case 'fbd':
       case 'curves':
+      case 'devices':
         return this.workbench();
       // ---- Configure
       case 'project':
@@ -1975,11 +2043,20 @@ export class TetherPlcIde extends LitElement {
     const sel = this.selPou;
     return html`
       <div class="plc-tree">
+        <div
+          class="plc-tree-head plc-tree-proj"
+          title="the open project — select or create another from the top bar"
+        >
+          <span class="plc-tree-projname">${this.projInfo?.name ?? fbd.project}</span>
+          <span class="plc-dim plc-tree-proot"
+            >${this.projInfo ? this.projInfo.root : 'browser-local — no workspace'}</span
+          >
+        </div>
         <div class="plc-tree-head">
-          <span>Project</span>
-          <button class="chip-btn" @click=${() => this.onNewPou('program')}>+PRG</button>
-          <button class="chip-btn" @click=${() => this.onNewPou('function_block')}>+FB</button>
-          <button class="chip-btn" @click=${() => this.onNewPou('function')}>+FN</button>
+          <span>POUs</span>
+          <button class="chip-btn" title="add a new program (PRG)" @click=${() => this.onNewPou('program')}>+PRG</button>
+          <button class="chip-btn" title="add a new function block (FB)" @click=${() => this.onNewPou('function_block')}>+FB</button>
+          <button class="chip-btn" title="add a new function (FUN)" @click=${() => this.onNewPou('function')}>+FN</button>
         </div>
         ${fbd.pous.map(
           (pou) => html`
@@ -2020,6 +2097,12 @@ export class TetherPlcIde extends LitElement {
           @click=${() => this.openTab('__globals', 'globals')}
         >
           <span class="plc-kind">VAR</span> globals
+        </div>
+        <div
+          class="plc-tree-pou ${this.selPou === '__devices' ? 'sel' : ''}"
+          @click=${() => this.openTab('__devices', 'devices')}
+        >
+          <span class="plc-kind">DEV</span> devices
         </div>
         ${
           fbd.tasks.length
@@ -2093,7 +2176,7 @@ export class TetherPlcIde extends LitElement {
     return html`
       <h3>
         ${pou.name} <span class="plc-dim">${pou.kind}</span>
-        <button class="chip-btn" @click=${() => this.onDelPou(pou)}>delete pou</button>
+        <button class="chip-btn" title="delete this POU and detach its ST source" @click=${() => this.onDelPou(pou)}>delete pou</button>
       </h3>
       ${
         pou.kind === 'function'
@@ -2113,7 +2196,7 @@ export class TetherPlcIde extends LitElement {
       }
       <h4>
         interface
-        <button class="chip-btn" @click=${() => this.addIfaceVar(pou)}>+ var</button>
+        <button class="chip-btn" title="add an interface variable to this POU" @click=${() => this.addIfaceVar(pou)}>+ var</button>
       </h4>
       <table class="plc-table">
         <thead>
@@ -2185,7 +2268,7 @@ export class TetherPlcIde extends LitElement {
                   />
                 </td>
                 <td>
-                  <button class="chip-btn" @click=${() => this.delIfaceVar(pou, vi)}>✕</button>
+                  <button class="chip-btn" title="remove this interface variable" @click=${() => this.delIfaceVar(pou, vi)}>✕</button>
                 </td>
               </tr>
             `,
@@ -2235,7 +2318,7 @@ export class TetherPlcIde extends LitElement {
       </p>
       <h4>
         variables
-        <button class="chip-btn" @click=${this.addGlobalVar}>+ var</button>
+        <button class="chip-btn" title="add a VAR_GLOBAL variable shared by all POUs" @click=${this.addGlobalVar}>+ var</button>
       </h4>
       <table class="plc-table">
         <thead>
@@ -2297,7 +2380,7 @@ export class TetherPlcIde extends LitElement {
                   />
                 </td>
                 <td>
-                  <button class="chip-btn" @click=${() => this.delGlobalVar(vi)}>✕</button>
+                  <button class="chip-btn" title="remove this global variable" @click=${() => this.delGlobalVar(vi)}>✕</button>
                 </td>
               </tr>
             `,
@@ -2360,7 +2443,7 @@ export class TetherPlcIde extends LitElement {
               <div class="plc-usages-head">
                 <b>${this.usagesPanel.list.length}</b> use(s) of
                 <b>${this.usagesPanel.name}</b>
-                <button class="chip-btn" @click=${() => (this.usagesPanel = undefined)}>
+                <button class="chip-btn" title="close the usages panel" @click=${() => (this.usagesPanel = undefined)}>
                   ✕
                 </button>
               </div>
@@ -2431,8 +2514,8 @@ export class TetherPlcIde extends LitElement {
           >
             ▶
           </button>
-          <button class="chip-btn" @click=${() => this.addNetwork(pou, 'fbd')}>+ fbd</button>
-          <button class="chip-btn" @click=${() => this.addNetwork(pou, 'ld')}>+ ld</button>
+          <button class="chip-btn" title="add a new FBD network to this POU" @click=${() => this.addNetwork(pou, 'fbd')}>+ fbd</button>
+          <button class="chip-btn" title="add a new ladder-diagram network to this POU" @click=${() => this.addNetwork(pou, 'ld')}>+ ld</button>
         </div>
         ${
           pou.kind === 'function'
@@ -2617,7 +2700,7 @@ export class TetherPlcIde extends LitElement {
       <div class="tile-scroll">
         <h3>
           Tasks
-          <button class="chip-btn" @click=${this.addTask}>+ task</button>
+          <button class="chip-btn" title="add a task binding program POUs to a scan period" @click=${this.addTask}>+ task</button>
         </h3>
         ${
           tasks.length
@@ -2755,7 +2838,7 @@ export class TetherPlcIde extends LitElement {
                             )}
                           </td>
                           <td>
-                            <button class="chip-btn" @click=${() => this.delTask(ti)}>✕</button>
+                            <button class="chip-btn" title="delete this task" @click=${() => this.delTask(ti)}>✕</button>
                           </td>
                         </tr>
                       `,
@@ -2869,7 +2952,7 @@ export class TetherPlcIde extends LitElement {
                     if (e.key === 'Enter') this.addWatchExpr();
                   }}
                 />
-                <button class="chip-btn" @click=${() => this.addWatchExpr()}>+ expr</button>
+                <button class="chip-btn" title="add the typed expression to the watch list" @click=${() => this.addWatchExpr()}>+ expr</button>
               </div>`
             : nothing
         }
@@ -2896,6 +2979,7 @@ export class TetherPlcIde extends LitElement {
                         <td>
                           <button
                             class="chip-btn"
+                            title="remove this watch expression"
                             @click=${() => {
                               this.watchExprs.splice(i, 1);
                               this.exprHistories.splice(i, 1);
@@ -2951,6 +3035,7 @@ export class TetherPlcIde extends LitElement {
                                       />
                                       <button
                                         class="chip-btn"
+                                        title="force this variable to the entered value (persists until force-clear)"
                                         @click=${(ev: Event) =>
                                           this.onForce(
                                             e,
@@ -2976,6 +3061,7 @@ export class TetherPlcIde extends LitElement {
                                         />
                                         <button
                                           class="chip-btn"
+                                          title="force this %I/%Q channel (BOOL channels only; persists until force-clear)"
                                           @click=${(ev: Event) =>
                                             void this.onImageForce(
                                               e,
@@ -3203,6 +3289,7 @@ export class TetherPlcIde extends LitElement {
         <div class="plc-ops">
           <button
             class="chip-btn"
+            title="compile the project and replay the step file in tether-plc-sim"
             ?disabled=${this.simBusy}
             @click=${() => void this.onSimRun()}
           >
@@ -3300,9 +3387,10 @@ export class TetherPlcIde extends LitElement {
     const rules = this.alarmRules();
     return html`
       <div class="plc-ops">
-        <button class="chip-btn" @click=${() => this.addAlarmRule()}>+ rule</button>
+        <button class="chip-btn" title="add an alarm rule" @click=${() => this.addAlarmRule()}>+ rule</button>
         <button
           class="chip-btn primary"
+          title="generate the AlarmRules FBD program from these rules and schedule it on a task"
           ?disabled=${!rules.length}
           @click=${() => this.buildAlarmProgram()}
         >
@@ -3312,6 +3400,7 @@ export class TetherPlcIde extends LitElement {
           rules.length
             ? html`<button
                 class="chip-btn"
+                title="remove all alarm rules"
                 @click=${() => {
                   this.project.alarms = [];
                   this.save();
@@ -3395,7 +3484,7 @@ export class TetherPlcIde extends LitElement {
                         />
                       </td>
                       <td>
-                        <button class="chip-btn" @click=${() => this.delAlarmRule(i)}>✕</button>
+                        <button class="chip-btn" title="delete this alarm rule" @click=${() => this.delAlarmRule(i)}>✕</button>
                       </td>
                     </tr>`,
                 )}
@@ -3431,12 +3520,16 @@ export class TetherPlcIde extends LitElement {
   private programNav(pane: Pane): void {
     if (pane === 'st') {
       if (this.selLib) this.openTab(this.selLib, 'lib');
-      else if (this.selPou && this.selPou !== '__globals') this.openTab(this.selPou, 'st');
+      else if (this.selPou && this.selPou !== '__globals' && this.selPou !== '__devices')
+        this.openTab(this.selPou, 'st');
     } else if (pane === 'fbd' || pane === 'explorer') {
       if (this.selPou === '__globals') this.openTab('__globals', 'globals');
+      else if (this.selPou === '__devices') this.openTab('__devices', 'devices');
       else if (this.selPou) this.openTab(this.selPou, 'fbd');
-    } else if (pane === 'curves' && this.selPou && this.selPou !== '__globals') {
+    } else if (pane === 'curves' && this.selPou && this.selPou !== '__globals' && this.selPou !== '__devices') {
       this.openTab(this.selPou, 'curve');
+    } else if (pane === 'devices') {
+      this.openTab('__devices', 'devices');
     }
   }
 
@@ -3446,6 +3539,7 @@ export class TetherPlcIde extends LitElement {
       Can't reach the running PLC — connect to a target on the
       <button
         class="chip-btn"
+        title="open Debug → Run to connect to a running PLC target"
         @click=${() => {
           this.gotoActivity('debug', 'run');
           void this.refreshCtl();
@@ -3476,9 +3570,10 @@ export class TetherPlcIde extends LitElement {
             if (e.key === 'Enter') void this.armHist();
           }}
         />
-        <button class="chip-btn" @click=${() => void this.armHist()}>arm</button>
+        <button class="chip-btn" title="arm the historian: record the listed symbols into the trace ring" @click=${() => void this.armHist()}>arm</button>
         <button
           class="chip-btn"
+          title="clear the historian flight-recorder ring"
           ?disabled=${!chans.length}
           @click=${() => void this.ctl.dbgTraceClear().then(() => this.refreshCtl())}
         >
@@ -3528,6 +3623,7 @@ export class TetherPlcIde extends LitElement {
                       class="chip-btn ${
                         this.trendCodecFor(chans[this.trendCh]).label === c.label ? 'active' : ''
                       }"
+                      title=${`decode channel bytes as ${c.label}`}
                       @click=${() => {
                         this.trendCodecLabel = c.label;
                         this.trendSamples = [];
@@ -3661,6 +3757,7 @@ export class TetherPlcIde extends LitElement {
                               e.state === 1
                                 ? html`<button
                                     class="chip-btn"
+                                    title="acknowledge this alarm event"
                                     @click=${() => void this.confirmAlarm(e.id)}
                                   >
                                     ack
@@ -3829,7 +3926,7 @@ export class TetherPlcIde extends LitElement {
             .value=${ctl.url}
             @change=${(e: Event) => this.setCtlUrl((e.target as HTMLInputElement).value)}
           />
-          <button class="chip-btn" @click=${this.refreshCtl}>refresh</button>
+          <button class="chip-btn" title="re-probe the backend and refresh connection status" @click=${this.refreshCtl}>refresh</button>
           ${
             this.ctlOk === undefined
               ? nothing
@@ -3907,17 +4004,18 @@ export class TetherPlcIde extends LitElement {
         </h4>
         ${this.busLinkRow()}
         ${this.busScanLog ? html`<pre class="plc-dim plc-simlog">${this.busScanLog}</pre>` : nothing}
-        ${this.busTopologyTable()}
+        ${this.busTree()}
         ${
-          this.busData?.fleet
-            ? html`<h4>fleet <span class="plc-dim">.fleet — reusable as pump --fleet input</span></h4>
-                <pre class="plc-dim plc-simlog">${this.busData.fleet}</pre>`
-            : nothing
-        }
-        ${
-          this.busData?.bus
-            ? html`<h4>pdo catalog <span class="plc-dim">.bus — valid pdo= endpoints</span></h4>
-                ${this.busCatalogTable(this.busData.bus)}`
+          this.busData?.fleet || this.busData?.bus
+            ? html`<details class="plc-busraw">
+                <summary class="plc-dim">raw artifacts — .fleet (pump --fleet input) · .bus (pdo= endpoint catalog)</summary>
+                ${
+                  this.busData?.fleet
+                    ? html`<pre class="plc-dim plc-simlog">${this.busData.fleet}</pre>`
+                    : nothing
+                }
+                ${this.busData?.bus ? this.busCatalogTable(this.busData.bus) : nothing}
+              </details>`
             : nothing
         }
         ${
@@ -3993,6 +4091,7 @@ export class TetherPlcIde extends LitElement {
         ${link === 'udp' ? this.busUdpFields() : this.busRawFields()}
         <button
           class="chip-btn"
+          title="run tplc-ec-pump --scan against the selected link and refresh the bus tree"
           ?disabled=${this.busScanBusy}
           @click=${() => void this.onBusScan()}
         >
@@ -4000,6 +4099,7 @@ export class TetherPlcIde extends LitElement {
         </button>
         <button
           class="chip-btn"
+          title="reload bus artifacts and the host NIC list"
           @click=${() => {
             void this.refreshBus();
             void this.refreshIfaces();
@@ -4129,32 +4229,460 @@ export class TetherPlcIde extends LitElement {
     }
   }
 
-  /** .topology is JSON {slaves:[{i,part,key,coupler,vendor,product,tx,rx}]}. */
-  private busTopologyTable(): TemplateResult | typeof nothing {
+  /** Device blocks in the project claiming a bus endpoint — the
+      project↔bus diff base for mapped/conflict badges and the
+      "add" buttons. */
+  private deviceEndpointMap(): Map<string, { pouId: string; pouName: string; net: number }> {
+    const m = new Map<string, { pouId: string; pouName: string; net: number }>();
+    for (const pou of this.project.fbd.pous)
+      pou.networks.forEach((net, i) => {
+        for (const b of net.blocks)
+          if (b.kind === 'device' && b.endpoint) m.set(b.endpoint, { pouId: pou.id, pouName: pou.name, net: i });
+      });
+    return m;
+  }
+
+  /** .topology → segmented bus tree: EK1100 groups = physical
+      locations, terminals show channels/endpoint/coverage and add
+      themselves as device blocks in one click. */
+  private busTree(): TemplateResult | typeof nothing {
     const text = this.busData?.topology;
     if (!text) return nothing;
     const slaves = parseBusTopology(text);
     if (!slaves.length)
       return html`<pre class="plc-dim plc-simlog">${text}</pre>`;
+
+    const segs = busSegments(slaves);
+    const claimed = this.deviceEndpointMap();
+    const onBus = new Set(slaves.map((s) => s.key).filter(Boolean));
+    /* project device blocks whose endpoint isn't on the bus anymore —
+       stale claims only surface at map validation today; show them
+       where the bus is actually looked at. */
+    const stale = [...claimed.entries()].filter(([k]) => !onBus.has(k));
+    const unmapped = segs
+      .flatMap((g) => g.terminals)
+      .filter((t) => t.key && !claimed.has(t.key) && t.supported !== false);
+
     return html`
-      <h4>topology <span class="plc-dim">${slaves.length} slave(s)</span></h4>
-      <table class="plc-table">
-        <thead>
-          <tr><th>#</th><th>part</th><th>key</th><th>tx→%I</th><th>rx→%Q</th></tr>
-        </thead>
-        <tbody>
-          ${slaves.map(
-            (s) => html`<tr>
-              <td>${s.i}</td>
-              <td>${s.part}${s.coupler ? ' (coupler)' : ''}</td>
-              <td class="plc-dim">${s.key}</td>
-              <td>${s.tx || '—'}</td>
-              <td>${s.rx || '—'}</td>
-            </tr>`,
-          )}
-        </tbody>
-      </table>
+      <h4>
+        bus <span class="plc-dim">${slaves.length} slave(s) · ${segs.length} segment(s)</span>
+        ${unmapped.length > 1
+          ? html`<button
+              class="chip-btn"
+              title="create device blocks for every unmapped terminal — auto %I/%Q allocation + PDO endpoint"
+              @click=${() => this.addAllBusDevices(unmapped)}
+            >
+              + add ${unmapped.length} unmapped
+            </button>`
+          : nothing}
+      </h4>
+      ${segs.map(
+        (seg) => html`
+          <div class="plc-busseg">
+            <h5 class="plc-busseg-h">
+              ${seg.coupler
+                ? html`◆ ${seg.coupler.part || 'EK1100'} — segment ${seg.idx}
+                    <span class="plc-dim">${seg.coupler.key ?? ''}${seg.coupler.name ? ` · ${seg.coupler.name}` : ''}</span>`
+                : html`◇ no coupler — chain head`}
+            </h5>
+            ${seg.terminals.length
+              ? seg.terminals.map((t) => this.busTermRow(t, claimed))
+              : html`<div class="plc-dim plc-busterm">no terminals</div>`}
+          </div>
+        `,
+      )}
+      ${stale.length
+        ? html`<h4 class="plc-warn">${stale.length} project endpoint(s) not on the bus</h4>
+            ${stale.map(
+              ([ep, ref]) => html`<div class="plc-busterm plc-busterm-stale">
+                <span class="plc-warn">⚠</span>
+                <code>${ep}</code>
+                <span class="plc-dim">claimed by ${ref.pouName}</span>
+                <button
+                  class="chip-btn"
+                  title="open the block claiming this endpoint"
+                  @click=${() => this.jumpToDevice(ref)}
+                >
+                  open
+                </button>
+              </div>`,
+            )}`
+        : nothing}
     `;
+  }
+
+  /** Libraries that model external entities/devices rather than pure
+      control logic — listed in the FBD workbench Devices panel. */
+  private static ENTITY_LIBS = /^(homeassistant|mqtt|iolink|canopen|profinet|modbus|knx|opcua|bacnet|s7|ethercat|io-link)/i;
+
+  /** The Devices document (workbench tab + rail entry): everything that
+      can become a block — the live EtherCAT bus, service entities
+      (HomeAssistant, MQTT, IO-Link, …) and the offline terminal
+      catalog. Inserts land in the chosen target POU's FBD network. */
+  private devicesDoc(): TemplateResult {
+    if (!this.busData) void this.refreshBus();
+    const pou =
+      this.project.fbd.pous.find((p) => p.id === this.devTargetPou) ??
+      this.busDeviceTarget();
+    const claimed = this.deviceEndpointMap();
+    const slaves = this.busData?.topology ? parseBusTopology(this.busData.topology) : [];
+    const segs = busSegments(slaves);
+    const unmapped = segs
+      .flatMap((g) => g.terminals)
+      .filter((t) => t.key && !claimed.has(t.key) && t.supported !== false);
+    const entities = this.catGroups.filter((g) =>
+      g.items.some((i) => i.lib && TetherPlcIde.ENTITY_LIBS.test(i.lib)),
+    );
+    if (!pou) {
+      return html`<div class="plc-dev-doc tile-scroll">
+        <h3>Devices</h3>
+        <p class="plc-dim">
+          no POU yet — add one with <b>+PRG</b> in the Explorer first; device
+          blocks need a program to live in.
+        </p>
+      </div>`;
+    }
+    return html`
+      <div class="plc-dev-doc tile-scroll">
+        <div class="plc-dev-head">
+          <h3>Devices</h3>
+          <span class="plc-dim">live bus · entities · terminals →</span>
+          <select
+            title="target POU — added blocks land in this program's FBD network"
+            @change=${(e: Event) => {
+              this.devTargetPou = (e.target as HTMLSelectElement).value;
+              sessionStorage.setItem('plc.devTarget', this.devTargetPou);
+            }}
+          >
+            ${this.project.fbd.pous.map(
+              (p) =>
+                html`<option value=${p.id} ?selected=${p.id === pou.id}>${p.name}</option>`,
+            )}
+          </select>
+          <button class="chip-btn" title="reload bus artifacts" @click=${() => void this.refreshBus()}>
+            refresh
+          </button>
+        </div>
+        ${slaves.length
+          ? html`<div class="plc-dev-sec">
+              <h5 class="plc-busseg-h">
+                EtherCAT bus <span class="plc-dim">${slaves.length} slave(s) · ${segs.length} segment(s)</span>
+                ${unmapped.length > 1
+                  ? html`<button class="chip-btn" title="wired blocks for every unmapped terminal" @click=${() => this.addAllBusDevices(unmapped, pou)}>+ add ${unmapped.length}</button>`
+                  : nothing}
+              </h5>
+              ${segs.map(
+                (seg) => html`
+                  ${seg.coupler
+                    ? html`<div class="plc-dim plc-dev-seg">◆ ${seg.coupler.part || 'EK1100'} — segment ${seg.idx}</div>`
+                    : nothing}
+                  ${seg.terminals.map((t) => this.busTermRow(t, claimed, pou))}
+                `,
+              )}
+            </div>`
+          : nothing}
+        ${entities.length
+          ? html`<div class="plc-dev-sec">
+              <h5 class="plc-busseg-h">entities <span class="plc-dim">homeassistant · mqtt · fieldbus services</span></h5>
+              ${entities.map(
+                (g) => html`
+                  <div class="plc-dim plc-dev-seg">${g.name}</div>
+                  <div class="plc-dev-items">
+                    ${g.items.map(
+                      (i) => html`<button class="chip-btn" title=${i.hint} @click=${() => this.addEntityBlock(i, pou)}>+ ${i.label}</button>`,
+                    )}
+                  </div>
+                `,
+              )}
+            </div>`
+          : nothing}
+        <div class="plc-dev-sec">
+          <h5 class="plc-busseg-h">terminal catalog <span class="plc-dim">offline design — no scan needed</span></h5>
+          <div class="plc-dev-items">
+            ${TERMINALS.map(
+              (t) => html`<span class="plc-dev-term">
+                <button
+                  class="chip-btn"
+                  title="${t.label}${t.pdoKey ? ` — pdo ${t.pdoKey}.cN` : ' — file-transport channel'}"
+                  @click=${() => {
+                    if (this.addTerminalDevice(t, false, pou)) {
+                      this.save();
+                      this.flash(`added ${t.part} — ${pou.name}`);
+                    }
+                  }}
+                >
+                  + ${t.part}
+                </button>
+                <button
+                  class="chip-btn plc-dev-zap"
+                  title="add ${t.part} wired — declared vars + wires per channel"
+                  @click=${() => {
+                    if (this.addTerminalDevice(t, true, pou)) {
+                      this.save();
+                      this.flash(`added ${t.part} wired`);
+                    }
+                  }}
+                >⚡</button>
+              </span>`,
+            )}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private busTermRow(s: BusSlave, claimed: ReturnType<typeof this.deviceEndpointMap>, pou?: Pou): TemplateResult {
+    const ref = s.key ? claimed.get(s.key) : undefined;
+    const uns = s.supported === false;
+    const hex = (v?: number) => (v !== undefined ? `0x${v.toString(16).toUpperCase().padStart(8, '0')}` : '?');
+    return html`
+      <div class="plc-busterm ${uns ? 'plc-busterm-uns' : ''}">
+        <span class="plc-dim">${s.i}</span>
+        <b>${s.part || 'unknown'}</b>
+        <span>${channelSummary(s)}</span>
+        ${s.name ? html`<span class="plc-dim" title=${s.name}>${s.name}</span>` : nothing}
+        <span class="plc-dim">${s.key || ''}</span>
+        ${s.tx ? html`<span class="plc-dim" title="tx PDO bytes → %I">tx${s.tx}</span>` : nothing}
+        ${s.rx ? html`<span class="plc-dim" title="rx PDO bytes → %Q">rx${s.rx}</span>` : nothing}
+        ${uns
+          ? html`<span class="plc-warn" title="on the bus but not in Tether's fleet catalog — add the part to BeckhoffFleet.hpp fleetModuleCatalog">unsupported ${hex(s.vendor)}/${hex(s.product)}</span>`
+          : ref
+            ? html`<button
+                class="chip-btn plc-busterm-ok"
+                title="endpoint claimed by a device block in ${ref.pouName} — click to open"
+                @click=${() => this.jumpToDevice(ref)}
+              >
+                mapped ✓
+              </button>`
+            : s.key
+              ? html`<button
+                  class="chip-btn"
+                  title="create a device block: ${channelSummary(s)} pins, auto %I/%Q base, endpoint ${s.key}"
+                  @click=${() => {
+                    if (this.addBusDevice(s, false, pou)) {
+                      this.save();
+                      this.flash(`added ${s.part} as device — ${s.key}`);
+                    }
+                  }}
+                >
+                  + device
+                </button>
+                <button
+                  class="chip-btn"
+                  title="autoconnect: device block + a declared POU var per channel, wired to the pin — usable from ST/FBD by name"
+                  @click=${() => {
+                    if (this.addBusDevice(s, true, pou)) {
+                      this.save();
+                      this.flash(`added ${s.part} wired — ${(s.di ?? 0) + (s.do ?? 0) + (s.ai ?? 0) + (s.ao ?? 0)} channel(s) linked`);
+                    }
+                  }}
+                >
+                  ⚡ wire
+                </button>`
+              : nothing}
+      </div>
+    `;
+  }
+
+  /** Target POU for discovery-add: the open editor's POU, else the
+      first program, else the first POU. */
+  private busDeviceTarget(): Pou | undefined {
+    return (
+      this.project.fbd.pous.find((p) => p.id === this.selPou) ??
+      this.project.fbd.pous.find((p) => p.kind === 'program') ??
+      this.project.fbd.pous[0]
+    );
+  }
+
+  /** Network a device/entity insert lands in: the selected network
+      when it's the open FBD one, else the first FBD network (created
+      if the POU has none). */
+  private deviceTargetNet(pou: Pou): number {
+    if (pou.id === this.selPou && pou.networks[this.selNet]?.kind === 'fbd')
+      return this.selNet;
+    let ni = pou.networks.findIndex((n) => n.kind === 'fbd');
+    if (ni < 0) {
+      pou.networks.push({
+        id: `net${pou.networks.length + 1}`,
+        kind: 'fbd',
+        label: 'devices',
+        comments: [],
+        assocs: [],
+        labels: [],
+        jumps: [],
+        returns: [],
+        blocks: [],
+        wires: [],
+      });
+      ni = pou.networks.length - 1;
+    }
+    return ni;
+  }
+
+  /** Swap a pou object so canvas's .pou dirty-check re-renders. */
+  private commitPou(pou: Pou): void {
+    const pi = this.project.fbd.pous.findIndex((p) => p === pou);
+    if (pi >= 0)
+      this.project.fbd.pous[pi] = { ...pou, networks: [...pou.networks] };
+  }
+
+  /** Insert a device block for a discovered terminal or catalog
+      template into `pou`'s target FBD network. With `wire`, every
+      channel additionally gets a declared POU var + a variable block
+      wired to the channel pin — the TwinCAT-style "link all"
+      autoconnect. Copy-on-write on pou+network so the canvas
+      re-renders. */
+  private insertDeviceSpec(spec: DiscoveredDeviceSpec, wire: boolean, pou?: Pou): boolean {
+    const p = pou ?? this.busDeviceTarget();
+    if (!p) {
+      this.flash('add a POU first — discovered terminals become device blocks');
+      return false;
+    }
+    const ni = this.deviceTargetNet(p);
+    const net = p.networks[ni]!;
+    const blk: Block = {
+      id: nextNodeId(p),
+      kind: 'device',
+      type_ref: spec.type_ref,
+      pos: { x: 20, y: 2 + Math.floor(net.blocks.length / 6) * 12 },
+      params: {},
+      exec_order: 0,
+      negated: [],
+      comment: spec.comment,
+      endpoint: spec.endpoint || undefined,
+      pins: spec.pins,
+    };
+    const blocks: Block[] = [blk];
+    const wires: typeof net.wires = [];
+
+    /* autoconnect: one declared POU var + variable block per channel,
+       wired to the device pin. var_output pins (bus→logic) write to
+       'out' vars; var_input pins (logic→bus) read from 'in' vars.  */
+    if (wire) {
+      const declared = new Set(p.interface.map((v) => v.name.toUpperCase()));
+      const stem = spec.endpoint
+        ? spec.endpoint.replace(/[^A-Za-z0-9_]/g, '')
+        : spec.type_ref;
+      spec.pins.forEach((pin, pi) => {
+        let name = `${stem}_${pin.name}`;
+        let k = 2;
+        while (declared.has(name.toUpperCase())) name = `${stem}_${pin.name}_${k++}`;
+        declared.add(name.toUpperCase());
+        p.interface.push({ name, kind: 'var', type: pin.type });
+        const sink = pin.kind === 'var_output';
+        const vb: Block = {
+          id: nextNodeId(p),
+          kind: 'variable',
+          type_ref: '',
+          role: sink ? 'out' : 'in',
+          name,
+          pos: sink
+            ? { x: 42, y: 2 + pi }
+            : { x: 2, y: 2 + pi },
+          params: {},
+          exec_order: 0,
+          negated: [],
+          comment: '',
+        };
+        blocks.push(vb);
+        wires.push(
+          sink
+            ? {
+                id: nextNodeId(p),
+                src: { block: blk.id, port: pin.name },
+                dsts: [{ block: vb.id, port: '' }],
+              }
+            : {
+                id: nextNodeId(p),
+                src: { block: vb.id, port: '' },
+                dsts: [{ block: blk.id, port: pin.name }],
+              },
+        );
+      });
+    }
+
+    p.networks[ni] = {
+      ...net,
+      blocks: [...net.blocks, ...blocks],
+      wires: [...net.wires, ...wires],
+    };
+    this.commitPou(p);
+    return true;
+  }
+
+  private addBusDevice(s: BusSlave, wire = false, pou?: Pou): boolean {
+    const spec = mkDiscoveredDevice(this.project, s);
+    if (!spec) return false;
+    return this.insertDeviceSpec(spec, wire, pou);
+  }
+
+  private addTerminalDevice(t: TerminalSpec, wire = false, pou?: Pou): boolean {
+    const spec = mkTerminalDevice(this.project, t);
+    if (!spec) return false;
+    return this.insertDeviceSpec(spec, wire, pou);
+  }
+
+  /** Place a catalog entity FB (FB_HaEntity, mqtt blocks, IO-Link, …)
+      into the open FBD network + auto-attach its library source —
+      the same flow the canvas palette uses. */
+  private addEntityBlock(i: PaletteItem, pou: Pou): void {
+    const ni = this.deviceTargetNet(pou);
+    const net = pou.networks[ni]!;
+    const used = new Set(net.blocks.map((b) => b.instance ?? ''));
+    let k = 1;
+    while (used.has(`i${k}`)) k++;
+    const blk: Block = {
+      id: nextNodeId(pou),
+      kind: i.kind === 'function' ? 'function' : 'fb',
+      type_ref: i.type,
+      instance: `i${k}`,
+      pos: { x: 2 + (net.blocks.length % 5) * 20, y: 2 },
+      params: {},
+      exec_order: 0,
+      negated: [],
+      comment: '',
+    };
+    pou.networks[ni] = { ...net, blocks: [...net.blocks, blk] };
+    this.commitPou(pou);
+    if (i.lib && i.srcFile) void this.attachLibSrc(i.lib, i.srcFile);
+    this.save();
+    this.flash(`added ${i.type}`);
+  }
+
+  /** Fetch + attach a library source (need-libsrc flow, callable from
+      panels outside the canvas). */
+  private attachLibSrc(lib: string, file: string): Promise<void> {
+    const stem = libStem(file);
+    const have = Object.keys(this.project.stSources).some(
+      (k) => k.toUpperCase() === stem.toUpperCase(),
+    );
+    if (have) return Promise.resolve();
+    return fetchLibSrc(this.ctl, lib, file).then((src) => {
+      if (!src) {
+        this.flash(
+          `could not fetch ${file} from the backend — attach the .st source manually`,
+        );
+        return;
+      }
+      this.project.stSources[stem] = src;
+      this.save();
+      this.requestUpdate();
+      this.flash(`attached ${file}`);
+    });
+  }
+
+  private addAllBusDevices(slaves: BusSlave[], pou?: Pou): void {
+    let n = 0;
+    for (const s of slaves) if (this.addBusDevice(s, true, pou)) n++;
+    if (n) this.save();
+    this.flash(n ? `added + wired ${n} terminal(s)` : 'nothing to add');
+  }
+
+  /** mapped ✓ → open the POU/network containing the claiming block. */
+  private jumpToDevice(ref: { pouId: string; net: number }): void {
+    this.gotoActivity('program', 'explorer');
+    this.selNet = ref.net;
+    this.openTab(ref.pouId, 'fbd');
   }
 
   private busCatalogTable(text: string): TemplateResult {
@@ -4265,6 +4793,7 @@ export class TetherPlcIde extends LitElement {
         <input type="file" id="plc-pkg" accept=".tplc" hidden @change=${this.onPkgFile} />
         <button
           class="chip-btn"
+          title="compile the project and deploy the .tplc package to the connected target"
           ?disabled=${this.compiling}
           @click=${() => void this.onBuildDeploy()}
         >
@@ -4272,17 +4801,30 @@ export class TetherPlcIde extends LitElement {
         </button>
         <button
           class="chip-btn"
+          title="deploy a pre-built .tplc package file instead of compiling"
           @click=${() => this.querySelector<HTMLInputElement>('#plc-pkg')?.click()}
         >
           .tplc…
         </button>
-        <button class="chip-btn" @click=${() => this.ctlOp('start', () => ctl.progStart())}>
+        <button
+          class="chip-btn"
+          title="start the deployed program on the target"
+          @click=${() => this.ctlOp('start', () => ctl.progStart())}
+        >
           start
         </button>
-        <button class="chip-btn" @click=${() => this.ctlOp('stop', () => ctl.progStop())}>
+        <button
+          class="chip-btn"
+          title="stop the running program on the target"
+          @click=${() => this.ctlOp('stop', () => ctl.progStop())}
+        >
           stop
         </button>
-        <button class="chip-btn" @click=${() => this.ctlOp('rollback', () => ctl.progRollback())}>
+        <button
+          class="chip-btn"
+          title="rollback to the previously deployed program version"
+          @click=${() => this.ctlOp('rollback', () => ctl.progRollback())}
+        >
           rollback
         </button>
         ${
@@ -4370,32 +4912,174 @@ export class TetherPlcIde extends LitElement {
       this.projInfoLoaded = true;
     } finally {
       this.projBusy = false;
+      this.publishPlcState();
       this.requestUpdate();
     }
+  }
+
+  /** Adopt backend project info as THE open project: swap the IDE
+      document to its manifest.ui (when present), reset editor tabs —
+      the IDE scope is exactly one project at a time. */
+  private adoptProjectInfo(info: pa.ProjectInfo, verb: string): void {
+    this.projInfo = info;
+    const rp = plcProjectFromJson(info.manifest?.ui);
+    if (rp) {
+      this.project = rp;
+      this.selPou = rp.fbd.pous[0]?.id ?? '';
+      this.selNet = 0;
+      this.selLib = undefined;
+      this.tabs = [];
+      this.activeTab = undefined;
+      saveProject(rp);
+    }
+    this.projPickerOpen = false;
+    this.flash(`${verb}: ${info.name} (${info.root})`);
+    void this.refreshProjectPane();
+    this.publishPlcState();
+    this.requestUpdate();
   }
 
   private async projOpenDir(path: string): Promise<void> {
     this.projBusy = true;
     try {
       const info = await pa.projectOpen(this.ctl, path);
-      this.projInfo = info;
-      /* the project's saved IDE document round-trips in manifest.ui —
-         adopt it so the canvas shows this project's POUs/networks */
-      const rp = plcProjectFromJson(info.manifest?.ui);
-      if (rp) {
-        this.project = rp;
-        this.selPou = rp.fbd.pous[0]?.id ?? '';
-        this.selNet = 0;
-        saveProject(rp);
-      }
-      this.flash(`project opened: ${info.root}`);
-      await this.refreshProjectPane();
+      this.adoptProjectInfo(info, 'project opened');
     } catch (e) {
       this.flash(`open failed: ${e instanceof Error ? e.message : e}`);
     } finally {
       this.projBusy = false;
       this.requestUpdate();
     }
+  }
+
+  /** Create + open a new project workspace at `path` (scaffolds
+      .tplc/, src/, git repo via the backend). */
+  private async projCreateDir(path: string): Promise<void> {
+    this.projBusy = true;
+    try {
+      const info = await pa.projectNew(
+        this.ctl,
+        path,
+        this.projPickerName.trim() || undefined,
+      );
+      this.adoptProjectInfo(info, 'project created');
+    } catch (e) {
+      this.flash(`create failed: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      this.projBusy = false;
+      this.requestUpdate();
+    }
+  }
+
+  /** Public hook for the shell navbar project selector. */
+  openProjectPicker(): void {
+    this.projPickerOpen = true;
+    void this.refreshProjectPane();
+    this.requestUpdate();
+  }
+
+  /** Project/workspace picker — the single place projects are
+      selected or created (shell navbar + Configure → Project). */
+  private projectPicker(): TemplateResult {
+    const info = this.projInfo;
+    const current = info?.root ?? '';
+    return html`
+      <div
+        class="plc-tpl-overlay"
+        @click=${(e: Event) => {
+          if (e.target === e.currentTarget) {
+            this.projPickerOpen = false;
+            this.requestUpdate();
+          }
+        }}
+      >
+        <div class="plc-tpl-dialog">
+          <div class="plc-tpl-title">Project &amp; workspace</div>
+          <div class="plc-tpl-sub">
+            ${
+              info
+                ? html`Current: <strong>${info.name}</strong> · <code>${info.root}</code>`
+                : html`No backend project open — the IDE document lives in this browser only.`
+            }
+          </div>
+          ${
+            this.projRecent.length
+              ? html`<div class="plc-tpl-sub">Recent workspaces</div>
+                  <div class="plc-projrecent-list">
+                    ${this.projRecent.map(
+                      (r) => html`
+                        <button
+                          class="plc-projrecent${r === current ? ' current' : ''}"
+                          title=${r === current ? 'current project' : `open ${r}`}
+                          ?disabled=${this.projBusy || r === current}
+                          @click=${() => void this.projOpenDir(r)}
+                        >
+                          ${r}${r === current ? ' ✓' : ''}
+                        </button>
+                      `,
+                    )}
+                  </div>`
+              : nothing
+          }
+          <div class="plc-ctlbar">
+            <input
+              class="fbd-in wide"
+              placeholder="/path/to/project  (open existing or create new)"
+              .value=${this.projPickerPath}
+              @input=${(ev: Event) => {
+                this.projPickerPath = (ev.target as HTMLInputElement).value;
+              }}
+            />
+            <input
+              class="fbd-in"
+              placeholder="name (optional)"
+              .value=${this.projPickerName}
+              @input=${(ev: Event) => {
+                this.projPickerName = (ev.target as HTMLInputElement).value;
+              }}
+            />
+            <button
+              class="chip-btn"
+              title="open the project at this path (adopts or initializes .tplc/project.json)"
+              ?disabled=${this.projBusy || !this.projPickerPath.trim()}
+              @click=${() => void this.projOpenDir(this.projPickerPath.trim())}
+            >
+              open
+            </button>
+            <button
+              class="chip-btn primary"
+              title="create a new project workspace at this path — scaffolds .tplc/, src/main.st and a git repo"
+              ?disabled=${this.projBusy || !this.projPickerPath.trim()}
+              @click=${() => void this.projCreateDir(this.projPickerPath.trim())}
+            >
+              new project
+            </button>
+          </div>
+          <div class="plc-tpl-foot">
+            <button
+              class="chip-btn"
+              title="project settings — manifest, files and git live under Configure → Project"
+              @click=${() => {
+                this.projPickerOpen = false;
+                this.gotoActivity('configure', 'project');
+              }}
+            >
+              project settings…
+            </button>
+            <button
+              class="chip-btn"
+              title="close the picker"
+              @click=${() => {
+                this.projPickerOpen = false;
+                this.requestUpdate();
+              }}
+            >
+              close
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   private async projSaveManifest(): Promise<void> {
@@ -4487,6 +5171,7 @@ export class TetherPlcIde extends LitElement {
           />
           <button
             class="chip-btn"
+            title="open the project directory at the entered path"
             ?disabled=${this.projBusy || !this.projOpenPath.trim()}
             @click=${() => void this.projOpenDir(this.projOpenPath.trim())}
           >
@@ -4494,6 +5179,7 @@ export class TetherPlcIde extends LitElement {
           </button>
           <button
             class="chip-btn"
+            title="reload project info, file list, and git status"
             ?disabled=${this.projBusy}
             @click=${() => void this.refreshProjectPane()}
           >
@@ -4523,7 +5209,11 @@ export class TetherPlcIde extends LitElement {
                   ${field('imageIn', 'image %I bytes', '64')}
                   ${field('imageOut', 'image %Q bytes', '64')}
                 </div>
-                <button class="chip-btn" @click=${() => void this.projSaveManifest()}>
+                <button
+                  class="chip-btn"
+                  title="write the manifest fields (.tplc/project.json) to the project directory"
+                  @click=${() => void this.projSaveManifest()}
+                >
                   save manifest
                 </button>
                 <span class="plc-dim"> (ui document is saved automatically on edit)</span>
@@ -4536,6 +5226,7 @@ export class TetherPlcIde extends LitElement {
                         <code>${f.path}</code> <span class="plc-dim">${f.size} B</span>
                         <button
                           class="chip-btn"
+                          title="show the git diff for this file"
                           @click=${() =>
                           void pa.gitDiff(this.ctl, f.path).then((d) => {
                             this.gitDiffText = d;
@@ -4558,6 +5249,7 @@ export class TetherPlcIde extends LitElement {
                               <code>${g.status}</code> ${g.path}
                               <button
                                 class="chip-btn"
+                                title="show the git diff for this file"
                                 @click=${() =>
                                 void pa.gitDiff(this.ctl, g.path).then((d) => {
                                   this.gitDiffText = d;
@@ -4585,6 +5277,7 @@ export class TetherPlcIde extends LitElement {
                   />
                   <button
                     class="chip-btn"
+                    title="commit all working-tree changes with the typed message"
                     ?disabled=${!this.gitMsg.trim()}
                     @click=${() => void this.projGitCommit()}
                   >
@@ -4650,22 +5343,26 @@ export class TetherPlcIde extends LitElement {
                     t.state === 2
                       ? html`<button
                             class="chip-btn"
+                            title="resume the suspended task"
                             @click=${() => this.ctlOp('resume', () => this.ctl.taskResume(i))}
                           >
                             resume</button
                           ><button
                             class="chip-btn"
+                            title="step the suspended task once"
                             @click=${() => this.ctlOp('step', () => this.ctl.taskStep(i, 1))}
                           >
                             step</button
                           ><button
                             class="chip-btn"
+                            title="step the suspended task 10 times"
                             @click=${() => this.ctlOp('step×10', () => this.ctl.taskStep(i, 10))}
                           >
                             +10
                           </button>`
                       : html`<button
                           class="chip-btn"
+                          title="suspend this task until resumed or stepped"
                           ?disabled=${p.state !== 1}
                           @click=${() => this.ctlOp('suspend', () => this.ctl.taskSuspend(i))}
                         >
@@ -4748,6 +5445,7 @@ export class TetherPlcIde extends LitElement {
                   reset</button
                 ><button
                   class="chip-btn"
+                  title="unload the shadow candidate program"
                   @click=${() => this.ctlOp('shadow drop', () => this.ctl.shadowDrop())}
                 >
                   drop
@@ -4861,7 +5559,13 @@ export class TetherPlcIde extends LitElement {
           @input=${(e: Event) => (this.dbgSymName = (e.target as HTMLInputElement).value)}
           @keydown=${(e: KeyboardEvent) => e.key === 'Enter' && void this.onDbgResolve()}
         />
-        <button class="chip-btn" @click=${() => void this.onDbgResolve()}>resolve</button>
+        <button
+          class="chip-btn"
+          title="resolve the symbol name to a debug address"
+          @click=${() => void this.onDbgResolve()}
+        >
+          resolve
+        </button>
         ${
           s
             ? html`<span class="${stale ? 'fbd-warn' : 'plc-dim'}">
@@ -4869,7 +5573,7 @@ export class TetherPlcIde extends LitElement {
                   ${s.region} access ${s.access} · off ${s.offset} size
                   ${s.size}B${stale ? ' · STALE epoch' : ''}
                 </span>
-                <button class="chip-btn" @click=${() => void this.onDbgRead()}>read</button>
+                <button class="chip-btn" title="read the resolved symbol's current value" @click=${() => void this.onDbgRead()}>read</button>
                 ${
                   !this.dbgSymShadow
                     ? html`<input
@@ -4889,7 +5593,11 @@ export class TetherPlcIde extends LitElement {
                           this.dbgTypedDirty = true;
                         }}
                         />
-                        <button class="chip-btn" @click=${() => void this.onDbgWrite()}>
+                        <button
+                          class="chip-btn"
+                          title="write the entered value (hex or typed) to the resolved symbol"
+                          @click=${() => void this.onDbgWrite()}
+                        >
                           write
                         </button>
                         <input
@@ -4902,6 +5610,7 @@ export class TetherPlcIde extends LitElement {
                         />
                         <button
                           class="chip-btn plc-force-btn"
+                          title="force the symbol to the entered value until force-clear"
                           @click=${() => void this.onDbgForce()}
                         >
                           force
@@ -4942,6 +5651,7 @@ export class TetherPlcIde extends LitElement {
                   }
                     <button
                       class="chip-btn"
+                      title="clear this force"
                       @click=${() =>
                       this.ctlOp('force clear', () => this.ctl.dbgForceClear(f.handle))}
                     >
@@ -4951,6 +5661,7 @@ export class TetherPlcIde extends LitElement {
               )}
               <button
                 class="chip-btn"
+                title="clear all active forces"
                 @click=${() => this.ctlOp('force clear', () => this.ctl.dbgForceClear())}
               >
                 clear all
@@ -4988,7 +5699,13 @@ export class TetherPlcIde extends LitElement {
                 .value=${this.brkVal}
                 @input=${(e: Event) => (this.brkVal = (e.target as HTMLInputElement).value)}
               />
-              <button class="chip-btn" @click=${() => void this.onDbgBreak()}>arm</button>
+              <button
+                class="chip-btn"
+                title="arm a breakpoint or capture trigger on the resolved symbol"
+                @click=${() => void this.onDbgBreak()}
+              >
+                arm
+              </button>
               <input
                 class="fbd-in"
                 placeholder="or expr: counter % 50 == 0 && flag"
@@ -5021,6 +5738,7 @@ export class TetherPlcIde extends LitElement {
                     · hits ${b.hits}
                     <button
                       class="chip-btn"
+                      title="clear this breakpoint or capture"
                       @click=${() =>
                       this.ctlOp('break clear', () => this.ctl.dbgBreakClear(b.handle))}
                     >
@@ -5030,6 +5748,7 @@ export class TetherPlcIde extends LitElement {
               )}
               <button
                 class="chip-btn"
+                title="clear all breakpoints and captures"
                 @click=${() => this.ctlOp('break clear', () => this.ctl.dbgBreakClear())}
               >
                 clear all
@@ -5047,6 +5766,7 @@ export class TetherPlcIde extends LitElement {
                     ${c.name} ${c.off}:${c.len}
                     <button
                       class="chip-btn"
+                      title="remove this channel from the record list"
                       @click=${() => {
                       this.traceChs.splice(i, 1);
                       this.requestUpdate();
@@ -5056,7 +5776,13 @@ export class TetherPlcIde extends LitElement {
                     </button>
                   </span>`,
               )}
-              <button class="chip-btn" @click=${() => void this.onTraceArm()}>record</button>
+              <button
+                class="chip-btn"
+                title="arm the flight recorder for the staged channels"
+                @click=${() => void this.onTraceArm()}
+              >
+                record
+              </button>
               <label class="plc-dim">
                 <input
                   type="checkbox"
@@ -5076,9 +5802,16 @@ export class TetherPlcIde extends LitElement {
                 rec ${this.trace.written} frames · ${this.trace.avail} in ring ·
                 ${this.trace.frameLen}B/frame ${this.trace.frozen ? ' · FROZEN' : nothing}
               </span>
-              <button class="chip-btn" @click=${() => void this.onTraceRead()}>read</button>
               <button
                 class="chip-btn"
+                title="read recorded frames from the trace ring"
+                @click=${() => void this.onTraceRead()}
+              >
+                read
+              </button>
+              <button
+                class="chip-btn"
+                title="stop recording and clear the trace ring"
                 @click=${() => this.ctlOp('trace clear', () => this.ctl.dbgTraceClear())}
               >
                 stop
@@ -5096,6 +5829,7 @@ export class TetherPlcIde extends LitElement {
                     ${c.name} ${c.off}:${c.len}
                     <button
                       class="chip-btn"
+                      title="remove this item from the watch list"
                       @click=${() => {
                       this.watchChs.splice(i, 1);
                       this.requestUpdate();
@@ -5105,7 +5839,13 @@ export class TetherPlcIde extends LitElement {
                     </button>
                   </span>`,
               )}
-              <button class="chip-btn" @click=${() => void this.onWatchAdd()}>add watch</button>
+              <button
+                class="chip-btn"
+                title="register the staged items as a watch group on the target"
+                @click=${() => void this.onWatchAdd()}
+              >
+                add watch
+              </button>
             </div>`
           : nothing
       }
@@ -5137,6 +5877,7 @@ export class TetherPlcIde extends LitElement {
                     </button>
                     <button
                       class="chip-btn"
+                      title="remove this watch group"
                       @click=${() => this.ctlOp('watch rm', () => this.ctl.dbgWatchRemove(wt.handle))}
                     >
                       ×
@@ -5554,17 +6295,25 @@ export class TetherPlcIde extends LitElement {
       <div class="plc-ops">
         <button
           class="chip-btn"
+          title="flush dirty retain bytes to the retain store now"
           @click=${() => this.ctlOp('retain flush', () => this.ctl.retainFlush())}
         >
           flush
         </button>
         <button
           class="chip-btn"
+          title="clear the retain store"
           @click=${() => this.ctlOp('retain clear', () => this.ctl.retainClear())}
         >
           clear
         </button>
-        <button class="chip-btn" @click=${() => void this.onRetainDump()}>dump…</button>
+        <button
+          class="chip-btn"
+          title="download the raw retain region as a .bin file"
+          @click=${() => void this.onRetainDump()}
+        >
+          dump…
+        </button>
         <span class="plc-dim">
           ${r.flushes} flushes · ${r.restores} restores · ${r.losses} losses
         </span>
@@ -5600,9 +6349,16 @@ export class TetherPlcIde extends LitElement {
         <span class="plc-dim">${entries.length ? `${entries.length} objects` : ''}</span>
       </h4>
       <div class="plc-ops">
-        <button class="chip-btn" @click=${() => void this.onOdList()}>list</button>
         <button
           class="chip-btn"
+          title="load the object dictionary entries from the target"
+          @click=${() => void this.onOdList()}
+        >
+          list
+        </button>
+        <button
+          class="chip-btn"
+          title="read every object dictionary entry"
           ?disabled=${!entries.length}
           @click=${() => void this.onOdRefreshAll()}
         >
@@ -5649,10 +6405,20 @@ export class TetherPlcIde extends LitElement {
                       }
                     </td>
                     <td>
-                      <button class="chip-btn" @click=${() => void this.onOdRead(e)}>read</button>
+                      <button
+                        class="chip-btn"
+                        title="read this object dictionary entry"
+                        @click=${() => void this.onOdRead(e)}
+                      >
+                        read
+                      </button>
                       ${
                         e.access !== 0
-                          ? html`<button class="chip-btn" @click=${() => void this.onOdWrite(e)}>
+                          ? html`<button
+                              class="chip-btn"
+                              title="write the entered value to this object dictionary entry"
+                              @click=${() => void this.onOdWrite(e)}
+                            >
                               write
                             </button>`
                           : nothing
@@ -5882,11 +6648,18 @@ export class TetherPlcIde extends LitElement {
             .value=${r.outSize ?? ''}
             @change=${(e: Event) => this.mapRow('outSize', (e.target as HTMLInputElement).value)}
         /></label>
-        <button class="chip-btn" @click=${() => this.addMapChannel()}>+ channel</button>
-        <button class="chip-btn" @click=${() => this.addMapBind()}>+ bind</button>
-        <button class="chip-btn primary" @click=${() => this.applyMapRows()}>apply to text</button>
+        <button class="chip-btn" title="add an image channel row" @click=${() => this.addMapChannel()}>+ channel</button>
+        <button class="chip-btn" title="add an at→key binding row" @click=${() => this.addMapBind()}>+ bind</button>
+        <button
+          class="chip-btn primary"
+          title="serialize the grid back into the map text and re-validate"
+          @click=${() => this.applyMapRows()}
+        >
+          apply to text
+        </button>
         <button
           class="chip-btn"
+          title="discard grid edits"
           @click=${() => {
             this.mapRows = undefined;
             this.requestUpdate();
@@ -5936,7 +6709,7 @@ export class TetherPlcIde extends LitElement {
                 <td>${cell(i, 'type', c.type, 8)}</td>
                 <td>${cell(i, 'safe', c.safe, 8)}</td>
                 <td>
-                  <button class="chip-btn" @click=${() => this.delMapRow('chan', i)}>✕</button>
+                  <button class="chip-btn" title="delete this channel row" @click=${() => this.delMapRow('chan', i)}>✕</button>
                 </td>
               </tr>`,
           )}
@@ -5973,7 +6746,11 @@ export class TetherPlcIde extends LitElement {
                           />
                         </td>
                         <td>
-                          <button class="chip-btn" @click=${() => this.delMapRow('bind', i)}>
+                          <button
+                            class="chip-btn"
+                            title="delete this binding row"
+                            @click=${() => this.delMapRow('bind', i)}
+                          >
                             ✕
                           </button>
                         </td>
@@ -6050,13 +6827,25 @@ export class TetherPlcIde extends LitElement {
         ${bus?.length ? html`<span class="plc-dim"> · bus ${bus.length} endpoints</span>` : nothing}
       </h4>
       <div class="plc-ops">
-        <button class="chip-btn" @click=${() => void this.onIoMap()}>load</button>
-        <button class="chip-btn" @click=${() => void this.onGenMap()}>generate</button>
-        <button class="chip-btn" ?disabled=${!draft.trim()} @click=${() => this.onValidateMap()}>
+        <button class="chip-btn" title="load the running package's deploy map" @click=${() => void this.onIoMap()}>load</button>
+        <button
+          class="chip-btn"
+          title="draft a deploy map from the project's AT bindings and device endpoints"
+          @click=${() => void this.onGenMap()}
+        >
+          generate
+        </button>
+        <button
+          class="chip-btn"
+          title="check the map text against project bindings and the discovered bus"
+          ?disabled=${!draft.trim()}
+          @click=${() => this.onValidateMap()}
+        >
           validate
         </button>
         <button
           class="chip-btn primary"
+          title="persist the map — injected as DEPLOY_MAP on build & deploy"
           ?disabled=${!draft.trim()}
           @click=${() => this.onSaveMap()}
         >
@@ -6066,6 +6855,7 @@ export class TetherPlcIde extends LitElement {
           saved
             ? html`<button
                 class="chip-btn"
+                title="remove the saved deploy map"
                 @click=${() => {
                   this.project.deployMap = undefined;
                   this.mapEdit = undefined;
@@ -6116,6 +6906,7 @@ export class TetherPlcIde extends LitElement {
           ? this.mapRowsEditor()
           : html` <button
               class="chip-btn"
+              title="open the channel/binding grid editor"
               ?disabled=${!draft.trim()}
               @click=${() => this.openMapRows()}
             >
@@ -6262,9 +7053,16 @@ export class TetherPlcIde extends LitElement {
         <span class="plc-dim">${lines.length ? `${lines.length} lines` : ''}</span>
       </h4>
       <div class="plc-ops">
-        <button class="chip-btn" @click=${() => void this.onJournal()}>tail</button>
         <button
           class="chip-btn"
+          title="fetch the last 50 audit journal lines"
+          @click=${() => void this.onJournal()}
+        >
+          tail
+        </button>
+        <button
+          class="chip-btn"
+          title="fetch the last 200 audit journal lines"
           ?disabled=${!lines.length}
           @click=${() => void this.onJournal(200)}
         >
@@ -6272,6 +7070,7 @@ export class TetherPlcIde extends LitElement {
         </button>
         <button
           class="chip-btn"
+          title="clear the journal view"
           ?disabled=${!lines.length}
           @click=${() => {
             this.journal = undefined;

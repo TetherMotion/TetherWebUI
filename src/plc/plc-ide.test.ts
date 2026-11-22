@@ -417,3 +417,133 @@ describe('plc-ide discovery card', () => {
     el.remove();
   });
 });
+
+describe('plc-ide devices panel (fbd workbench)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+    document.body.innerHTML = '';
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false }) as Response));
+  });
+
+  const seedWithNet = (): PlcProject => {
+    const fbd = emptyProject('demo');
+    fbd.pous.push({
+      id: 'p1',
+      name: 'main',
+      kind: 'program',
+      en_eno: 'off',
+      interface: [],
+      networks: [
+        {
+          id: 'n1', kind: 'fbd', label: '', comments: [], assocs: [],
+          labels: [], jumps: [], returns: [], blocks: [], wires: [],
+        },
+      ],
+    });
+    const p: PlcProject = { fbd, stSources: {} };
+    localStorage.setItem(KEY, JSON.stringify(p));
+    return p;
+  };
+
+  const topo = JSON.stringify({
+    v: 2,
+    slaves: [
+      { i: 0, part: 'EK1100', key: 'ek1100.c1', coupler: true, coupler_idx: 1, name: 'EK1100 coupler', vendor: 2, supported: true },
+      { i: 1, part: 'EL2008', key: 'el2008.c1', coupler_idx: 1, name: '8-ch DO', do: 8, rx: 1, vendor: 2, supported: true },
+    ],
+  });
+
+  const openDevices = async () => {
+    const el = await mount();
+    el.activity = 'program';
+    await el.updateComplete;
+    [...el.querySelectorAll<HTMLElement>('.plc-tree-pou')]
+      .find((r) => r.textContent?.includes('devices'))!
+      .click();
+    await el.updateComplete;
+    return el;
+  };
+
+  const blocks = () =>
+    JSON.parse(localStorage.getItem(KEY)!).fbd.pous.find(
+      (p: { name: string }) => p.name === 'main',
+    ).networks[0].blocks;
+
+  it('renders the doc even with no bus (offline catalog always usable)', async () => {
+    seedWithNet();
+    const el = await openDevices();
+    const dev = el.querySelector<HTMLElement>('.plc-dev-doc');
+    expect(dev).toBeTruthy();
+    expect(dev!.textContent).toContain('Devices');
+    expect(dev!.textContent).toContain('terminal catalog');
+    // target selector lists the project POUs
+    expect(dev!.querySelector('select option')?.textContent).toBe('main');
+    el.remove();
+  });
+
+  it('shows live bus + entity sections and adds blocks into the target POU', async () => {
+    seedWithNet();
+    const el = await openDevices();
+    (el as unknown as { busData: unknown }).busData = { simdir: '/tmp/x', topology: topo };
+    (el as unknown as { catGroups: unknown }).catGroups = [
+      {
+        name: 'homeassistant · ha_entity',
+        items: [
+          { kind: 'fb', type: 'FB_HaEntity', label: 'FB_HaEntity', hint: 'ha entity', lib: 'homeassistant', srcFile: 'ha_entity.st' },
+        ],
+      },
+    ];
+    el.requestUpdate();
+    await el.updateComplete;
+
+    const dev = () => el.querySelector<HTMLElement>('.plc-dev-doc')!;
+    expect(dev().textContent).toContain('EtherCAT bus');
+    expect(dev().textContent).toContain('EL2008');
+    expect(dev().textContent).toContain('entities');
+    expect(dev().textContent).toContain('FB_HaEntity');
+
+    // + device on the bus row → device block with the live endpoint
+    const row = [...el.querySelectorAll<HTMLElement>('.plc-busterm')].find((r) =>
+      r.textContent?.includes('EL2008'),
+    )!;
+    [...row.querySelectorAll<HTMLButtonElement>('.chip-btn')]
+      .find((b) => b.textContent?.trim() === '+ device')!
+      .click();
+    await el.updateComplete;
+    expect(blocks()).toHaveLength(1);
+    expect(blocks()[0].kind).toBe('device');
+    expect(blocks()[0].endpoint).toBe('el2008.c1');
+    expect(blocks()[0].pins).toHaveLength(8);
+
+    // entity button → catalog FB block in the same network
+    [...el.querySelectorAll<HTMLButtonElement>('.plc-dev-items .chip-btn')]
+      .find((b) => b.textContent?.includes('FB_HaEntity'))!
+      .click();
+    await el.updateComplete;
+    expect(blocks().some((b: { kind: string; type_ref: string }) => b.kind === 'fb' && b.type_ref === 'FB_HaEntity')).toBe(true);
+
+    el.remove();
+  });
+
+  it('adds an offline catalog terminal wired (vars + wires) via ⚡', async () => {
+    seedWithNet();
+    const el = await openDevices();
+    const zap = [...el.querySelectorAll<HTMLButtonElement>('.plc-dev-zap')].find((b) =>
+      b.title?.includes('EL2008'),
+    )!;
+    zap.click();
+    await el.updateComplete;
+
+    const p = JSON.parse(localStorage.getItem(KEY)!).fbd.pous.find(
+      (x: { name: string }) => x.name === 'main',
+    );
+    const net = p.networks[0];
+    expect(net.blocks.some((b: { kind: string }) => b.kind === 'device')).toBe(true);
+    expect(net.blocks.filter((b: { kind: string }) => b.kind === 'variable')).toHaveLength(8);
+    expect(net.wires.length).toBeGreaterThan(0);
+    // declared vars for each channel
+    expect(p.interface.length).toBe(8);
+    el.remove();
+  });
+});
