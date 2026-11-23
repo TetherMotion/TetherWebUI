@@ -11,6 +11,7 @@
  */
 import { html, LitElement, nothing, TemplateResult } from 'lit';
 import { DataHub } from '../data/hub';
+import { showContextMenu } from '../ctxmenu';
 import { ensureTileTag } from '../dash/loaders';
 import './fbd-canvas';
 import './ld-canvas';
@@ -551,7 +552,12 @@ export class TetherPlcIde extends LitElement {
   /** editor tabs — one per open document (POU, library source, globals). */
   private tabs: EditorTab[] = [];
   private activeTab?: string;
-  private inspectorOpen = true;
+  private inspectorOpen = localStorage.getItem('plc.inspOpen') !== '0';
+  /** workbench layout: sidebar widths (px) + explorer collapse — the
+      FBD canvas gets the leftover space. */
+  private sideW = Number(localStorage.getItem('plc.sideW')) || 230;
+  private inspW = Number(localStorage.getItem('plc.inspW')) || 280;
+  private sideCollapsed = localStorage.getItem('plc.sideCollapsed') === '1';
   /** bottom dock (Program + Debug): problems / watch / events. */
   private dockTab: DockTab = 'problems';
   private dockOpen = false;
@@ -1540,12 +1546,74 @@ export class TetherPlcIde extends LitElement {
     this.requestUpdate();
   }
 
+  /** Drag-resize the explorer/inspector — pointer-captured so the
+      handle can't lose the drag mid-flight. */
+  private startResize(e: PointerEvent, which: 'side' | 'insp'): void {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = which === 'side' ? this.sideW : this.inspW;
+    const handle = e.currentTarget as HTMLElement;
+    handle.setPointerCapture(e.pointerId);
+    handle.classList.add('drag');
+    const move = (ev: PointerEvent) => {
+      const dx = (ev.clientX - startX) * (which === 'side' ? 1 : -1);
+      const w = Math.min(560, Math.max(140, startW + dx));
+      if (which === 'side') this.sideW = w;
+      else this.inspW = w;
+      this.requestUpdate();
+    };
+    const done = () => {
+      handle.classList.remove('drag');
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', done);
+      handle.removeEventListener('pointercancel', done);
+      localStorage.setItem('plc.sideW', String(this.sideW));
+      localStorage.setItem('plc.inspW', String(this.inspW));
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', done);
+    handle.addEventListener('pointercancel', done);
+  }
+
+  private setInspector(open: boolean): void {
+    this.inspectorOpen = open;
+    localStorage.setItem('plc.inspOpen', open ? '1' : '0');
+    this.requestUpdate();
+  }
+
+  private setSideCollapsed(collapsed: boolean): void {
+    this.sideCollapsed = collapsed;
+    localStorage.setItem('plc.sideCollapsed', collapsed ? '1' : '0');
+    this.requestUpdate();
+  }
+
   /** The workbench — Program activity's whole body. */
   private workbench(): TemplateResult {
     const tab = this.tabs.find((t) => t.key === this.activeTab);
     return html`
       <div class="plc-workbench">
-        <aside class="plc-side tile-scroll">${this.explorerTree()}</aside>
+        ${this.sideCollapsed
+          ? html`<div class="plc-side-col">
+              <button
+                class="plc-colbtn"
+                title="show project explorer"
+                @click=${() => this.setSideCollapsed(false)}
+              >▸</button>
+              <span class="plc-collabel">explorer</span>
+            </div>`
+          : html`<aside class="plc-side tile-scroll" style="width:${this.sideW}px">
+              <button
+                class="plc-colbtn plc-side-hide"
+                title="collapse explorer"
+                @click=${() => this.setSideCollapsed(true)}
+              >◂</button>
+              ${this.explorerTree()}
+            </aside>
+            <div
+              class="plc-rsz"
+              title="drag to resize the explorer"
+              @pointerdown=${(e: PointerEvent) => this.startResize(e, 'side')}
+            ></div>`}
         <div class="plc-editor">
           <div class="plc-tabs">
             ${this.tabs.map((t) => this.tabChip(t))}
@@ -1554,9 +1622,7 @@ export class TetherPlcIde extends LitElement {
             <button
               class="chip-btn"
               title=${this.inspectorOpen ? 'hide inspector' : 'show inspector'}
-              @click=${() => {
-                this.inspectorOpen = !this.inspectorOpen;
-              }}
+              @click=${() => this.setInspector(!this.inspectorOpen)}
             >
               ${this.inspectorOpen ? 'inspector ▸' : '◂ inspector'}
             </button>
@@ -1564,7 +1630,28 @@ export class TetherPlcIde extends LitElement {
           ${tab?.kind === 'pou' ? this.editorKindBar(tab) : nothing}
           <div class="plc-edbody">${this.tabBody(tab)}</div>
         </div>
-        ${this.inspectorOpen ? html`<aside class="plc-insp tile-scroll">${this.inspectorBody(tab)}</aside>` : nothing}
+        ${this.inspectorOpen
+          ? html`<div
+                class="plc-rsz"
+                title="drag to resize the inspector"
+                @pointerdown=${(e: PointerEvent) => this.startResize(e, 'insp')}
+              ></div>
+              <aside class="plc-insp tile-scroll" style="width:${this.inspW}px">
+                <button
+                  class="plc-colbtn plc-side-hide"
+                  title="collapse inspector"
+                  @click=${() => this.setInspector(false)}
+                >▸</button>
+                ${this.inspectorBody(tab)}
+              </aside>`
+          : html`<div class="plc-side-col">
+              <button
+                class="plc-colbtn"
+                title="show inspector"
+                @click=${() => this.setInspector(true)}
+              >◂</button>
+              <span class="plc-collabel">inspector</span>
+            </div>`}
       </div>
     `;
   }
@@ -2046,6 +2133,7 @@ export class TetherPlcIde extends LitElement {
         <div
           class="plc-tree-head plc-tree-proj"
           title="the open project — select or create another from the top bar"
+          @contextmenu=${(e: MouseEvent) => this.projectMenu(e)}
         >
           <span class="plc-tree-projname">${this.projInfo?.name ?? fbd.project}</span>
           <span class="plc-dim plc-tree-proot"
@@ -2066,6 +2154,7 @@ export class TetherPlcIde extends LitElement {
                 this.selNet = 0;
                 this.openTab(pou.id, 'fbd');
               }}
+              @contextmenu=${(e: MouseEvent) => this.pouMenu(e, pou)}
             >
               <span class="plc-kind"
                 >${pou.kind === 'program' ? 'PRG' : pou.kind === 'function_block' ? 'FB' : 'FUN'}</span
@@ -2082,6 +2171,7 @@ export class TetherPlcIde extends LitElement {
                           this.selNet = i;
                           this.openTab(pou.id, 'fbd');
                         }}
+                        @contextmenu=${(e: MouseEvent) => this.netMenu(e, pou, i)}
                       >
                         net ${i + 1}${n.label ? ` · ${n.label}` : ''}
                         <span class="plc-dim">(${n.blocks.length}b ${n.wires.length}w)</span>
@@ -2095,12 +2185,14 @@ export class TetherPlcIde extends LitElement {
         <div
           class="plc-tree-pou ${this.selPou === '__globals' ? 'sel' : ''}"
           @click=${() => this.openTab('__globals', 'globals')}
+          @contextmenu=${(e: MouseEvent) => this.globalsMenu(e)}
         >
           <span class="plc-kind">VAR</span> globals
         </div>
         <div
           class="plc-tree-pou ${this.selPou === '__devices' ? 'sel' : ''}"
           @click=${() => this.openTab('__devices', 'devices')}
+          @contextmenu=${(e: MouseEvent) => this.devicesMenu(e)}
         >
           <span class="plc-kind">DEV</span> devices
         </div>
@@ -2108,8 +2200,13 @@ export class TetherPlcIde extends LitElement {
           fbd.tasks.length
             ? html`<div class="plc-tree-head"><span>Tasks</span></div>
                 ${fbd.tasks.map(
-                  (t) =>
-                    html`<div class="plc-tree-net">
+                  (t, ti) =>
+                    html`<div
+                      class="plc-tree-net"
+                      title="task ${t.name} — ${t.period_ns / 1e6}ms period"
+                      @click=${() => this.gotoActivity('configure', 'tasks')}
+                      @contextmenu=${(e: MouseEvent) => this.taskMenu(e, ti)}
+                    >
                       ${t.name} <span class="plc-dim">${t.period_ns / 1e6}ms</span>
                     </div>`,
                 )}`
@@ -2156,6 +2253,7 @@ export class TetherPlcIde extends LitElement {
             this.gotoActivity('program', 'explorer');
             this.openTab(n, 'lib');
           }}
+          @contextmenu=${(e: MouseEvent) => this.libraryMenu(e, n)}
         >
           ${n} <span class="plc-dim">${this.project.stSources[n]!.length} B</span>
           <button
@@ -2167,6 +2265,266 @@ export class TetherPlcIde extends LitElement {
           </button>
         </div>`,
     )}`;
+  }
+
+  // ---- explorer context menus -------------------------------------------
+
+  private projectMenu(e: MouseEvent): void {
+    e.preventDefault();
+    showContextMenu(e.clientX, e.clientY, [
+      {
+        label: 'Select / create project…',
+        title: 'open the project picker — switch workspace, open or scaffold a new project',
+        action: () => this.openProjectPicker(),
+      },
+      {
+        label: 'Project settings…',
+        title: 'open Configure → Project (manifest, sources, UI document)',
+        action: () => this.gotoActivity('configure', 'project'),
+      },
+    ]);
+  }
+
+  private pouMenu(e: MouseEvent, pou: Pou): void {
+    e.preventDefault();
+    showContextMenu(e.clientX, e.clientY, [
+      {
+        label: 'Open FBD',
+        title: `open ${pou.name} in the function-block diagram editor`,
+        action: () => {
+          this.selNet = 0;
+          this.openTab(pou.id, 'fbd');
+        },
+      },
+      {
+        label: 'Open ST source',
+        title: `open ${pou.name}'s structured-text source`,
+        action: () => void this.openStSource(pou.name),
+      },
+      { sep: true },
+      {
+        label: 'Duplicate POU',
+        title: `deep-copy ${pou.name} — networks, blocks, wires and ST source — as ${pou.name}_copy`,
+        action: () => this.duplicatePou(pou),
+      },
+      {
+        label: 'Rename…',
+        title: `rename ${pou.name} — updates call sites in ST sources and task bindings`,
+        action: () => this.renamePouItem(pou),
+      },
+      { sep: true },
+      {
+        label: 'Delete POU',
+        danger: true,
+        title: `remove ${pou.name}, its ST source and its task bindings — cannot be undone`,
+        action: () => this.onDelPou(pou),
+      },
+    ]);
+  }
+
+  private netMenu(e: MouseEvent, pou: Pou, i: number): void {
+    e.preventDefault();
+    const n = pou.networks[i]!;
+    showContextMenu(e.clientX, e.clientY, [
+      {
+        label: `Open net ${i + 1}`,
+        title: `switch to network ${i + 1}${n.label ? ` (${n.label})` : ''} — ${n.blocks.length} blocks, ${n.wires.length} wires`,
+        action: () => {
+          this.selNet = i;
+          this.openTab(pou.id, 'fbd');
+        },
+      },
+      {
+        label: 'Move earlier',
+        title: 'run this network before the previous one',
+        disabled: i === 0,
+        action: () => this.moveNetwork(pou, -1),
+      },
+      {
+        label: 'Move later',
+        title: 'run this network after the next one',
+        disabled: i >= pou.networks.length - 1,
+        action: () => this.moveNetwork(pou, 1),
+      },
+      { sep: true },
+      {
+        label: 'Add FBD network',
+        title: 'append a new function-block diagram network to this POU',
+        action: () => this.addNetwork(pou, 'fbd'),
+      },
+      {
+        label: 'Add LD network',
+        title: 'append a new ladder-diagram network to this POU',
+        action: () => this.addNetwork(pou, 'ld'),
+      },
+      { sep: true },
+      {
+        label: 'Delete network',
+        danger: true,
+        title: 'remove this network and all its blocks/wires — cannot be undone',
+        disabled: pou.networks.length <= 1,
+        action: () => this.delNetwork(pou, i),
+      },
+    ]);
+  }
+
+  private globalsMenu(e: MouseEvent): void {
+    e.preventDefault();
+    showContextMenu(e.clientX, e.clientY, [
+      {
+        label: 'Open globals',
+        title: 'open the VAR_GLOBAL table — shared variables visible to every POU',
+        action: () => this.openTab('__globals', 'globals'),
+      },
+      {
+        label: 'Add variable…',
+        title: 'open globals and append a new VAR_GLOBAL entry',
+        action: () => {
+          this.openTab('__globals', 'globals');
+          this.addGlobalVar();
+        },
+      },
+    ]);
+  }
+
+  private devicesMenu(e: MouseEvent): void {
+    e.preventDefault();
+    showContextMenu(e.clientX, e.clientY, [
+      {
+        label: 'Open devices',
+        title: 'open the device/terminal channel editor — process-image bindings for field devices',
+        action: () => this.openTab('__devices', 'devices'),
+      },
+    ]);
+  }
+
+  private taskMenu(e: MouseEvent, i: number): void {
+    e.preventDefault();
+    const t = this.project.fbd.tasks[i];
+    if (!t) return;
+    showContextMenu(e.clientX, e.clientY, [
+      {
+        label: 'Open Tasks settings',
+        title: `edit ${t.name} — period ${t.period_ns / 1e6}ms, priority ${t.priority}, bound programs`,
+        action: () => this.gotoActivity('configure', 'tasks'),
+      },
+      {
+        label: 'Delete task',
+        danger: true,
+        title: `remove ${t.name} — its programs stop being scheduled`,
+        action: () => this.delTask(i),
+      },
+    ]);
+  }
+
+  private libraryMenu(e: MouseEvent, name: string): void {
+    e.preventDefault();
+    showContextMenu(e.clientX, e.clientY, [
+      {
+        label: 'Open source',
+        title: `open ${name} in the ST editor`,
+        action: () => {
+          this.gotoActivity('program', 'explorer');
+          this.openTab(name, 'lib');
+        },
+      },
+      {
+        label: 'Detach source',
+        danger: true,
+        title: `remove ${name} from the project — blocks using it will no longer resolve`,
+        action: () => this.detachSource(name),
+      },
+    ]);
+  }
+
+  /** Deep-copy a POU — networks, blocks, wires, annotations and its ST
+      source — under `<name>_copy` (suffixed until unique). Node ids are
+      remapped so they stay unique inside the new POU. */
+  private duplicatePou(pou: Pou): void {
+    const fbd = this.project.fbd;
+    const base = `${pou.name}_copy`;
+    let name = base;
+    for (let n = 2; fbd.pous.some((p) => p.name.toUpperCase() === name.toUpperCase()); n++)
+      name = `${base}${n}`;
+    const clone = structuredClone(pou) as Pou;
+    clone.id = name;
+    clone.name = name;
+    /* ids come from one per-POU counter — find its ceiling, then remap
+       every node id in the clone through a single old→new map */
+    let next = 1;
+    for (const net of pou.networks)
+      for (const coll of [
+        net.blocks,
+        net.wires,
+        net.comments,
+        net.labels,
+        net.jumps,
+        net.returns,
+      ])
+        for (const node of coll) next = Math.max(next, (node as { id: number }).id + 1);
+    const remap = new Map<number, number>();
+    const nid = (old: number): number => {
+      let v = remap.get(old);
+      if (v === undefined) {
+        v = next++;
+        remap.set(old, v);
+      }
+      return v;
+    };
+    for (const net of clone.networks) {
+      for (const b of net.blocks) b.id = nid(b.id);
+      for (const w of net.wires) {
+        const src = w.src.block;
+        const dsts = w.dsts.map((d) => ({ block: d.block, port: d.port }));
+        w.id = nid(w.id);
+        w.src = { block: remap.get(src)!, port: w.src.port };
+        w.dsts = dsts.map((d) => ({ block: remap.get(d.block)!, port: d.port }));
+      }
+      for (const a of net.assocs) a.dst.block = remap.get(a.dst.block)!;
+      for (const c of net.comments) c.id = nid(c.id);
+      for (const l of net.labels) l.id = nid(l.id);
+      for (const j of net.jumps) j.id = nid(j.id);
+      for (const r of net.returns) r.id = nid(r.id);
+    }
+    const at = fbd.pous.indexOf(pou);
+    fbd.pous.splice(at < 0 ? fbd.pous.length : at + 1, 0, clone);
+    if (this.project.stSources[pou.name] !== undefined)
+      this.project.stSources[name] = this.project.stSources[pou.name]!;
+    this.selPou = name;
+    this.selNet = 0;
+    this.openTab(name, 'fbd');
+    this.save();
+    this.status = `duplicated ${pou.name} → ${name}`;
+  }
+
+  /** Rename a POU project-wide — same semantics as the ST-editor rename:
+      stSources keys + call sites, fbd name, task program bindings. */
+  private renamePouItem(pou: Pou): void {
+    const nw = window.prompt(`Rename '${pou.name}' to:`, pou.name);
+    if (!nw || nw === pou.name || !/^[A-Za-z_]\w*$/.test(nw)) return;
+    if (this.project.fbd.pous.some((p) => p !== pou && p.name.toUpperCase() === nw.toUpperCase())) {
+      this.status = `rename failed — '${nw}' already exists`;
+      return;
+    }
+    const r = renamePou(this.stNavWorld(), pou.name, nw);
+    this.project.stSources = r.stSources;
+    for (const p of this.project.fbd.pous)
+      if (p.name.toUpperCase() === pou.name.toUpperCase()) p.name = nw;
+    for (const tk of this.project.fbd.tasks ?? []) {
+      const progs = (tk as { programs?: string[] }).programs;
+      if (progs)
+        for (let i = 0; i < progs.length; i++)
+          if (progs[i]!.toUpperCase() === pou.name.toUpperCase()) progs[i] = nw;
+    }
+    this.save();
+    this.status = `renamed ${pou.name} → ${nw}`;
+  }
+
+  private delNetwork(pou: Pou, i: number): void {
+    if (pou.networks.length <= 1 || i < 0 || i >= pou.networks.length) return;
+    pou.networks.splice(i, 1);
+    this.selNet = Math.min(this.selNet, pou.networks.length - 1);
+    this.save();
   }
 
   private selPouDetail(): TemplateResult {

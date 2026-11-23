@@ -39,6 +39,7 @@ import {
   typeSize,
 } from './deploymap';
 import type { ProjectBinding } from './plc-ide';
+import { showContextMenu, type CtxItem } from '../ctxmenu';
 
 /** Compact live-value formatting for pin labels. */
 function fmtLive(v: unknown): string {
@@ -475,6 +476,204 @@ export class FbdCanvas extends LitElement {
     this.selWire = undefined;
   }
 
+  // ---- context menus ------------------------------------------------------
+
+  /** Right-click on empty canvas — clipboard, annotations, device wizard,
+      history. */
+  private onCanvasMenu(e: MouseEvent): void {
+    e.preventDefault();
+    const cb = this.clipboard;
+    showContextMenu(e.clientX, e.clientY, [
+      {
+        label: 'Paste',
+        hint: 'Ctrl+V',
+        title: 'paste the copied blocks/wires offset by one grid cell',
+        disabled: !cb?.blocks.length,
+        action: () => this.paste(),
+      },
+      {
+        label: 'Select all blocks',
+        hint: 'Ctrl+A',
+        title: 'select every block in this network',
+        action: () => {
+          this.selIds = new Set(this.net?.blocks.map((b) => b.id));
+          this.selWire = undefined;
+          this.selNote = undefined;
+          this.requestUpdate();
+        },
+      },
+      { sep: true },
+      {
+        label: 'Block library…',
+        hint: 'B',
+        title: 'open the block library — operators, FBs, functions, devices, conversions',
+        action: () => this.toggleLib(),
+      },
+      {
+        label: 'Add device / terminal…',
+        title: 'wizard for an I/O terminal — generates channel pins bound to %I/%Q addresses',
+        action: () => this.openDeviceWizard(),
+      },
+      { sep: true },
+      { label: 'Add comment', title: 'arm comment placement — next canvas click drops it', action: () => this.armPlacing('comment') },
+      { label: 'Add label', title: 'arm label placement — next canvas click drops it', action: () => this.armPlacing('label') },
+      { label: 'Add jump', title: 'arm jump placement — next canvas click drops it', action: () => this.armPlacing('jump') },
+      { label: 'Add return', title: 'arm return-marker placement — next canvas click drops it', action: () => this.armPlacing('return') },
+      { sep: true },
+      { label: 'Undo', hint: 'Ctrl+Z', title: 'undo the last canvas change in this network', action: () => this.undo() },
+      { label: 'Redo', hint: 'Ctrl+Y', title: 'redo the last undone change', action: () => this.redo() },
+    ]);
+  }
+
+  /** Right-click on a block — selects it first if it wasn't selected. */
+  private onBlockMenu(e: MouseEvent, b: Block): void {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!this.selIds.has(b.id)) {
+      this.selIds = new Set([b.id]);
+      this.selWire = undefined;
+      this.selNote = undefined;
+    }
+    const items: CtxItem[] = [
+      {
+        label: this.selIds.size > 1 ? `Copy ${this.selIds.size} blocks` : 'Copy',
+        hint: 'Ctrl+C',
+        title: 'copy the selected blocks and their internal wires to the clipboard',
+        action: () => this.copySel(),
+      },
+      {
+        label: 'Duplicate',
+        hint: 'Ctrl+D',
+        title: 'copy and immediately paste an offset clone of the selection',
+        action: () => {
+          this.copySel();
+          this.paste();
+        },
+      },
+    ];
+    if (this.selIds.size > 1)
+      items.push(
+        { sep: true },
+        {
+          label: 'Align left edges',
+          title: 'move all selected blocks to the leftmost x position',
+          action: () => this.alignSel('x'),
+        },
+        {
+          label: 'Align top edges',
+          title: 'move all selected blocks to the topmost y position',
+          action: () => this.alignSel('y'),
+        },
+      );
+    items.push(
+      { sep: true },
+      {
+        label: 'Delete',
+        hint: 'Del',
+        danger: true,
+        title: 'delete the selected blocks and their wires — Ctrl+Z undoes',
+        action: () => this.deleteSel(),
+      },
+    );
+    showContextMenu(e.clientX, e.clientY, items);
+  }
+
+  /** Right-click on a wire — probe toggle, reconnect hint, delete. */
+  private onWireMenu(e: MouseEvent, w: Wire): void {
+    e.preventDefault();
+    e.stopPropagation();
+    this.selWire = w.id;
+    this.selIds = new Set();
+    this.selNote = undefined;
+    this.pendingRec = undefined; // a right-press may have started a reconnect drag
+    showContextMenu(e.clientX, e.clientY, [
+      {
+        label: w.probe ? 'Remove live probe' : 'Toggle live probe',
+        hint: 'P',
+        title:
+          'show this wire\'s value live while running — the compiler emits a __probe field for it',
+        action: () => this.toggleProbe(),
+      },
+      {
+        label: 'Reconnect an end…',
+        title: 'select the wire and drag an end dot onto another pin to re-source or re-destination it',
+        disabled: true,
+      },
+      { sep: true },
+      {
+        label: 'Delete wire',
+        danger: true,
+        title: 'remove this wire — Ctrl+Z undoes',
+        action: () => this.deleteSel(),
+      },
+    ]);
+  }
+
+  /** Right-click on an annotation node (comment/label/jump/return). */
+  private onNoteMenu(e: MouseEvent, kind: SelNote['kind'], id: number): void {
+    e.preventDefault();
+    e.stopPropagation();
+    this.selNote = { kind, id };
+    this.selIds = new Set();
+    this.selWire = undefined;
+    const items: CtxItem[] = [];
+    if (kind !== 'return')
+      items.push({
+        label: 'Edit…',
+        title:
+          kind === 'comment'
+            ? 'change the comment text'
+            : kind === 'label'
+              ? 'change the label name'
+              : 'change the jump target label',
+        action: () => this.editNote(kind, id),
+      });
+    items.push(
+      { sep: true },
+      {
+        label: 'Delete',
+        hint: 'Del',
+        danger: true,
+        title: 'remove this annotation — Ctrl+Z undoes',
+        action: () => this.deleteSel(),
+      },
+    );
+    showContextMenu(e.clientX, e.clientY, items);
+  }
+
+  /** Right-click on a pin — in-pins offer negation, out-pins offer to
+      start a wire drag from that output. */
+  private onPinMenu(e: MouseEvent, b: Block, i: number, dir: 'in' | 'out'): void {
+    e.preventDefault();
+    e.stopPropagation();
+    if (dir === 'in') {
+      const neg = new Set(b.negated).has(i);
+      showContextMenu(e.clientX, e.clientY, [
+        {
+          label: neg ? 'Remove negation' : 'Negate pin',
+          title:
+            'invert the signal on this input — drawn as a negation bubble; same as shift-click',
+          action: () => this.toggleNegation(b, i),
+        },
+      ]);
+      return;
+    }
+    /* a right-press on an out-pin already started a pending wire via
+       onOutPinDown — cancel it, then offer to arm it deliberately */
+    this.pending = undefined;
+    const p = this.svgPt(e);
+    showContextMenu(e.clientX, e.clientY, [
+      {
+        label: 'Start wire from this pin',
+        title: 'begin a wire drag from this output — release on an input pin or empty canvas',
+        action: () => {
+          this.pending = { block: b.id, port: i, x: p.x, y: p.y };
+          this.requestUpdate();
+        },
+      },
+    ]);
+  }
+
   // ---- clipboard + align ----------------------------------------------
 
   private copySel(): void {
@@ -895,6 +1094,10 @@ export class FbdCanvas extends LitElement {
   private onPinClick(e: MouseEvent, b: Block, i: number): void {
     if (!e.shiftKey) return;
     e.stopPropagation();
+    this.toggleNegation(b, i);
+  }
+
+  private toggleNegation(b: Block, i: number): void {
     this.mutate((net) => {
       const blk = net.blocks.find((x) => x.id === b.id);
       if (!blk) return;
@@ -1117,12 +1320,14 @@ export class FbdCanvas extends LitElement {
           @pointermove=${this.onSvgMove}
           @pointerup=${this.onSvgUp}
           @wheel=${this.onWheel}
+          @contextmenu=${(e: MouseEvent) => this.onCanvasMenu(e)}
         >
           ${net.comments.map(
             (c) => svg`<g class="fbd-note-g ${this.selNote?.kind === 'comment' && this.selNote.id === c.id ? 'sel' : ''}"
                 transform="translate(${c.pos.x * GX} ${c.pos.y * GX})"
                 @pointerdown=${(e: PointerEvent) => this.onNoteDown(e, 'comment', c.id)}
-                @dblclick=${() => this.editNote('comment', c.id)}>
+                @dblclick=${() => this.editNote('comment', c.id)}
+                @contextmenu=${(e: MouseEvent) => this.onNoteMenu(e, 'comment', c.id)}>
               <rect class="fbd-note" width="180" height="40"></rect>
               <text class="fbd-note-text" x="4" y="14">${c.text}</text>
             </g>`,
@@ -1132,20 +1337,23 @@ export class FbdCanvas extends LitElement {
               svg`<text class="fbd-label ${this.selNote?.kind === 'label' && this.selNote.id === l.id ? 'sel' : ''}"
                 x="${l.pos.x * GX}" y="${l.pos.y * GX}"
                 @pointerdown=${(e: PointerEvent) => this.onNoteDown(e, 'label', l.id)}
-                @dblclick=${() => this.editNote('label', l.id)}>${l.name}:</text>`,
+                @dblclick=${() => this.editNote('label', l.id)}
+                @contextmenu=${(e: MouseEvent) => this.onNoteMenu(e, 'label', l.id)}>${l.name}:</text>`,
           )}
           ${net.jumps.map(
             (j) =>
               svg`<text class="fbd-label ${this.selNote?.kind === 'jump' && this.selNote.id === j.id ? 'sel' : ''}"
                 x="${j.pos.x * GX}" y="${j.pos.y * GX}"
                 @pointerdown=${(e: PointerEvent) => this.onNoteDown(e, 'jump', j.id)}
-                @dblclick=${() => this.editNote('jump', j.id)}>→ ${j.target}</text>`,
+                @dblclick=${() => this.editNote('jump', j.id)}
+                @contextmenu=${(e: MouseEvent) => this.onNoteMenu(e, 'jump', j.id)}>→ ${j.target}</text>`,
           )}
           ${net.returns.map(
             (r) =>
               svg`<text class="fbd-label ${this.selNote?.kind === 'return' && this.selNote.id === r.id ? 'sel' : ''}"
                 x="${r.pos.x * GX}" y="${r.pos.y * GX}"
-                @pointerdown=${(e: PointerEvent) => this.onNoteDown(e, 'return', r.id)}>RET</text>`,
+                @pointerdown=${(e: PointerEvent) => this.onNoteDown(e, 'return', r.id)}
+                @contextmenu=${(e: MouseEvent) => this.onNoteMenu(e, 'return', r.id)}>RET</text>`,
           )}
           ${net.wires.map((w) => this.wireSvg(w, net))}
           ${net.blocks.map((b) => this.blockSvg(b, net))}
@@ -2186,7 +2394,8 @@ export class FbdCanvas extends LitElement {
       `${bad(pn) ? 'err' : warn(pn) ? 'warn' : ''}${dir === 'in' && neg.has(ins.indexOf(pn)) ? ' negated' : ''}`;
     return svg`
       <g class="fbd-block ${sel ? 'sel' : ''} ${flagged || bad() ? 'diag' : ''}" transform="translate(${x} ${y})"
-         @pointerdown=${(e: PointerEvent) => this.onBlockDown(e, b)}>
+         @pointerdown=${(e: PointerEvent) => this.onBlockDown(e, b)}
+         @contextmenu=${(e: MouseEvent) => this.onBlockMenu(e, b)}>
         <rect class="fbd-rect" width="${w}" height="${h}" rx="3"></rect>
         <text class="fbd-title" x="${w / 2}" y="13">${title}</text>
         ${b.at ? svg`<text class="fbd-at" x="${w / 2}" y="${h - 4}">${b.at}</text>` : nothing}
@@ -2198,7 +2407,8 @@ export class FbdCanvas extends LitElement {
               data-node="${b.id}" data-pin="${i}"
               @pointerdown=${(e: PointerEvent) => e.stopPropagation()}
               @pointerup=${(e: PointerEvent) => this.onInPinUp(e, b, i)}
-              @click=${(e: MouseEvent) => this.onPinClick(e, b, i)}>
+              @click=${(e: MouseEvent) => this.onPinClick(e, b, i)}
+              @contextmenu=${(e: MouseEvent) => this.onPinMenu(e, b, i, 'in')}>
               ${pn || t ? svg`<title>${pn}${pn && t ? ' : ' : ''}${t}</title>` : nothing}
             </circle>
             ${neg.has(i) ? svg`<circle class="fbd-neg" cx="0" cy="${ROW + i * ROW + ROW / 2}" r="${PIN_R + 2.5}"></circle>` : nothing}
@@ -2212,7 +2422,8 @@ export class FbdCanvas extends LitElement {
           return svg`
             <circle class="fbd-pin out ${pinCls(pn, 'out')}" cx="${w}" cy="${ROW + i * ROW + ROW / 2}" r="${PIN_R}"
               data-node="${b.id}" data-pin="${i}"
-              @pointerdown=${(e: PointerEvent) => this.onOutPinDown(e, b, i)}>
+              @pointerdown=${(e: PointerEvent) => this.onOutPinDown(e, b, i)}
+              @contextmenu=${(e: MouseEvent) => this.onPinMenu(e, b, i, 'out')}>
               ${pn || t ? svg`<title>${pn}${pn && t ? ' : ' : ''}${t}</title>` : nothing}
             </circle>
             ${pn ? svg`<text class="fbd-pin-name" x="${w - 6}" y="${ROW + i * ROW + ROW / 2 + 3}" text-anchor="end">${pn}</text>` : nothing}
@@ -2257,7 +2468,8 @@ export class FbdCanvas extends LitElement {
            this.selIds = new Set();
            this.selNote = undefined;
            e.stopPropagation();
-         }}>
+         }}
+         @contextmenu=${(e: MouseEvent) => this.onWireMenu(e, w)}>
         ${
           live !== undefined
             ? svg`<text class="fbd-live" x="${from.x + 8}" y="${from.y - 5}">${String(

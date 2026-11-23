@@ -44,14 +44,17 @@ test.describe('rail + devices', () => {
     await page.screenshot({ path: testInfo.outputPath('rail.png') });
 
     // Devices rail entry → program activity + devices doc tab.
-    // A fresh project has no POUs — the doc explains, then becomes
-    // usable once a program exists.
+    // With no POUs the doc explains the empty state; a served workspace
+    // that already has POUs (reused tplc-serve backend) skips straight
+    // to the usable view — accept either.
     await page.locator('.rail-act', { hasText: 'Devices' }).click();
     await expect(page.locator('.plc-dev-doc')).toBeVisible();
-    await expect(page.locator('.plc-dev-doc')).toContainText('no POU yet');
-    await page.locator('.plc-tree-head .chip-btn', { hasText: '+PRG' }).click();
-    // +PRG opens the new POU — switch back to the devices tab
-    await page.locator('.plc-tab', { hasText: 'devices' }).click();
+    if (!(await page.locator('.plc-dev-doc select option').count())) {
+      await expect(page.locator('.plc-dev-doc')).toContainText('no POU yet');
+      await page.locator('.plc-tree-head .chip-btn', { hasText: '+PRG' }).click();
+      // +PRG opens the new POU — switch back to the devices tab
+      await page.locator('.plc-tab', { hasText: 'devices' }).click();
+    }
     await expect(page.locator('.plc-dev-doc')).toContainText('terminal catalog');
     await expect(page.locator('.plc-dev-doc')).toContainText('entities');
     await expect(page.locator('.plc-dev-doc select option').first()).toBeAttached();

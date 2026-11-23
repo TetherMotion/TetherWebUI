@@ -21,7 +21,21 @@ export default defineConfig({
     __GIT_SHA__: JSON.stringify(gitSha),
     __BUILD_TIME__: JSON.stringify(buildTime),
   },
-  build: { outDir: 'dist', emptyOutDir: true },
+  build: {
+    outDir: 'dist',
+    emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id: string) {
+          if (!id.includes('node_modules')) return;
+          if (id.includes('@codemirror') || id.includes('@lezer')) return 'codemirror';
+          if (id.includes('/lit/') || id.includes('/lit-element/') || id.includes('/lit-html/'))
+            return 'lit';
+          return 'vendor';
+        },
+      },
+    },
+  },
   plugins: [
     {
       name: 'build-metadata',
