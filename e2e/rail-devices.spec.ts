@@ -60,8 +60,7 @@ test.describe('rail + devices', () => {
     await expect(page.locator('.plc-dev-doc select option').first()).toBeAttached();
     await page.screenshot({ path: testInfo.outputPath('devices-doc.png') });
 
-    // the doc is also reachable from the explorer sidebar
-    await page.locator('.plc-tree-pou', { hasText: 'devices' }).click();
-    await expect(page.locator('.plc-dev-doc')).toBeVisible();
+    // devices must NOT appear in the project tree — rail entry only
+    await expect(page.locator('.plc-tree-pou', { hasText: 'devices' })).toHaveCount(0);
   });
 });

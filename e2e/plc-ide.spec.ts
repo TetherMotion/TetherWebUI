@@ -69,12 +69,11 @@ test.describe('TetherPLC IDE', () => {
     await newPou(page, 'function');
     await expect(page.locator('.plc-tree-pou', { hasText: 'POU3' })).toContainText('FUN');
 
-    /* .plc-tree-pou also matches the unconditional "globals" and
-       "devices" rows — count only real POUs */
+    /* .plc-tree-pou also matches the unconditional "globals" row —
+       count only real POUs */
     const pouCount = await page
       .locator('.plc-tree-pou')
       .filter({ hasNotText: 'globals' })
-      .filter({ hasNotText: 'devices' })
       .count();
     expect(pouCount).toBe(3);
   });

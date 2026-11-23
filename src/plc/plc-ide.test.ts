@@ -458,9 +458,8 @@ describe('plc-ide devices panel (fbd workbench)', () => {
     const el = await mount();
     el.activity = 'program';
     await el.updateComplete;
-    [...el.querySelectorAll<HTMLElement>('.plc-tree-pou')]
-      .find((r) => r.textContent?.includes('devices'))!
-      .click();
+    // devices lives behind the rail entry, not the project tree
+    el.navigate('program', 'devices');
     await el.updateComplete;
     return el;
   };
