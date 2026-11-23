@@ -22,7 +22,7 @@
  * Expr templates use `{P}` = the src's own handoff pin name and
  * `{P0}`/`{P1}` = first/second src pin inside gain writes.
  */
-import { Block, IfaceVar, PortSel, Pou, nextNodeId } from './model';
+import { Block, IfaceVar, Network, PortSel, Pou, nextNodeId } from './model';
 import { controllerDef } from './curve';
 
 export type TuneKind = 'relay' | 'step' | 'lqr' | 'lqg';
@@ -417,16 +417,57 @@ export function applyTunerToPou(pou: Pou, cfg: TuneCfg): void {
     };
     pou.networks.push(net);
   }
+  applyTunerToNet(pou, pou.networks.indexOf(net), cfg);
+}
+
+/** All tuner FB type refs across kinds (canvas edit detection). */
+export const TUNER_FB_TYPES: ReadonlySet<string> = new Set(
+  (Object.keys(SRC_DEFS) as TuneKind[]).flatMap((k) => SRC_DEFS[k].map((s) => s.fb)),
+);
+
+/**
+ * Insert (or refresh) the tuner set + handoff block into ONE network —
+ * used by the block editor dialog so a POU can host several tuners.
+ * The handoff drop is scoped to st blocks aliased to this cfg's
+ * instances so sibling tuner groups survive.
+ */
+export function applyTunerToNet(pou: Pou, netIndex: number, cfg: TuneCfg): void {
+  const net = pou.networks[netIndex];
+  if (!net) return;
   const c = CONTROLLERS[cfg.kind];
   const y = 8 + Math.floor(net.blocks.length / 6) * 6;
 
-  // drop a previous handoff for this cfg (identified by CODE marker)
-  // plus every wire touching it — dsts are re-created below
-  const dead = new Set(
-    net.blocks
-      .filter((b) => b.kind === 'st' && (b.params.CODE ?? '').includes('applied :='))
-      .map((b) => b.id),
-  );
+  /* instance names this apply owns: cfg names + instances of existing
+     tuner blocks of this kind (covers renames — the old block still
+     carries the old name) */
+  const instNames = new Set<string>();
+  for (const n of [cfg.instance, cfg.instance2, cfg.ctlInstance])
+    if (n) instNames.add(n.toUpperCase());
+  for (const s of SRC_DEFS[cfg.kind]) {
+    const b = net.blocks.find((x) => x.kind === 'fb' && x.type_ref === s.fb);
+    if (b?.instance) instNames.add(b.instance.toUpperCase());
+  }
+  const isHandoff = (b: Block) =>
+    b.kind === 'st' && (b.params.CODE ?? '').includes('applied :=');
+  /* a handoff belongs to this group when a wire into it comes from a
+     variable block named after one of our instances */
+  const feedsFrom = (st: Block): boolean =>
+    net.wires.some(
+      (w) =>
+        w.dsts.some((d) => d.block === st.id) &&
+        (() => {
+          const sb = net.blocks.find((x) => x.id === w.src.block);
+          return sb?.kind === 'variable' && instNames.has((sb.name ?? '').toUpperCase());
+        })(),
+    );
+  let dead = new Set(net.blocks.filter((b) => isHandoff(b) && feedsFrom(b)).map((b) => b.id));
+  /* fallback: a lone handoff in the net is ours (single-tune projects) */
+  if (!dead.size) {
+    const all = net.blocks.filter(isHandoff);
+    if (all.length === 1) dead = new Set([all[0]!.id]);
+  }
+  // drop the previous handoff for this cfg — plus every wire touching
+  // it; dsts are re-created below
   net.blocks = net.blocks.filter((b) => !dead.has(b.id));
   net.wires = net.wires.filter(
     (w) => !dead.has(w.src.block) && !w.dsts.some((d) => dead.has(d.block)),
@@ -665,4 +706,154 @@ export function tunerFromPou(pou: Pou): TuneCfg | undefined {
     }
   }
   return undefined;
+}
+
+/** The blocks that make up one autotune group in a network. */
+export interface TuneGroup {
+  kind: TuneKind;
+  /** tuner FB blocks in SRC_DEFS order (may be sparse). */
+  srcs: (Block | undefined)[];
+  /** inline `st` handoff block (`applied :=` CODE). */
+  handoff?: Block;
+  /** controller FB receiving the tuned gains. */
+  ctl?: Block;
+}
+
+const isTuneHandoff = (b: Block): boolean =>
+  b.kind === 'st' && (b.params.CODE ?? '').includes('applied :=');
+
+/** variable-block name feeding `blk`'s `port` input, if any. */
+function tuneInVarName(net: Network, blk: number, port: PortSel): string {
+  const w = net.wires.find((w) => w.dsts.some((d) => d.block === blk && d.port === port));
+  const sb = w && net.blocks.find((x) => x.id === w.src.block);
+  return sb?.kind === 'variable' ? (sb.name ?? '') : '';
+}
+
+/**
+ * Resolve which autotune group a canvas block belongs to. Detects the
+ * kind by which tuner FB types are present in the net (lqg's
+ * Kalman+Lqr pair beats a lone LqrTune), then claims the clicked block
+ * if it's a tuner FB, the handoff st block, an instance alias var, or
+ * the gain-receiving controller.
+ */
+export function tuneGroupAt(
+  pou: Pou,
+  netIndex: number,
+  blockId: number,
+): TuneGroup | undefined {
+  const net = pou.networks[netIndex];
+  const b = net?.blocks.find((x) => x.id === blockId);
+  if (!net || !b) return undefined;
+  const has = (t: string) => net.blocks.some((x) => x.kind === 'fb' && x.type_ref === t);
+  /* candidate kinds ranked by how many of their src types are present;
+     ties prefer the kind whose FIRST src type exists (lqg's LqrTune
+     slot loses to a real lqr when no KalmanTune is around) */
+  const kinds = (Object.keys(SRC_DEFS) as TuneKind[])
+    .map((k) => ({
+      k,
+      score: SRC_DEFS[k].filter((s) => has(s.fb)).length,
+      first: has(SRC_DEFS[k][0]!.fb) ? 1 : 0,
+    }))
+    .filter((x) => x.score > 0)
+    .sort((a, b2) => b2.score - a.score || b2.first - a.first);
+  if (!kinds.length) return undefined;
+  const kind = kinds[0]!.k;
+  const defs = SRC_DEFS[kind];
+  const srcs = defs.map((s) => net.blocks.find((x) => x.kind === 'fb' && x.type_ref === s.fb));
+  const insts = srcs.map((s) => s?.instance).filter((s): s is string => !!s);
+
+  /* handoff: the 'applied :=' st block aliased to our instances —
+     prefer the one wired from our vars, else the only one in the net */
+  const handoffs = net.blocks.filter(isTuneHandoff);
+  const mine = (st: Block) =>
+    net.wires.some(
+      (w) =>
+        w.dsts.some((d) => d.block === st.id) &&
+        (() => {
+          const sb = net.blocks.find((x) => x.id === w.src.block);
+          return sb?.kind === 'variable' && insts.some((i) => sb.name === i);
+        })(),
+    );
+  const handoff = handoffs.find(mine) ?? (handoffs.length === 1 ? handoffs[0] : undefined);
+  /* ctl: fb whose instance names the var feeding handoff's CTL pin */
+  let ctl: Block | undefined;
+  if (handoff) {
+    const ctlVar = tuneInVarName(net, handoff.id, 'CTL');
+    if (ctlVar)
+      ctl = net.blocks.find(
+        (x) =>
+          x.kind === 'fb' &&
+          x.instance === ctlVar &&
+          !!controllerDef(x.type_ref),
+      );
+  }
+
+  /* membership: tuner fb / handoff / alias var / ctl */
+  const member =
+    (b.kind === 'fb' && defs.some((s) => s.fb === b.type_ref)) ||
+    b.id === handoff?.id ||
+    (b.kind === 'variable' &&
+      !!b.name &&
+      (insts.includes(b.name) || (ctl?.instance === b.name))) ||
+    b.id === ctl?.id;
+  if (!member) return undefined;
+  return { kind, srcs, handoff, ctl };
+}
+
+/**
+ * Recover a TuneCfg from a resolved group: kind/instances/params from
+ * the tuner blocks, apply/reset vars and ctl instance from the
+ * handoff wiring, run/pv/sp/out vars from the signal wires.
+ */
+export function tunerCfgFromGroup(net: Network, g: TuneGroup): TuneCfg | undefined {
+  const first = g.srcs.find((s) => s?.instance);
+  if (!first?.instance) return undefined;
+  const cfg: TuneCfg = { kind: g.kind, instance: first.instance, params: {} };
+  for (const s of g.srcs) {
+    if (!s) continue;
+    if (s !== first && s.instance && !cfg.instance2) cfg.instance2 = s.instance;
+    Object.assign((cfg.params ??= {}), s.params ?? {});
+  }
+  if (g.ctl?.instance) cfg.ctlInstance = g.ctl.instance;
+  const st = g.handoff;
+  if (st) {
+    for (const w of net.wires) {
+      for (const d of w.dsts) {
+        if (d.block !== st.id) continue;
+        const sb = net.blocks.find((x) => x.id === w.src.block);
+        if (sb?.kind === 'variable' && sb.name && sb.role === 'in') {
+          if (d.port === 'APPLY') cfg.applyVar = sb.name;
+          if (d.port === 'RESET') cfg.resetVar = sb.name;
+        }
+      }
+    }
+  }
+  /* signal vars: wires into tuner pins from interface var blocks, and
+     the tuner Out → plant-input var */
+  const inName = (blk: Block, port: string): string | undefined => {
+    const n = tuneInVarName(net, blk.id, port as PortSel);
+    return n || undefined;
+  };
+  for (const s of g.srcs) {
+    if (!s) continue;
+    const def = SRC_DEFS[g.kind][g.srcs.indexOf(s)]!;
+    if (def.fb !== 'FB_AtcTuneRules') {
+      cfg.runVar ??= inName(s, 'Execute');
+      cfg.resetVar ??= inName(s, 'Reset');
+    }
+    if (def.fb === 'FB_AtcRelayTune' || def.fb === 'FB_AtcStepIdent') {
+      cfg.pvVar ??= inName(s, 'Actual');
+      cfg.outVar ??= (() => {
+        const w = net.wires.find(
+          (w) => w.src.block === s.id && w.src.port === 'Out',
+        );
+        const vb = w?.dsts
+          .map((d) => net.blocks.find((x) => x.id === d.block))
+          .find((x) => x?.kind === 'variable');
+        return vb?.name || undefined;
+      })();
+    }
+    if (def.fb === 'FB_AtcRelayTune') cfg.spVar ??= inName(s, 'Setpoint');
+  }
+  return cfg;
 }

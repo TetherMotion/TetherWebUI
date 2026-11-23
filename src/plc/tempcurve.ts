@@ -27,10 +27,14 @@ export class TempCurve extends LitElement {
   declare pou?: Pou;
   /** persisted editor model for the selected POU (PlcProject.curves). */
   declare profile?: CurveProfile;
+  /** dialog mode — hides the insert/export buttons; the host applies
+      every change to the owning block group itself. */
+  declare dialog?: boolean;
 
   static properties = {
     pou: { attribute: false },
     profile: { attribute: false },
+    dialog: { type: Boolean },
     prof: { state: true },
     selSeg: { state: true },
   };
@@ -388,21 +392,27 @@ export class TempCurve extends LitElement {
               `
             : nothing}
           <span class="spacer"></span>
-          <button
-            class="chip-btn"
-            ?disabled=${!this.pou}
-            @click=${this.insert}
-            title="add profile blocks to the selected POU's first network"
-          >
-            insert into ${this.pou?.name ?? 'POU'}
-          </button>
-          <button
-            class="chip-btn"
-            @click=${this.exportSt}
-            title="emit a FUNCTION_BLOCK ST source instead"
-          >
-            export .st
-          </button>
+          ${
+            this.dialog
+              ? nothing
+              : html`
+                  <button
+                    class="chip-btn"
+                    ?disabled=${!this.pou}
+                    @click=${this.insert}
+                    title="add profile blocks to the selected POU's first network"
+                  >
+                    insert into ${this.pou?.name ?? 'POU'}
+                  </button>
+                  <button
+                    class="chip-btn"
+                    @click=${this.exportSt}
+                    title="emit a FUNCTION_BLOCK ST source instead"
+                  >
+                    export .st
+                  </button>
+                `
+          }
         </div>
         ${this.previewSvg()}
         <table class="plc-table curve-table">

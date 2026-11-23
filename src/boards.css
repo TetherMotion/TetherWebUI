@@ -1274,7 +1274,7 @@ tile-frame {
 }
 
 .ld-toolbar .chip-btn.active {
-  outline: 1px solid var(--accent, #6cf);
+  outline: 1px solid var(--blue);
 }
 
 .ld-svg {
@@ -1299,7 +1299,7 @@ tile-frame {
 .ld-sym.sel line,
 .ld-sym.sel rect,
 .ld-sym.sel circle {
-  stroke: var(--accent, #6cf);
+  stroke: var(--blue);
 }
 
 .ld-live {
@@ -1308,20 +1308,20 @@ tile-frame {
 }
 
 .ld-wire.sel polyline {
-  stroke: var(--accent, #6cf);
+  stroke: var(--blue);
 }
 
 .ld-wire-end {
   fill: var(--bg, #111);
-  stroke: var(--accent, #6cf);
+  stroke: var(--blue);
   stroke-width: 1.5;
   cursor: crosshair;
 }
 
 .ld-marquee {
-  fill: var(--accent, #6cf);
+  fill: var(--blue);
   fill-opacity: 0.08;
-  stroke: var(--accent, #6cf);
+  stroke: var(--blue);
   stroke-dasharray: 4 3;
 }
 
@@ -1490,7 +1490,8 @@ tile-frame {
   padding: 14px 16px;
   border-radius: 8px;
   border: 1px solid var(--glass-border);
-  background: var(--panel-bg, #1c1f26);
+  background: var(--glass-1);
+  box-shadow: 0 8px 30px var(--glass-shadow-deep);
   color: var(--text);
   font-size: 12px;
 }
@@ -1838,19 +1839,19 @@ tile-frame {
 }
 
 .curve-line {
-  stroke: var(--accent, #4af);
+  stroke: var(--blue);
   stroke-width: 2;
 }
 
 .curve-pt {
   fill: var(--input-bg);
-  stroke: var(--accent, #4af);
+  stroke: var(--blue);
   stroke-width: 2;
   cursor: grab;
 }
 
 .curve-pt.sel {
-  fill: var(--accent, #4af);
+  fill: var(--blue);
 }
 
 .curve-lab {
@@ -1936,9 +1937,9 @@ tile-frame {
   max-height: min(640px, 86%);
   border-radius: 10px;
   border: 1px solid var(--glass-border);
-  background: var(--panel-bg, #1c1f26);
+  background: var(--glass-1);
   color: var(--text);
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 16px 48px var(--glass-shadow-deep);
   overflow: hidden;
   font-size: 12px;
 }
@@ -2026,8 +2027,8 @@ tile-frame {
 }
 
 .fbd-lib-item:hover {
-  border-color: var(--accent, #6cf);
-  background: rgba(108, 204, 255, 0.08);
+  border-color: var(--blue);
+  background: var(--row-hover);
 }
 
 .fbd-lib-label {
@@ -2041,16 +2042,16 @@ tile-frame {
   font-size: 9px;
   padding: 0 4px;
   border-radius: 3px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--glass-2);
   color: var(--text-muted);
 }
 
 .fbd-lib-kind.k-device {
-  color: #8ef0a1;
+  color: var(--state-good);
 }
 
 .fbd-lib-kind.k-lib {
-  color: #c9a7ff;
+  color: var(--blue);
 }
 
 .fbd-lib-empty {
@@ -2096,7 +2097,7 @@ tile-frame {
   align-items: center;
   gap: 8px;
   font-size: 11px;
-  color: var(--accent, #6cf);
+  color: var(--blue);
   padding: 2px 6px;
   border: 1px dashed var(--glass-border);
   border-radius: 6px;
@@ -2104,7 +2105,7 @@ tile-frame {
 
 /* ---- FBD typing + live pin values ---- */
 .fbd-pin-live {
-  fill: var(--accent, #4af);
+  fill: var(--blue);
   font-size: 9px;
   opacity: 0.85;
 }
@@ -2199,6 +2200,21 @@ tile-frame {
   font-size: 11px;
   color: var(--text-muted);
   margin-bottom: 14px;
+}
+
+/* block-scoped curve/tune editor dialogs — wider than the template
+   picker, scrollable since the editors are tall */
+.plc-blockdlg {
+  max-width: min(960px, 94vw);
+  width: 94vw;
+  max-height: 92vh;
+  overflow: auto;
+}
+
+.plc-dlg-btns {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
 }
 
 .plc-tpl-grid {
@@ -3052,7 +3068,7 @@ tile-frame {
   color: var(--ok, #4caf7d);
 }
 .plc-step-active {
-  color: var(--accent, #6aa9ff);
+  color: var(--blue);
 }
 .plc-step-todo {
   color: var(--dim, #5a6470);

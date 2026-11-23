@@ -27,11 +27,15 @@ export class TempTune extends LitElement {
   declare tune?: TuneCfg;
   /** live catalog values (hub.values) for the tuner readout. */
   declare values?: Map<string, unknown>;
+  /** dialog mode — hides the insert button; the host applies every
+      change to the owning block group itself. */
+  declare dialog?: boolean;
 
   static properties = {
     pou: { attribute: false },
     tune: { attribute: false },
     values: { attribute: false },
+    dialog: { type: Boolean },
     cfg: { state: true },
   };
 
@@ -171,14 +175,18 @@ export class TempTune extends LitElement {
             />
           </label>
           <span class="spacer"></span>
-          <button
-            class="chip-btn"
-            ?disabled=${!this.pou}
-            @click=${this.insert}
-            title="add tuner blocks + handoff to the selected POU's first network"
-          >
-            insert into ${this.pou?.name ?? 'POU'}
-          </button>
+          ${
+            this.dialog
+              ? nothing
+              : html`<button
+                  class="chip-btn"
+                  ?disabled=${!this.pou}
+                  @click=${this.insert}
+                  title="add tuner blocks + handoff to the selected POU's first network"
+                >
+                  insert into ${this.pou?.name ?? 'POU'}
+                </button>`
+          }
         </div>
         <div class="curve-head">
           <label

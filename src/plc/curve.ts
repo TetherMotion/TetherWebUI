@@ -254,6 +254,18 @@ export function applyToPou(pou: Pou, p: CurveProfile): void {
     };
     pou.networks.push(net);
   }
+  applyProfileToNet(pou, pou.networks.indexOf(net), p);
+}
+
+/**
+ * Insert or refresh a profile inside ONE network — used by the block
+ * editor dialog so a POU can host several independent curves. Matches
+ * existing profile blocks in that net (preferring `p.instance`) and
+ * updates them in place; appends the block set when none exist.
+ */
+export function applyProfileToNet(pou: Pou, netIndex: number, p: CurveProfile): void {
+  const net = pou.networks[netIndex];
+  if (!net) return;
   const y = 2 + Math.floor(net.blocks.length / 6) * 6;
   const cfgId = nextNodeId(pou);
   const profFbId = cfgId + 1;
@@ -263,10 +275,17 @@ export function applyToPou(pou: Pou, p: CurveProfile): void {
   // Re-insert on a POU that already has a profile: update the existing
   // blocks in place (new SEG table, new cycle time) and keep the user's
   // wiring. Appending again would duplicate the instance (INST_REUSE).
-  const oldFb = net.blocks.find((b) => b.kind === 'fb' && b.type_ref === 'FB_AtcProfile');
-  const oldCfg = net.blocks.find(
-    (b) => b.kind === 'st' && (b.params.CODE ?? '').includes('PROF.SEG['),
-  );
+  // prefer the group this profile belongs to (instance match, then the
+  // cfg wired to that instance's PROF pin) before falling back to the
+  // first profile blocks in the net
+  const oldFb =
+    net.blocks.find(
+      (b) => b.kind === 'fb' && b.type_ref === 'FB_AtcProfile' && b.instance === p.instance,
+    ) ?? net.blocks.find((b) => b.kind === 'fb' && b.type_ref === 'FB_AtcProfile');
+  const oldCfg =
+    net.blocks.find(
+      (b) => isProfileCfg(b) && oldFb && inVarName(net, b.id, 'PROF') === oldFb.instance,
+    ) ?? net.blocks.find(isProfileCfg);
   if (oldFb && oldCfg) {
     oldFb.instance = p.instance;
     oldFb.params = { ...oldFb.params, CycleTime: num(p.cycleTime) };
@@ -508,6 +527,185 @@ function wirePwm(
   wire({ block: blk.id, port: 'Q' }, [{ block: out.id, port: 0 }]);
 }
 
+/** The blocks that make up one temperature-profile group in a network. */
+export interface ProfileGroup {
+  /** FB_AtcProfile instance block. */
+  profFb?: Block;
+  /** inline `st` block writing PROF.SEG[] (the segment table). */
+  cfg?: Block;
+  /** controller FB (FB_AtcPid & friends) fed by prof.SP. */
+  ctl?: Block;
+  /** FB_AtcPwm heater stage driven by the controller output. */
+  pwm?: Block;
+}
+
+const isProfileCfg = (b: Block): boolean =>
+  b.kind === 'st' && (b.params.CODE ?? '').includes('PROF.SEG[');
+
+/** variable-block name feeding `blk`'s `port` input, if any. */
+function inVarName(net: Network, blk: number, port: PortSel): string {
+  const w = net.wires.find((w) => w.dsts.some((d) => d.block === blk && d.port === port));
+  const sb = w && net.blocks.find((x) => x.id === w.src.block);
+  return sb?.kind === 'variable' ? (sb.name ?? '') : '';
+}
+
+/**
+ * Resolve which profile group a canvas block belongs to — the
+ * FB_AtcProfile instance, its `st` config block, the controller FB and
+ * the PWM stage. Returns undefined for unrelated blocks.
+ */
+export function profileGroupAt(
+  pou: Pou,
+  netIndex: number,
+  blockId: number,
+): ProfileGroup | undefined {
+  const net = pou.networks[netIndex];
+  const b = net?.blocks.find((x) => x.id === blockId);
+  if (!net || !b) return undefined;
+  const profFbs = net.blocks.filter((x) => x.kind === 'fb' && x.type_ref === 'FB_AtcProfile');
+  const cfgs = net.blocks.filter(isProfileCfg);
+  if (!profFbs.length && !cfgs.length) return undefined;
+
+  const profFbForCfg = (cfg: Block) =>
+    profFbs.find((f) => f.instance && inVarName(net, cfg.id, 'PROF') === f.instance) ??
+    (profFbs.length === 1 ? profFbs[0] : undefined);
+  const cfgForFb = (fb: Block) =>
+    cfgs.find((c) => inVarName(net, c.id, 'PROF') === fb.instance) ??
+    (cfgs.length === 1 ? cfgs[0] : undefined);
+  const ctlForFb = (fb: Block) => {
+    const w = net.wires.find((w) => w.src.block === fb.id && w.src.port === 'SP');
+    return w?.dsts
+      .map((d) => net.blocks.find((x) => x.id === d.block))
+      .find((x) => x?.kind === 'fb' && controllerDef(x.type_ref));
+  };
+  const pwmForCtl = (ctl: Block | undefined) => {
+    const cd = ctl && controllerDef(ctl.type_ref);
+    if (!ctl || !cd) return undefined;
+    const w = net.wires.find((w) => w.src.block === ctl.id && w.src.port === cd.out);
+    return w?.dsts
+      .map((d) => net.blocks.find((x) => x.id === d.block))
+      .find((x) => x?.kind === 'fb' && x.type_ref === 'FB_AtcPwm');
+  };
+  const fill = (fb?: Block, cfg?: Block): ProfileGroup | undefined => {
+    if (!fb && !cfg) return undefined;
+    const ctl = fb ? ctlForFb(fb) : undefined;
+    return { profFb: fb, cfg: cfg ?? (fb ? cfgForFb(fb) : undefined), ctl, pwm: pwmForCtl(ctl) };
+  };
+  /* controller → its profile: the prof.SP → ctl.<sp> wire */
+  const groupForCtl = (ctl: Block): ProfileGroup | undefined => {
+    const cd = controllerDef(ctl.type_ref);
+    const w =
+      cd &&
+      net.wires.find((w) =>
+        w.dsts.some((d) => d.block === ctl.id && d.port === cd.sp),
+      );
+    const fb = w && net.blocks.find((x) => x.id === w.src.block && x.type_ref === 'FB_AtcProfile');
+    const g = fb ? fill(fb, cfgForFb(fb)) : undefined;
+    if (g) {
+      g.ctl = ctl;
+      g.pwm = pwmForCtl(ctl);
+      return g;
+    }
+    return { ctl, pwm: pwmForCtl(ctl) };
+  };
+
+  if (b.kind === 'fb' && b.type_ref === 'FB_AtcProfile') return fill(b, cfgForFb(b));
+  if (isProfileCfg(b)) return fill(profFbForCfg(b), b);
+  if (b.kind === 'fb' && controllerDef(b.type_ref)) return groupForCtl(b);
+  if (b.kind === 'fb' && b.type_ref === 'FB_AtcPwm') {
+    /* pwm ← ctl output; find the controller feeding its Duty pin */
+    const w = net.wires.find((w) => w.dsts.some((d) => d.block === b.id && d.port === 'Duty'));
+    const ctl = w && net.blocks.find((x) => x.id === w.src.block);
+    if (!ctl || !controllerDef(ctl.type_ref)) return undefined;
+    const g = groupForCtl(ctl);
+    if (g) g.pwm = b;
+    return g;
+  }
+  if (b.kind === 'variable' && b.name) {
+    const up = b.name.toUpperCase();
+    const fb = profFbs.find((f) => f.instance?.toUpperCase() === up);
+    if (fb) return fill(fb, cfgForFb(fb));
+    const ctl = net.blocks.find(
+      (x) => x.kind === 'fb' && controllerDef(x.type_ref) && x.instance?.toUpperCase() === up,
+    );
+    if (ctl) return groupForCtl(ctl);
+    const pwm = net.blocks.find(
+      (x) => x.kind === 'fb' && x.type_ref === 'FB_AtcPwm' && x.instance?.toUpperCase() === up,
+    );
+    if (pwm) {
+      const w = net.wires.find((w) => w.dsts.some((d) => d.block === pwm.id && d.port === 'Duty'));
+      const ctl2 = w && net.blocks.find((x) => x.id === w.src.block);
+      if (ctl2 && controllerDef(ctl2.type_ref)) {
+        const g = groupForCtl(ctl2);
+        if (g) g.pwm = pwm;
+        return g;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Recover a CurveProfile from a resolved group: instance/cycle time
+ * from the FB_AtcProfile block, controller from the ctl block, the
+ * segment table decoded from the cfg st block's CODE, and the var
+ * wiring names.
+ */
+export function profileFromGroup(net: Network, g: ProfileGroup): CurveProfile | undefined {
+  const fb = g.profFb;
+  const cfg = g.cfg;
+  if (!fb && !cfg) return undefined;
+  const prof = defaultProfile();
+  if (fb) {
+    prof.instance = fb.instance ?? prof.instance;
+    prof.cycleTime = Number(fb.params.CycleTime ?? prof.cycleTime) || prof.cycleTime;
+  }
+  if (g.ctl) {
+    prof.controller = g.ctl.type_ref;
+    prof.ctlInstance = g.ctl.instance ?? prof.ctlInstance;
+  } else {
+    prof.controller = '';
+  }
+  if (cfg) decodeInto(prof, cfg.params.CODE ?? '');
+  // var blocks feeding RUN/PV/OUT name the wiring
+  const srcOf = (block: number, port: string) =>
+    net.wires.find((w) => w.dsts.some((d) => d.block === block && d.port === port))?.src.block;
+  const nameOf = (id?: number) => net.blocks.find((b) => b.id === id)?.name ?? '';
+  const dstNameOf = (block: number, port: string) => {
+    const w = net.wires.find((w) => w.src.block === block && w.src.port === port);
+    return nameOf(w?.dsts.find((d) => net.blocks.some((b) => b.id === d.block && b.kind === 'variable'))?.block);
+  };
+  if (fb) {
+    prof.runVar = nameOf(srcOf(fb.id, 'RUN'));
+    prof.pvVar = nameOf(srcOf(fb.id, 'PV'));
+    prof.holdVar = nameOf(srcOf(fb.id, 'HOLD'));
+    prof.resetVar = nameOf(srcOf(fb.id, 'RESET'));
+    prof.busyVar = dstNameOf(fb.id, 'Busy') || undefined;
+    prof.doneVar = dstNameOf(fb.id, 'Done') || undefined;
+  }
+  if (g.pwm) {
+    const pwmBlk = g.pwm;
+    prof.pwm = {
+      instance: pwmBlk.instance ?? 'pwm',
+      period: Number(pwmBlk.params.Period ?? 1.0) || 1.0,
+      minOn: Number(pwmBlk.params.MinOn ?? 0.0) || 0.0,
+      outVar: dstNameOf(pwmBlk.id, 'Q'),
+    };
+  }
+  if (g.ctl) {
+    // the controller output is a source pin: its consumer names outVar
+    // (skipped when the duty feeds a PWM block instead)
+    const outPort = controllerDef(g.ctl.type_ref)!.out;
+    const w = net.wires.find((w) => w.src.block === g.ctl!.id && w.src.port === outPort);
+    const dst = w?.dsts.find((d) => {
+      const b = net.blocks.find((x) => x.id === d.block);
+      return b?.kind === 'variable';
+    });
+    prof.outVar = nameOf(dst?.block) || undefined;
+  }
+  return prof;
+}
+
 /**
  * Recover a profile from an existing POU (imported project or a project
  * saved before the Curves pane existed): read the FB_AtcProfile instance
@@ -515,64 +713,18 @@ function wirePwm(
  * into the segment table. Returns undefined when the POU has no profile.
  */
 export function profileFromPou(pou: Pou): CurveProfile | undefined {
-  const prof = defaultProfile();
-  let found = false;
   for (const net of pou.networks) {
     const fb = net.blocks.find((b) => b.kind === 'fb' && b.type_ref === 'FB_AtcProfile');
-    const cfg = net.blocks.find(
-      (b) => b.kind === 'st' && (b.params.CODE ?? '').includes('PROF.SEG['),
-    );
+    const cfg = net.blocks.find(isProfileCfg);
     if (!fb || !cfg) continue;
-    found = true;
-    prof.instance = fb.instance ?? prof.instance;
-    prof.cycleTime = Number(fb.params.CycleTime ?? prof.cycleTime) || prof.cycleTime;
     const ctl = net.blocks.find(
       (b) => b.kind === 'fb' && b.type_ref !== 'FB_AtcProfile' && controllerDef(b.type_ref),
     );
-    if (ctl) {
-      prof.controller = ctl.type_ref;
-      prof.ctlInstance = ctl.instance ?? prof.ctlInstance;
-    } else {
-      prof.controller = '';
-    }
-    decodeInto(prof, cfg.params.CODE ?? '');
-    // var blocks feeding RUN/PV/OUT name the wiring
-    const srcOf = (block: number, port: string) =>
-      net.wires.find((w) => w.dsts.some((d) => d.block === block && d.port === port))?.src.block;
-    const nameOf = (id?: number) => net.blocks.find((b) => b.id === id)?.name ?? '';
-    const dstNameOf = (block: number, port: string) => {
-      const w = net.wires.find((w) => w.src.block === block && w.src.port === port);
-      return nameOf(w?.dsts.find((d) => net.blocks.some((b) => b.id === d.block && b.kind === 'variable'))?.block);
-    };
-    prof.runVar = nameOf(srcOf(fb.id, 'RUN'));
-    prof.pvVar = nameOf(srcOf(fb.id, 'PV'));
-    prof.holdVar = nameOf(srcOf(fb.id, 'HOLD'));
-    prof.resetVar = nameOf(srcOf(fb.id, 'RESET'));
-    prof.busyVar = dstNameOf(fb.id, 'Busy') || undefined;
-    prof.doneVar = dstNameOf(fb.id, 'Done') || undefined;
     const pwmBlk = net.blocks.find((b) => b.kind === 'fb' && b.type_ref === 'FB_AtcPwm');
-    if (pwmBlk) {
-      prof.pwm = {
-        instance: pwmBlk.instance ?? 'pwm',
-        period: Number(pwmBlk.params.Period ?? 1.0) || 1.0,
-        minOn: Number(pwmBlk.params.MinOn ?? 0.0) || 0.0,
-        outVar: dstNameOf(pwmBlk.id, 'Q'),
-      };
-    }
-    if (ctl) {
-      // the controller output is a source pin: its consumer names outVar
-      // (skipped when the duty feeds a PWM block instead)
-      const outPort = controllerDef(ctl.type_ref)!.out;
-      const w = net.wires.find((w) => w.src.block === ctl.id && w.src.port === outPort);
-      const dst = w?.dsts.find((d) => {
-        const b = net.blocks.find((x) => x.id === d.block);
-        return b?.kind === 'variable';
-      });
-      prof.outVar = nameOf(dst?.block) || undefined;
-    }
-    break;
+    const prof = profileFromGroup(net, { profFb: fb, cfg, ctl, pwm: pwmBlk });
+    if (prof) return prof;
   }
-  return found ? prof : undefined;
+  return undefined;
 }
 
 /** Parse `PROF.<field> := <value>;` lines into `p` (tolerant). */

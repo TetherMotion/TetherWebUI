@@ -40,6 +40,8 @@ import {
 } from './deploymap';
 import type { ProjectBinding } from './plc-ide';
 import { showContextMenu, type CtxItem } from '../ctxmenu';
+import { profileGroupAt } from './curve';
+import { TUNER_FB_TYPES, tuneGroupAt } from './tune';
 
 /** Compact live-value formatting for pin labels. */
 function fmtLive(v: unknown): string {
@@ -525,6 +527,48 @@ export class FbdCanvas extends LitElement {
     ]);
   }
 
+  /** Does this block belong to a temperature-profile or autotune
+      group? Profile/tuner-specific blocks win; shared controllers
+      resolve to whichever group actually references them. */
+  private editKindFor(b: Block): 'curve' | 'tune' | undefined {
+    const pou = this.pou;
+    if (!pou) return undefined;
+    const ni = this.netIndex;
+    const g = profileGroupAt(pou, ni, b.id);
+    const t = tuneGroupAt(pou, ni, b.id);
+    const isProfileBlock =
+      b.kind === 'fb' &&
+      (b.type_ref === 'FB_AtcProfile' || b.type_ref === 'FB_AtcPwm');
+    const isProfileCfg = b.kind === 'st' && (b.params.CODE ?? '').includes('PROF.SEG[');
+    const isTuner =
+      (b.kind === 'fb' && TUNER_FB_TYPES.has(b.type_ref)) ||
+      (b.kind === 'st' && (b.params.CODE ?? '').includes('applied :='));
+    if (isTuner) return t ? 'tune' : undefined;
+    if (isProfileBlock || isProfileCfg) return g && (g.profFb || g.cfg) ? 'curve' : undefined;
+    if (t?.ctl?.id === b.id) return 'tune';
+    if (g && (g.profFb || g.cfg)) return 'curve';
+    return t ? 'tune' : undefined;
+  }
+
+  /** Ask the host to open the curve/tune editor dialog for this block. */
+  private emitBlockEdit(kind: 'curve' | 'tune', b: Block): void {
+    this.dispatchEvent(
+      new CustomEvent(kind === 'curve' ? 'edit-curve' : 'edit-tune', {
+        detail: { pou: this.pou, netIndex: this.netIndex, blockId: b.id },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
+  /** Double-click a block — opens its curve/tune editor when the block
+      belongs to one of those groups. */
+  private onBlockDblClick(e: MouseEvent, b: Block): void {
+    e.stopPropagation();
+    const k = this.editKindFor(b);
+    if (k) this.emitBlockEdit(k, b);
+  }
+
   /** Right-click on a block — selects it first if it wasn't selected. */
   private onBlockMenu(e: MouseEvent, b: Block): void {
     e.preventDefault();
@@ -534,7 +578,27 @@ export class FbdCanvas extends LitElement {
       this.selWire = undefined;
       this.selNote = undefined;
     }
-    const items: CtxItem[] = [
+    const items: CtxItem[] = [];
+    const ek = this.editKindFor(b);
+    if (ek === 'curve')
+      items.push(
+        {
+          label: 'Edit curve…',
+          title: 'open the temperature-profile editor for this block',
+          action: () => this.emitBlockEdit('curve', b),
+        },
+        { sep: true },
+      );
+    if (ek === 'tune')
+      items.push(
+        {
+          label: 'Edit tune…',
+          title: 'open the autotune configurator for this block',
+          action: () => this.emitBlockEdit('tune', b),
+        },
+        { sep: true },
+      );
+    items.push(
       {
         label: this.selIds.size > 1 ? `Copy ${this.selIds.size} blocks` : 'Copy',
         hint: 'Ctrl+C',
@@ -550,7 +614,7 @@ export class FbdCanvas extends LitElement {
           this.paste();
         },
       },
-    ];
+    );
     if (this.selIds.size > 1)
       items.push(
         { sep: true },
@@ -2395,6 +2459,7 @@ export class FbdCanvas extends LitElement {
     return svg`
       <g class="fbd-block ${sel ? 'sel' : ''} ${flagged || bad() ? 'diag' : ''}" transform="translate(${x} ${y})"
          @pointerdown=${(e: PointerEvent) => this.onBlockDown(e, b)}
+         @dblclick=${(e: MouseEvent) => this.onBlockDblClick(e, b)}
          @contextmenu=${(e: MouseEvent) => this.onBlockMenu(e, b)}>
         <rect class="fbd-rect" width="${w}" height="${h}" rx="3"></rect>
         <text class="fbd-title" x="${w / 2}" y="13">${title}</text>

@@ -120,8 +120,22 @@ import {
   projectLibRefs,
   type CatalogLib,
 } from './catalog';
-import { CurveProfile, defaultProfile, profileFromPou, sourceStem } from './curve';
-import { TuneCfg, tunerFromPou } from './tune';
+import {
+  applyProfileToNet,
+  CurveProfile,
+  defaultProfile,
+  profileFromGroup,
+  profileFromPou,
+  profileGroupAt,
+  sourceStem,
+} from './curve';
+import {
+  applyTunerToNet,
+  TuneCfg,
+  tunerCfgFromGroup,
+  tunerFromPou,
+  tuneGroupAt,
+} from './tune';
 import {
   instantiateTemplate,
   PROJECT_TEMPLATES,
@@ -703,6 +717,11 @@ export class TetherPlcIde extends LitElement {
   private projFiles: pa.ProjectFile[] = [];
   private projRecent: string[] = [];
   private projOpenPath = '';
+  /** Block-scoped curve editor dialog (opened from the FBD canvas). */
+  private curveDlg?: { pou: Pou; netIndex: number; blockId: number; prof: CurveProfile };
+  /** Block-scoped tune editor dialog (opened from the FBD canvas). */
+  private tuneDlg?: { pou: Pou; netIndex: number; blockId: number; cfg: TuneCfg };
+
   /** project/workspace picker overlay (opened from the shell navbar). */
   private projPickerOpen = false;
   private projPickerPath = '';
@@ -1489,6 +1508,8 @@ export class TetherPlcIde extends LitElement {
         ${this.dock()} ${this.tplPicker ? this.templatePicker() : nothing}
         ${this.historyOpen ? this.historyDialog() : nothing}
         ${this.projPickerOpen ? this.projectPicker() : nothing}
+        ${this.curveDlg ? this.curveDialog() : nothing}
+        ${this.tuneDlg ? this.tuneDialog() : nothing}
       </div>
     `;
   }
@@ -1692,8 +1713,6 @@ export class TetherPlcIde extends LitElement {
     const kinds: { id: EditorTab['editor']; label: string }[] = [
       { id: 'fbd', label: 'FBD' },
       { id: 'st', label: 'ST' },
-      { id: 'curve', label: 'Curve' },
-      { id: 'tune', label: 'Tune' },
     ];
     return html`<div class="plc-edkind">
       ${kinds.map(
@@ -1716,9 +1735,13 @@ export class TetherPlcIde extends LitElement {
       return html`<div class="plc-dim plc-edempty">
         <p>No document open.</p>
         <p>
-          Click a POU in the explorer to open its function-block diagram, or use
-          <b>+PRG</b> / <b>+FB</b> / <b>+FN</b> to create one. Each POU opens as a
-          tab — switch its editor between FBD, ST, Curve and Tune above.
+          Click a POU (program organization unit — a program, function block
+          or function) in the explorer to open its function-block diagram, or
+          use <b>+PRG</b> / <b>+FB</b> / <b>+FN</b> to create one. Each POU
+          opens as a tab — switch its editor between FBD and ST
+          above. Temperature profiles and autotune are properties of
+          individual FBD blocks: double-click one (or right-click →
+          Edit) to open its editor.
         </p>
       </div>`;
     }
@@ -2141,15 +2164,16 @@ export class TetherPlcIde extends LitElement {
           >
         </div>
         <div class="plc-tree-head">
-          <span>POUs</span>
-          <button class="chip-btn" title="add a new program (PRG)" @click=${() => this.onNewPou('program')}>+PRG</button>
-          <button class="chip-btn" title="add a new function block (FB)" @click=${() => this.onNewPou('function_block')}>+FB</button>
-          <button class="chip-btn" title="add a new function (FUN)" @click=${() => this.onNewPou('function')}>+FN</button>
+          <span title="Program Organization Units — the programs, function blocks and functions your application is built from (IEC 61131-3)">POUs</span>
+          <button class="chip-btn" title="add a Program — top-level cyclic logic, bound to a task and run every scan" @click=${() => this.onNewPou('program')}>+PRG</button>
+          <button class="chip-btn" title="add a Function Block — reusable stateful logic with its own memory (timers, counters, edge detection)" @click=${() => this.onNewPou('function_block')}>+FB</button>
+          <button class="chip-btn" title="add a Function — stateless reusable logic; same inputs always give the same output" @click=${() => this.onNewPou('function')}>+FN</button>
         </div>
         ${fbd.pous.map(
           (pou) => html`
             <div
               class="plc-tree-pou ${sel === pou.id ? 'sel' : ''}"
+              title="${pou.kind === 'program' ? 'program — top-level cyclic logic' : pou.kind === 'function_block' ? 'function block — stateful reusable logic' : 'function — stateless reusable logic'} — click to edit, right-click for actions"
               @click=${() => {
                 this.selNet = 0;
                 this.openTab(pou.id, 'fbd');
@@ -2167,6 +2191,7 @@ export class TetherPlcIde extends LitElement {
                     (n, i) => html`
                       <div
                         class="plc-tree-net ${this.selNet === i ? 'sel' : ''}"
+                        title="network — one sheet/rung of wired blocks inside the POU, executed top to bottom"
                         @click=${() => {
                           this.selNet = i;
                           this.openTab(pou.id, 'fbd');
@@ -2184,17 +2209,11 @@ export class TetherPlcIde extends LitElement {
         )}
         <div
           class="plc-tree-pou ${this.selPou === '__globals' ? 'sel' : ''}"
+          title="global variables — declared once, visible to every POU in the project"
           @click=${() => this.openTab('__globals', 'globals')}
           @contextmenu=${(e: MouseEvent) => this.globalsMenu(e)}
         >
           <span class="plc-kind">VAR</span> globals
-        </div>
-        <div
-          class="plc-tree-pou ${this.selPou === '__devices' ? 'sel' : ''}"
-          @click=${() => this.openTab('__devices', 'devices')}
-          @contextmenu=${(e: MouseEvent) => this.devicesMenu(e)}
-        >
-          <span class="plc-kind">DEV</span> devices
         </div>
         ${
           fbd.tasks.length
@@ -2338,13 +2357,19 @@ export class TetherPlcIde extends LitElement {
         label: 'Move earlier',
         title: 'run this network before the previous one',
         disabled: i === 0,
-        action: () => this.moveNetwork(pou, -1),
+        action: () => {
+          this.selNet = i;
+          this.moveNetwork(pou, -1);
+        },
       },
       {
         label: 'Move later',
         title: 'run this network after the next one',
         disabled: i >= pou.networks.length - 1,
-        action: () => this.moveNetwork(pou, 1),
+        action: () => {
+          this.selNet = i;
+          this.moveNetwork(pou, 1);
+        },
       },
       { sep: true },
       {
@@ -2362,7 +2387,6 @@ export class TetherPlcIde extends LitElement {
         label: 'Delete network',
         danger: true,
         title: 'remove this network and all its blocks/wires — cannot be undone',
-        disabled: pou.networks.length <= 1,
         action: () => this.delNetwork(pou, i),
       },
     ]);
@@ -2383,17 +2407,6 @@ export class TetherPlcIde extends LitElement {
           this.openTab('__globals', 'globals');
           this.addGlobalVar();
         },
-      },
-    ]);
-  }
-
-  private devicesMenu(e: MouseEvent): void {
-    e.preventDefault();
-    showContextMenu(e.clientX, e.clientY, [
-      {
-        label: 'Open devices',
-        title: 'open the device/terminal channel editor — process-image bindings for field devices',
-        action: () => this.openTab('__devices', 'devices'),
       },
     ]);
   }
@@ -2521,9 +2534,12 @@ export class TetherPlcIde extends LitElement {
   }
 
   private delNetwork(pou: Pou, i: number): void {
-    if (pou.networks.length <= 1 || i < 0 || i >= pou.networks.length) return;
+    if (i < 0 || i >= pou.networks.length) return;
     pou.networks.splice(i, 1);
-    this.selNet = Math.min(this.selNet, pou.networks.length - 1);
+    /* keep selNet on the same network — indices above the deleted one
+       shift down; clamp into range (a POU may end up with zero nets) */
+    if (i < this.selNet) this.selNet--;
+    this.selNet = Math.max(0, Math.min(this.selNet, pou.networks.length - 1));
     this.save();
   }
 
@@ -2903,6 +2919,10 @@ export class TetherPlcIde extends LitElement {
                 .ioBindings=${projectIoBindingsEx(this.project)}
                 @change=${() => this.save()}
                 @need-libsrc=${(e: CustomEvent<{ lib: string; file: string }>) => this.onNeedLibSrc(e)}
+                @edit-curve=${(e: CustomEvent<{ pou: Pou; netIndex: number; blockId: number }>) =>
+                  this.onBlockEditCurve(e)}
+                @edit-tune=${(e: CustomEvent<{ pou: Pou; netIndex: number; blockId: number }>) =>
+                  this.onBlockEditTune(e)}
               ></fbd-canvas>`
         }
       </div>
@@ -2993,6 +3013,124 @@ export class TetherPlcIde extends LitElement {
           this.requestUpdate();
         }}
       ></temp-tune>
+    `;
+  }
+
+  // ---- block-scoped curve/tune dialogs ---------------------------------
+
+  /** FBD canvas asked to edit the profile group owning `blockId`. */
+  private onBlockEditCurve(
+    e: CustomEvent<{ pou: Pou; netIndex: number; blockId: number }>,
+  ): void {
+    const { pou, netIndex, blockId } = e.detail;
+    const g = profileGroupAt(pou, netIndex, blockId);
+    const net = pou.networks[netIndex];
+    const prof = (net && g ? profileFromGroup(net, g) : undefined) ?? defaultProfile();
+    this.curveDlg = { pou, netIndex, blockId, prof };
+    this.requestUpdate();
+  }
+
+  /** FBD canvas asked to edit the autotune group owning `blockId`. */
+  private onBlockEditTune(
+    e: CustomEvent<{ pou: Pou; netIndex: number; blockId: number }>,
+  ): void {
+    const { pou, netIndex, blockId } = e.detail;
+    const g = tuneGroupAt(pou, netIndex, blockId);
+    const net = pou.networks[netIndex];
+    const cfg =
+      (net && g ? tunerCfgFromGroup(net, g) : undefined) ??
+      ({ kind: 'relay', instance: 'tune' } as TuneCfg);
+    this.tuneDlg = { pou, netIndex, blockId, cfg };
+    this.requestUpdate();
+  }
+
+  private closeCurveDlg(): void {
+    this.curveDlg = undefined;
+    this.requestUpdate();
+  }
+
+  private closeTuneDlg(): void {
+    this.tuneDlg = undefined;
+    this.requestUpdate();
+  }
+
+  /** Curve editor dialog — every change rewrites the owning block
+      group's blocks in place (segment CODE, instances, wiring). */
+  private curveDialog(): TemplateResult {
+    const d = this.curveDlg!;
+    return html`
+      <div
+        class="plc-tpl-overlay"
+        @click=${(e: Event) => {
+          if (e.target === e.currentTarget) this.closeCurveDlg();
+        }}
+      >
+        <div class="plc-tpl-dialog plc-blockdlg">
+          <div class="plc-tpl-title">
+            temperature profile — ${d.pou.name} · network ${d.netIndex + 1}
+          </div>
+          <temp-curve
+            dialog
+            .pou=${d.pou}
+            .profile=${d.prof}
+            @change=${(e: CustomEvent<CurveProfile>) => {
+              d.prof = e.detail;
+              applyProfileToNet(d.pou, d.netIndex, e.detail);
+              this.save();
+              (this.querySelector('fbd-canvas') as { requestUpdate?: () => void } | null)?.requestUpdate?.();
+            }}
+          ></temp-curve>
+          <div class="plc-dlg-btns">
+            <button
+              class="chip-btn"
+              title="close the profile editor — changes are already applied to the blocks"
+              @click=${() => this.closeCurveDlg()}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  /** Tune editor dialog — every change rewrites the owning tuner group. */
+  private tuneDialog(): TemplateResult {
+    const d = this.tuneDlg!;
+    return html`
+      <div
+        class="plc-tpl-overlay"
+        @click=${(e: Event) => {
+          if (e.target === e.currentTarget) this.closeTuneDlg();
+        }}
+      >
+        <div class="plc-tpl-dialog plc-blockdlg">
+          <div class="plc-tpl-title">
+            autotune — ${d.pou.name} · network ${d.netIndex + 1}
+          </div>
+          <temp-tune
+            dialog
+            .pou=${d.pou}
+            .tune=${d.cfg}
+            .values=${this.hub ? new Map(this.hub.values) : undefined}
+            @change=${(e: CustomEvent<TuneCfg>) => {
+              d.cfg = e.detail;
+              applyTunerToNet(d.pou, d.netIndex, e.detail);
+              this.save();
+              (this.querySelector('fbd-canvas') as { requestUpdate?: () => void } | null)?.requestUpdate?.();
+            }}
+          ></temp-tune>
+          <div class="plc-dlg-btns">
+            <button
+              class="chip-btn"
+              title="close the tuner editor — changes are already applied to the blocks"
+              @click=${() => this.closeTuneDlg()}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
     `;
   }
 
@@ -4695,8 +4833,8 @@ export class TetherPlcIde extends LitElement {
       return html`<div class="plc-dev-doc tile-scroll">
         <h3>Devices</h3>
         <p class="plc-dim">
-          no POU yet — add one with <b>+PRG</b> in the Explorer first; device
-          blocks need a program to live in.
+          no POU yet — add a program with <b>+PRG</b> in the Explorer first;
+          device blocks live inside a program's FBD network.
         </p>
       </div>`;
     }
